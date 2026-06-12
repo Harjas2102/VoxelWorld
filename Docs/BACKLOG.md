@@ -6,23 +6,13 @@
 
 ---
 
-## Phase 0 — Environment (NOW)
+## Phase 0 — Environment (T-001…T-005 done, see Done log)
 
-- **T-001** Install Epic Games Launcher + UE 5.7.x to NVMe (verify 250GB+ free first)
-- **T-002** Create Third Person template project (Blueprint, Desktop, Max quality,
-  Starter Content ON). Survive first shader compile. Walk the mannequin around.
-- **T-003** Multiplayer PIE test: Play dropdown → 3 players, Listen Server.
-  Confirm movement replicates across all three windows.
-- **T-004** Git + Git LFS init in project root with the provided
-  `.gitattributes` / `.gitignore`. Create `/Docs`, drop in this doc pack
-  (CLAUDE.md at repo root), initial commit.
-- **T-005** Install Claude Code on the dev machine, open it in the repo,
-  verify it reads CLAUDE.md and can summarize STATE.md.
-- **T-006** *(parallel, 2–4 wks)* Editor fluency drills: viewport navigation,
-  Content Browser, placing/transforming actors, opening Blueprint editor,
-  Epic's official "first hour" learning path.
+- **T-006** *(parallel, 2–4 wks, ongoing)* Editor fluency drills: viewport
+  navigation, Content Browser, placing/transforming actors, opening Blueprint
+  editor, Epic's official "first hour" learning path.
 
-## Phase 1 — Voxel Island Sandbox (solo)
+## Phase 1 — Voxel Island Sandbox (solo) (NOW)
 
 - **T-101** Acquire Voxel Plugin free tier. Generate a small island. Dig and
   add terrain in PIE.
@@ -69,4 +59,13 @@ creatures, taming, breeding · MCP editor-control evaluation (~M3+).
 
 ## Done
 
-*(empty — CP-000)*
+- **T-001** *(CP-001)* Install Epic Games Launcher + UE 5.7.x to NVMe.
+- **T-002** *(CP-001)* Third Person template project created (Blueprint,
+  Desktop, Max quality, Starter Content **OFF** — amended from ON to stay
+  inside GitHub's free LFS quota). Shader compile survived.
+- **T-003** *(CP-001)* Multiplayer PIE test: 3 players, Listen Server —
+  movement replicated across all three windows.
+- **T-004** *(CP-001)* Git + LFS init, doc pack committed, pushed to
+  https://github.com/Harjas2102/VoxelWorld (private).
+- **T-005** *(CP-001)* Claude Code installed, opened in repo, verified it
+  reads CLAUDE.md and summarizes the docs correctly.

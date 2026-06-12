@@ -118,29 +118,46 @@ working out of the box. Close with Esc.
    ```
    cd D:\Dev\VoxelWorld
    ```
-3. Create the ignore file. Run this block as-is:
+3. Create the ignore file with Notepad *(amended in the field at CP-001:
+   the original PowerShell here-string blocks hung when pasted, so plain
+   Notepad is the method of record)*:
    ```
-   @"
+   notepad .gitignore
+   ```
+   Notepad asks to create the file — click **Yes**, paste exactly this,
+   then save and close (Ctrl+S, then close the window):
+   ```
    Binaries/
    DerivedDataCache/
    Intermediate/
    Saved/
    .vs/
    *.sln
-   "@ | Out-File -Encoding utf8 .gitignore
    ```
-4. Create the LFS rules:
+4. Create the LFS rules the same way:
    ```
-   @"
+   notepad .gitattributes
+   ```
+   Click **Yes** to create, paste exactly this, save and close:
+   ```
    *.uasset filter=lfs diff=lfs merge=lfs -text
    *.umap filter=lfs diff=lfs merge=lfs -text
    *.fbx filter=lfs diff=lfs merge=lfs -text
    *.png filter=lfs diff=lfs merge=lfs -text
    *.tga filter=lfs diff=lfs merge=lfs -text
    *.wav filter=lfs diff=lfs merge=lfs -text
-   "@ | Out-File -Encoding utf8 .gitattributes
    ```
-5. Initialize and commit:
+5. First-time Git identity *(added at CP-001 — Git refuses to commit until
+   it knows who you are; one-time setup per machine)*:
+   ```
+   git config --global user.name "YOURNAME"
+   git config --global user.email "ID+YOURNAME@users.noreply.github.com"
+   ```
+   For the email, use your GitHub **noreply** address so your real email
+   stays out of the public commit history. Find it at github.com →
+   Settings → Emails → it's shown under "Keep my email addresses private"
+   (looks like `12345678+YOURNAME@users.noreply.github.com`).
+6. Initialize and commit:
    ```
    git init
    git lfs install
