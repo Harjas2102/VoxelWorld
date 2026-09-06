@@ -14,6 +14,23 @@
 **Also carried:** the evidence table and experiment discipline of
 `Docs/reviews/P-001-terrain-astra.md`, per D-017.
 
+> **Architect ruling, 2026-09-06 (technical, per D-023).** Four items live in ARCHITECTURE v0
+> had no home in this document when it was adopted. They are carried in here rather than left
+> in the archive. None is a GAME decision, so this is logged here and not as a new
+> `DECISIONS.md` entry:
+>
+> 1. **§4.1.0** — v0 §1's argument for *why* the module boundary exists, carried from
+>    `Docs/archive/ARCHITECTURE_v0.md` §1.
+> 2. **§4.3** — `QueryPoint` and `FTerrainPointSample`. `ITerrainBackend` goes from ten methods
+>    to eleven. §6.1 `Backend.Conformance` and §10 step 1 updated to match.
+> 3. **§4.4** — tool ownership and equip, cooldown, and fuel or charge added to the validation
+>    list, at admission and revalidated at commit under DEF-7.
+> 4. **§4.7** — `entities.sqlite` restores **power grids** to its entity set, per D-012 and
+>    VISION pillar 3.
+>
+> No code changes. `Docs/archive/ARCHITECTURE_v0.md`'s header still records these four as v0
+> content; they are no longer *only* v0 content.
+
 ---
 
 ## 1. Requirement
@@ -128,6 +145,39 @@ split ownership is reconsidered at T-108, when the C++ density field exists.
 ---
 
 ## 4. The design
+
+### 4.1.0 Why the boundary exists
+
+Carried from `Docs/archive/ARCHITECTURE_v0.md` §1. This subsection is not background. It is the
+answer when an implementer proposes to shortcut the boundary — to include one plugin header in
+gameplay "just for this", to read a plugin material directly for yield, to put a plugin type in
+a save record or an RPC. The rest of §4 says what the boundary *is*; this says what it costs to
+lose, and that cost is not paid at the moment of the shortcut.
+
+**The plugin does not own the game's truth.** The game owns terrain semantics; the backend
+implements and renders them. If gameplay called the plugin directly:
+
+- **The plugin API would embed itself across the whole game.** Not in one adapter file — in
+  every call site that ever touched terrain. The boundary is cheap to hold and expensive to
+  reinstate, because reinstating it means finding all of them.
+- **Resource logic would depend on the renderer.** Yield would be computed from whatever the
+  meshing layer happened to expose, which makes the economy a property of the draw path. That is
+  the failure DEF-6 guards against inside the adapter, at a larger scale.
+- **Wire and save formats would become plugin-specific.** Network messages and save files
+  written in plugin types outlive the plugin. A backend change would then be a save migration
+  and a protocol break, not a config line (§10).
+- **Replacing or upgrading the backend would become a rewrite.** D-010 says the backend is
+  provisional and the requirement is durable. A rewrite-to-swap makes D-010 false in practice
+  while leaving it true on paper, which is worse than never having ruled it.
+- **Terrain could not be tested without a renderer.** No headless test, so no test on every
+  build, so the invariants in §6.1 are unverifiable and A5 is unreachable. This is the one that
+  bites first and is noticed last.
+
+The v0 layering that produced this argument — gameplay, tools and machines above an
+authoritative terrain service, above persistent world state, above the backend adapter, above
+rendering, collision and surface queries — is realised by §4.1's three modules, §4.4's service,
+§4.7's stores and §4.3's `QueryPoint`. Plugin-specific types never cross out of the adapter
+module and gameplay code never includes plugin headers (D-011, `AGENTS.md` §4).
 
 ### 4.1 Modules
 
@@ -288,13 +338,42 @@ public:
     virtual bool IsRegionResident(const FTerrainChunkKey& Key) const = 0;
     virtual void FlushPendingWork() = 0;
 
+    // Point query — material identity and solidity at one voxel. Not for aiming.
+    virtual bool QueryPoint(const FIntVector& VoxelPos,
+                            FTerrainPointSample& Out) const = 0;
+
     // Streaming interest — the backend-neutral replacement for the plugin invoker.
     virtual void SetStreamingInterest  (const FTerrainStreamingInterest& In) = 0;
     virtual void ClearStreamingInterest(uint32 InterestId) = 0;
 };
 ```
 
-**Ten methods.** Everything the game does to terrain goes through them, which is what makes
+`FTerrainPointSample` is a `TerrainCore` type, alongside the §4.2 structures:
+
+```cpp
+struct FTerrainPointSample
+{
+    float         Density    = 0.f;  // < 0 solid, normalised
+    FTerrainMatId MaterialId = 0;
+    bool          bResident  = false;
+};
+```
+
+**Aiming does not use this interface.** World-space aiming is a standard UE collision trace
+against the rendered mesh. It returns an `FHitResult`, involves no plugin type, and needs no
+backend method — so the T-101A trace path is legal gameplay code and stays legal after the
+build-step-2 rewire. What changes at step 2 is what happens *after* the trace: the hit location
+becomes an edit request to the service instead of a direct `RemoveSphere` call.
+
+**`QueryPoint` exists for material identity and solidity questions** — ore assay before
+committing a dig, placement validity over a structure footprint, machine surface snapping. Those
+ask *what is at this voxel*, which a collision trace against a mesh cannot answer. `bResident`
+false means the backend holds no data there and `Density` and `MaterialId` are meaningless; a
+caller that ignores `bResident` reads a solid world as empty at streaming boundaries. The query
+is read-only, takes integer voxel coordinates for the quantisation reason below, and carries no
+authority of its own — a server-side rule that acts on the result still runs through §4.4.
+
+**Eleven methods.** Everything the game does to terrain goes through them, which is what makes
 `FMemoryTerrainBackend` (a dense `TMap<FTerrainChunkKey, TArray<int16>>`) a complete stand-in
 for the plugin in tests — and therefore what makes A5 achievable on day one.
 
@@ -339,6 +418,9 @@ input, camera trace
   |                              - rate limit per source   │
   |                              - tool / power / durability│
   |                              - zone permission (D-004) │
+  |                              - tool owned and equipped │
+  |                              - tool off cooldown       │
+  |                              - fuel / charge if needed │
   |                              - self-clearance (DEF-8)  │
   |                              - target chunks resident  │
   |                              - quantise to voxel space │
@@ -371,6 +453,14 @@ step starts. The diagram shows the steps, not their durability boundaries.
 
 Notes:
 
+- **Tool state is validated, not assumed.** The requester owns and has equipped the tool named
+  by `ToolId`; the tool is off cooldown; and the tool has fuel or charge if its type requires it.
+  `ToolId` is client-supplied input and it affects yield (§4.9), so accepting it unchecked makes
+  the client the economic authority, which D-011 forbids. **These are admission checks and are
+  revalidated at commit under DEF-7**, for the same reason as the resource check there: a
+  requester can unequip, exhaust a charge, or disconnect while the op sits in the queue. The
+  fuel-and-charge rule is stated here as a validation input; the machine power model that
+  supplies charge is not specified by this document.
 - **OpSeq is assigned at commit, not at request.** A rejected request never consumes a sequence
   number, so the journal has no holes and "replay everything after N" is unambiguous. The
   no-change-or-committed-result invariant this depends on is DEF-7.
@@ -436,7 +526,8 @@ Saved/World/<WorldId>/
   world.json                     # human-readable, versioned, small
   chunks/<X>_<Y>_<Z>.chunk       # snapshot at revision R  (binary, versioned)
   journal/<NNNNNN>.tjl           # append-only op log, size-segmented
-  entities.sqlite                # players, inventories, structures, machines (D-012)
+  entities.sqlite                # players, inventories, structures, machines, power grids
+                                 #   (D-012; grids per VISION pillar 3)
 Tests/Saves/                     # old-save fixtures, loaded by automation on every build
 ```
 
@@ -624,7 +715,8 @@ Run against `FMemoryTerrainBackend`. Seconds, on every build.
 | `Yield.Accumulation` | With a known synthetic field, removing a known volume yields the expected per-material totals |
 | `Yield.MaxVolume` | A maximum-permitted single-material edit does not overflow the yield field |
 | `Migration.Fixtures` | Every fixture in `Tests/Saves/` loads and produces its expected region hash |
-| `Backend.Conformance` | A shared suite run against **both** `FMemoryTerrainBackend` and `FVPLegacyBackend`. Any future backend must pass it. **This is the operational meaning of "replaceable"** |
+| `Query.Point` | `QueryPoint` returns the material and density sign the region was written with, at chunk interiors and at all eight chunk corners; reports `bResident` false outside loaded regions; never returns a stale sample after `ApplyOp` or `WriteRegion` |
+| `Backend.Conformance` | A shared suite run against **both** `FMemoryTerrainBackend` and `FVPLegacyBackend`, covering all eleven methods, `QueryPoint` included. Any future backend must pass it. **This is the operational meaning of "replaceable"** |
 
 ### 6.2 In-engine, single process
 
@@ -786,7 +878,7 @@ until the multiplayer route is exercised at step 3. Record the narrower result a
 
 ## 10. Backend replacement
 
-1. Write `TerrainBackendX` implementing the ten `ITerrainBackend` methods.
+1. Write `TerrainBackendX` implementing the eleven `ITerrainBackend` methods.
 2. Run the **`Backend.Conformance` suite** against it. It passes or the backend is not a
    candidate. This suite is the definition of the contract; there is no other one.
 3. Implement `ITerrainDensityField` forwarding for the new backend's generator concept.
