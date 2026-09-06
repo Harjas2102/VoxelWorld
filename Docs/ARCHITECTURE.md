@@ -62,6 +62,49 @@
 > into v1 and no longer live in the archived file. The original wording of each is preserved
 > there as the record of what was missing at adoption.
 
+> **T-112.2 determinations, CP-008, 2026-09-06 — Director-authorised (D-027).**
+> The Implementer named the §4.6/packet conflict, then received explicit authority to
+> resolve this increment's technical ambiguities. These determinations were recorded
+> first in `ITerrainDensityField.h` and `MemoryTerrainBackend.h`; this block reconciles
+> the implementation spec at checkpoint. They do not close DEF-5 or DEF-6.
+>
+> - **Density field:** the packet's `FTerrainDensitySample Sample(FIntVector) const`
+>   replaces §4.6's separate `Density(double,double,double)`, `Material(...)` and
+>   `Version()` methods. The sample holds normalised float density and `FTerrainMatId`.
+>   `FTerrainBackendInit::GeneratorVersion` supplies version identity; the caller owns
+>   the field's lifetime. Declaration only at step 1; implementers arrive at T-108.
+> - **Reference residency:** a chunk needs both data and streaming interest.
+>   With null DensityField, interest does not invent air; `WriteRegion` supplies data.
+>   Writes can stage data without making it resident. Interest overlap forms a union;
+>   clearing/moving interest hides data but retains it until Shutdown for re-entry.
+>   The memory backend uses an identity terrain origin and scales by VoxelSizeCm.
+>   Positive-radius interests cover chunk-box interiors intersecting their sphere;
+>   tangent-only contact is excluded. Zero radius selects the containing half-open cell.
+> - **Reference edits:** sphere includes integer samples at distance <= radius; box
+>   is `[Centre-Extent, Centre+Extent)`. Remove sets density +32767, Add sets -32767
+>   and its requested material, Paint changes material only (including air). Touched
+>   means an actual density/material change. EditedBounds tightly encloses changes,
+>   half-open; a no-op succeeds with empty bounds. Missing data, an out-of-world
+>   footprint or work above 65,536 changes / 262,144 candidate reads rejects without
+>   mutation. Splitting belongs to the later service. Flatten/Smooth return false.
+> - **Reference volume:** `Occ = clamp((1-density)/2, 0, 1)`, accumulated by material
+>   before rounding to signed integer microlitres. Removal uses old material;
+>   placement uses requested material. This is not E-1 calibration or economic policy.
+> - **Step-1 transfer:** Dense uses §4.7's LE int16[N] then uint16[N], local index
+>   `x + 32*y + 1024*z`, ValueConfig 0 for int16. Nonresident reads return Empty;
+>   SparseDiff/Empty restoration remains unsupported at this step. Rev/LastOpSeq are
+>   caller metadata, never assigned/bumped by the backend. No disk schema is added.
+> - **Lifecycle/hash:** repeated Initialize while running fails without data loss;
+>   failed outputs reset; double Shutdown and calls outside the initialized lifetime
+>   are safe. Nonresident hash is zero. Resident hashing folds each local index,
+>   density and material into an order-independent sum. Separate density/material
+>   rearrangements and reverse chunk insertion order are covered by conformance.
+>
+> **Evidence:** `Result: Succeeded`; four TerrainCore tests pass, zero failures,
+> automation and process exit 0. The factory suite is registered against the memory
+> backend; the production adapter has not been tested. The suite checks contract
+> properties and full server reporting; clients may ignore edit-result reporting.
+
 ---
 
 ## 1. Requirement
@@ -530,21 +573,29 @@ it is leverage.
 
 ```cpp
 // TerrainCore — no plugin dependency
+struct FTerrainDensitySample
+{
+    float         Density = 0.f;  // normalised [-1, 1], < 0 solid
+    FTerrainMatId MaterialId = 0;
+};
+
 class ITerrainDensityField
 {
 public:
-    virtual float         Density (double X, double Y, double Z) const = 0;  // < 0 solid
-    virtual FTerrainMatId Material(double X, double Y, double Z) const = 0;
-    virtual uint32        Version () const = 0;   // bumped on ANY change to the field
+    virtual ~ITerrainDensityField() = default;
+    virtual FTerrainDensitySample Sample(FIntVector Position) const = 0;
 };
 ```
 
 `UVPLegacyDensityGenerator : UVoxelGenerator` (adapter) implements the plugin's value and
 material queries by forwarding iteration to the field. The world's shape — strata, ore bodies,
 the authored hill — is plain C++ that unit-tests without an engine and survives a backend swap
-untouched. `Version()` is a first-class save-schema input, which K3 requires.
+untouched. `FTerrainBackendInit::GeneratorVersion` is the first-class save-schema
+input K3 requires, bumped on any change to the field. The CP-008 header determination
+supersedes the former three-method declaration; no field implementer exists at step 1.
 
-`FMemoryTerrainBackend` uses the same field, so headless tests exercise the real world shape.
+`FMemoryTerrainBackend` can sample the same field when supplied. Step-1 tests use
+explicit Dense fixtures and a null field; real world-shape testing starts at T-108.
 
 **The T-101A hill was sculpted by script, not generated.** It is not reproducible from a seed and
 is not preserved by the map package. The deterministic base under D-012 must explicitly name its

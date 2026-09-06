@@ -5,8 +5,48 @@
 
 ---
 
-**Checkpoint:** CP-007 · **Date:** 2026-09-06
+**Checkpoint:** CP-008 · **Date:** 2026-09-06
 **Phase:** 1 — Terrain Feasibility
+
+## What happened at CP-008
+
+**T-110 onboarding and T-112.2 complete. Four TerrainCore tests are green headless.**
+
+- Astra worked as Implementer, read the constitution, project docs and T-112.1 code,
+  and built and tested against the installed UE 5.7 toolchain. The Director brought
+  onboarding forward from after T-113 and authorised the increment's technical
+  determinations when the density-field interface conflict was reported (**D-027**).
+- Six source files added: `ITerrainBackend.h` (eleven methods and AR-2 init),
+  `ITerrainDensityField.h` (declaration only), `MemoryTerrainBackend.h/.cpp`, and
+  `Private/Tests/BackendConformance.h/.cpp`. No field implementer exists yet.
+- The reusable suite accepts `TFunction<TUniquePtr<ITerrainBackend>()>` and includes
+  point-query coverage. T-113 supplies its adapter factory without editing the suite.
+  Tests inspect all samples in eight chunks to check actual changes against reported
+  bounds, touched count and exact, deduplicated affected keys. Separate density-only
+  and material-only rearrangements prove the hash is position-sensitive.
+- Queries exercise distinct signs/materials at interiors and all eight corners of
+  positive and negative chunks, immediately after writes and edits. Lifecycle,
+  streaming overlap/movement/clear, transfer, rejected-edit atomicity and flushes are
+  covered. Client terrain is checked; full edit-result reporting is asserted on the
+  server, as §4.3 specifies.
+- **Verification:** `VoxelWorldEditor Win64 Development` → `Result: Succeeded`.
+  `Automation RunTests TerrainCore; Quit` → four `Result={Success}` entries:
+  `Backend.Conformance`, `Op.Codec.RoundTrip`, `Op.Quantisation.Stable`, `Query.Point`;
+  zero failures; `**** TEST COMPLETE. EXIT CODE: 0 ****`; process exit 0.
+  Final run: 2026-09-06 16:53 UTC, `Saved/Logs/VoxelWorld.log` (local, gitignored).
+- `TerrainCore.Build.cs` unchanged (`git diff --quiet`, exit 0): only Core,
+  CoreUObject, Engine. No plugin includes or new game-owned type/file names containing
+  "Voxel". Tests are guarded by `WITH_DEV_AUTOMATION_TESTS`; flag spelling verified
+  from UE 5.7's `Core/Private/Tests/HAL/PlatformTest.cpp`.
+
+**Determinations and limits.** Recorded initially in the new headers, now reconciled
+in `ARCHITECTURE.md`'s CP-008 header block and §4.6. `Sample(FIntVector)` returns
+density/material together; generator version comes from init. With a null field,
+residency requires explicit data plus interest: interest never fabricates air.
+Clearing interest retains data for re-entry. Dense transfer only at this step;
+SparseDiff/Empty restoration remains later work. Reference geometry, occupancy,
+rounding and work limits are documented; they do not settle production DEF-5/DEF-6.
+`Flatten` and `Smooth` return false. No gameplay or asset change; no PIE result claimed.
 
 ## What happened at CP-007
 
@@ -187,7 +227,7 @@ the roadmap was reordered around a terrain feasibility gate. Reviews archived in
 
 ## What exists right now
 
-**C++ (the project builds from source; value types, codec and quantiser new at CP-007):**
+**C++ (builds from source; memory backend and conformance suite added at CP-008):**
 
 ```text
 Source/
@@ -199,9 +239,14 @@ Source/
     Public/TerrainTypes.h          §4.2 value types + §4.3 FTerrainPointSample
     Public/TerrainOp.h             FTerrainOp + the 58-byte codec's declarations
     Public/TerrainQuantise.h       QuantiseEdit / DequantiseVoxel / QuantiseRadiusQ16
+    Public/ITerrainBackend.h       eleven-method interface + FTerrainBackendInit
+    Public/ITerrainDensityField.h  Sample declaration only — implementers at T-108
+    Public/MemoryTerrainBackend.h dense reference backend + documented determinations
     Private/TerrainOp.cpp          the codec — PERMANENT FORMAT
     Private/TerrainQuantise.cpp    world→voxel, Floor, fixed by §4.3
+    Private/MemoryTerrainBackend.cpp synchronous data, edits, queries, interest, transfer
     Private/Tests/                 TerrainOpCodecTest.cpp, TerrainQuantiseTest.cpp
+                                   BackendConformance.h/.cpp (factory suite + Query.Point)
 ```
 
 - **`VoxelWorld`** — the primary game module (`IMPLEMENT_PRIMARY_GAME_MODULE`). Gameplay,
@@ -210,14 +255,15 @@ Source/
 - **`TerrainCore`** — game-owned, compiles headless, holds no plugin type. **Its `Build.cs`
   is the boundary** (§4.1, §4.1.0). Adding a plugin to that dependency list breaks D-011 and
   the `AGENTS.md` §9 drift guard and requires a numbered decision, not an edit.
-- **`UTerrainService : UWorldSubsystem`** — **still empty at CP-007.** A subsystem, not an
+- **`UTerrainService : UWorldSubsystem`** — **still empty at CP-008.** A subsystem, not an
   actor: K7, ruled by D-024. Validation, sequencing, revisions, journalling and yield arrive
   at build steps 1 and 3.
 - **The §4.2 value types, the `FTerrainOp` codec and the quantiser** — new at CP-007, and the
   first thing in this repo with a **permanent format** in it. The encoded op body is 58 bytes
   and is simultaneously the wire format and the journal record body, so changing it changes
   what old saves mean: it is a persistence format under `AGENTS.md` §4 and moves by numbered
-  decision, not by edit. Nothing calls any of it yet.
+  decision, not by edit. The memory backend and tests now consume these types;
+  gameplay does not call them yet.
 - **`VoxelWorld.uproject`** now carries a `Modules` array (`TerrainCore` first, then
   `VoxelWorld`). Both DLLs build into `Binaries/Win64/` (gitignored).
 - `TerrainBackendVPLegacy` — the only module that may ever include plugin headers — **does
@@ -280,16 +326,14 @@ sub-increments under R-009.
 | # | Scope | Status |
 |---|---|---|
 | **T-112.1** | `FTerrainOp` + 58-byte codec, chunk keys, quantiser. Tests `Op.Codec.RoundTrip`, `Op.Quantisation.Stable` | ✅ **Done at CP-007** |
-| **T-112.2** | `ITerrainBackend` (eleven methods), `ITerrainDensityField` declaration, `FMemoryTerrainBackend`, `Backend.Conformance` + `Query.Point` | ⏭ **Next** |
-| **T-112.3** | `FTerrainRevisionIndex`, `UTerrainService` skeleton. Test `Revision.Monotonic` | Queued |
+| **T-112.2** | `ITerrainBackend` (eleven methods), `ITerrainDensityField` declaration, `FMemoryTerrainBackend`, `Backend.Conformance` + `Query.Point` | ✅ **Done at CP-008** |
+| **T-112.3** | `FTerrainRevisionIndex`, `UTerrainService` skeleton. Test `Revision.Monotonic` | ⏭ **Next** |
 
-T-112 is complete when all five TerrainCore tests are green headless. **T-112.2 is the
-load-bearing one:** §10 step 2 — *"This suite is the definition of the contract; there is
-no other one."* `Backend.Conformance` must be written as a reusable suite over a backend
-factory so T-113 points it at `FVPLegacyBackend` with no edits, and `HashRegion` must be
-**position-sensitive** (DEF-5) — a rearrangement of the same multiset of values must hash
-differently, and that must be tested explicitly. `Flatten` and `Smooth` return false;
-their semantics are DEF-5 and are not invented at step 1.
+T-112 is complete when all five TerrainCore tests are green headless. Four now pass;
+`Revision.Monotonic` remains. T-112.3 is in-memory only per AR-4: revisions never
+decrease, and each affected chunk bumps exactly once. Payload deletion/compaction
+coverage stays at build step 4. The reusable backend suite and position-sensitive hash
+checks are implemented; `Flatten` and `Smooth` remain unsupported under DEF-5.
 
 Queued:
 
@@ -303,7 +347,6 @@ Queued:
 - **T-113** — build step 2: `FVPLegacyBackend` and `UTerrainStreamingComponent`;
   **rewire the T-101A dig Blueprint through the service and delete the direct plugin
   calls.** Both flagged drift checks clear here, standalone only.
-- **T-110** — onboard Astra (Codex CLI) against a repo that builds. After T-113.
 - **T-101B** — Terrain Feasibility Gate. Build steps 3–7.
 - **T-108** — C++ density field, strata and ore. Build step 8.
 
@@ -312,10 +355,10 @@ Server authority is not proven until build step 3.
 
 **Process:** R-012 in force. The next three tasks all end in something that runs.
 
-## Drift checks (VISION.md, run at CP-007)
+## Drift checks (VISION.md, run at CP-008)
 
-**Both flags REMAIN, unchanged and for the unchanged reason.** CP-007 added value types, a
-codec and a quantiser. None of it is called by anything yet, so
+**Both flags REMAIN.** CP-008 added a memory backend and headless contract tests.
+Gameplay still does not route through the service, so
 `BP_ThirdPersonCharacter` still calls `UVoxelSphereTools::RemoveSphere` and `AddSphere`
 directly, on the client. **They clear at build step 2 (T-113)**, when the Blueprint is rewired
 through `RequestEdit` and the direct calls are deleted — and then for standalone only. Server
@@ -350,31 +393,21 @@ and this Blueprint is rewired through it or deleted.** It is test scaffolding wi
 gameplay-shaped silhouette, which is exactly the kind of thing that quietly becomes
 permanent. Feature work does not start on top of it.
 
-**Second-order check, new at CP-007.** The second flag is about the backend staying
-*replaceable*, and CP-007 is the first session that wrote types the backend interface will be
-expressed in. They were checked against the flag rather than assumed to be fine: no plugin
-header in the module, `Build.cs` byte-identical, no plugin index anywhere near
-`FTerrainMatId`, and `FTerrainRegionData::ValueConfig` carries a plugin concept as an opaque
-`uint8` rather than as a plugin type. Nothing added at CP-007 makes the backend harder to
-replace.
+**Boundary evidence at CP-008.** The dependency list remains byte-identical and no
+plugin type/header crosses it. Backend replacement now has an executable factory suite,
+including queries and position-sensitive hashes. The production adapter has not run
+that suite yet; replacement is not proved by the memory backend passing alone.
 
-## R-012 check (process weight, run at CP-007)
+## R-012 check (process weight, run at CP-008)
 
-**PASS, with one honest mark against the session.**
+**PASS for this bounded step; the lack of a playable change remains visible.**
 
-T-112.1 produces **no playable change**, which is one of R-012's own warning signs. It is
-accepted here for the same reason build step 0 was: headless-with-no-gameplay-change is
-the step's specification, not a drift into ceremony. **The next playable change is T-113**,
-two sub-increments and one engine upgrade away. If that slips, this stops being a pass.
-
-What the session did produce is a permanent wire format with its length measured three
-ways, and two floating-point limits found by a test that failed first — evidence, not
-narrative.
-
-**Mark against the session:** the Architect emitted ready-to-commit `DECISIONS.md` text
-mid-session, outside a checkpoint and without instruction. That is the CP-001 failure
-pattern — a decision left sitting in a disposable transcript. Corrected in the same
-session; noted so it is not repeated.
+T-112.2 supplies executable contract tests and a headless backend, as specified. The
+initial stop named the density-field conflict at §4.6 lines 536–538; the Director
+authorised a determination and implementation completed in the same session. No
+checkpoint text or project-doc edits were produced before the Director said
+"checkpoint". **The next playable change is T-113**, one remaining sub-increment and
+the scheduled engine upgrade away. No new process task was inserted before it.
 
 ## Blockers
 
@@ -393,8 +426,8 @@ None.
 | Role | Holder |
 |---|---|
 | Director | Harjas |
-| Implementer | Claude Code on Opus (Claude Pro) |
-| Architect | Opus in the Claude app; Astra when verified available |
+| Implementer | Astra (Codex), onboarded at CP-008 alongside T-112.2 (D-027) |
+| Architect | Opus in the Claude app; T-112.2 determinations explicitly delegated by the Director (D-027) |
 | Independent reviewer | Whichever vendor did not author (R3 only) |
 
 ## Toolchain status
@@ -404,7 +437,7 @@ None.
 | UE 5.7 | ✅ `C:\Program Files\Epic Games\UE_5.7` — installed, shaders compiled |
 | Git + LFS | ✅ git-lfs 3.7.1, push credentials verified |
 | Claude Code | ✅ Installed, verified in-repo |
-| Codex CLI (Astra, D-018) | ⏳ Not installed — deferred to T-110, after the repo builds |
+| Codex (Astra, D-018 / D-027) | ✅ Onboarded in-repo at CP-008: docs, source edits, UE 5.7 build and four headless tests exercised |
 | **Voxel Plugin Free Legacy** | ✅ **v432 / e9648b302 / 5.7 — mounts clean** (gitignored) |
 | Voxel Plugin 2 | ❌ Paid, gated on owning Pro Legacy — upgrade candidate only (R-008) |
 | Python Editor Script Plugin | ✅ Enabled at CP-002 — the primary way work gets done here |

@@ -459,3 +459,26 @@ are fixed by §4.2 and §4.3 and were copied, not decided.
 session, independently: `ETerrainRole` is `{ Server, Client }` (AR-2);
 `DequantiseVoxel` returns the voxel centre (AR-3). Both live in `ARCHITECTURE.md`'s
 header ruling block and carry no ruling of their own here, per D-023.
+
+## D-027 — Earlier Astra onboarding and bounded T-112.2 delegation (2026-09-06) — ACCEPTED
+
+**Recorded:** CP-008 · **Authority:** Director · **Amends:** D-018 handover timing only.
+
+The Director assigned Astra as Implementer and scheduled **T-110 onboarding together
+with T-112.2**, bringing it forward from the after-T-113 handover in D-018/STATE.
+Onboarding completed against the existing T-112.1 code and installed UE 5.7 toolchain.
+
+When the Implementer reported the packet's single `Sample(FIntVector)` interface
+conflicting with `ARCHITECTURE.md` §4.6's `Density`/`Material`/`Version` declarations
+(then lines 536–538), the Director replied: **"I authorize you to decide what you think
+is best"**. This delegates resolution of the current increment's technical ambiguities;
+it does not give the Implementer continuing architectural authority under AGENTS §2.
+
+The resulting technical determinations were recorded in the new interface/backend
+headers before implementation completed and are now reconciled in `ARCHITECTURE.md`'s
+CP-008 header block and §4.6. They select the packet's single-Sample API and clarify
+null-field residency, reference kernels/accounting, transfer and lifecycle behaviour.
+No GAME pillar changes; no new module dependency; DEF-5 and DEF-6 remain open.
+
+**Evidence:** T-112.2 build succeeded; four TerrainCore tests passed headless with
+zero failures and process exit 0. The Director then requested this checkpoint.

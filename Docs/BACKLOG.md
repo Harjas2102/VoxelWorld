@@ -29,6 +29,18 @@ challenge to two vendors, blind, then cross-reviewed. Produces **ARCHITECTURE.md
 **D-017** (terrain architecture) and **D-018** (primary implementer). Runs *after* T-101A
 so the proposals are written against the plugin's real API, not against a guess.
 
+### T-112 — TerrainCore build step 1 — in progress (CP-008)
+
+Build order follows `ARCHITECTURE.md` §9. T-112.1 and T-112.2 are in the Done log.
+**Next: T-112.3** — `FTerrainRevisionIndex` and `UTerrainService` skeleton;
+`TerrainCore.Revision.Monotonic` green headless. AR-4 limits this to in-memory
+monotonicity and one bump per affected chunk; compaction coverage stays at step 4.
+Completion means all five TerrainCore tests pass; four pass at CP-008.
+
+Then **T-112.5** — UE 5.7 → 5.8 and Unreal MCP, per D-025 — followed by **T-113**,
+the production backend adapter, streaming component and Blueprint service rewire.
+**T-110 onboarding was brought forward and completed with T-112.2** (D-027).
+
 ### T-101B — Terrain Feasibility Gate *(tiered)*
 
 **Gate-Critical — must pass:**
@@ -179,7 +191,7 @@ processor → storage.** This is where the project's identity begins to show.
 Biome expansion + World Partition · weather · larger continent · industrial excavation
 (Stage 4) · roads · deeper logistics · creatures, taming, breeding (Year 2) · PvP zones
 *(needs the integrity model)* · structural integrity & decay · 16–32 player load tuning ·
-**MCP editor control — evaluate after T-101B** · **GLM worker tier — parked until at
+**GLM worker tier — parked until at
 least 10 bounded tasks exist** (D-014).
 
 *Superseded:* old **T-106** (single-player voxel delta save/load) is absorbed into
@@ -189,6 +201,15 @@ T-101B sub-step 1D, which requires the multiplayer-capable version instead.
 
 ## Done
 
+- **T-110** *(CP-008)* Astra onboarded as Implementer against the existing repo;
+  read the constitution/docs and T-112.1, extended the code, built with UE 5.7 and ran
+  four headless tests successfully. Brought forward by the Director (D-027).
+- **T-112.2** *(CP-008)* Eleven-method `ITerrainBackend`, single-Sample density-field
+  declaration, dense memory backend and reusable factory conformance suite, including
+  `Query.Point`. Six source files. Build succeeded; four tests passed, zero failures,
+  exit 0. Position-sensitive density/material rearrangements tested; Build.cs unchanged.
+- **T-112.1** *(CP-007; carried into this log at CP-008)* Value types, 58-byte op codec,
+  quantiser; `Op.Codec.RoundTrip` and `Op.Quantisation.Stable` green headless.
 - **T-001** *(CP-001)* Install Epic Games Launcher + UE 5.7.x to NVMe.
 - **T-002** *(CP-001)* Third Person template project created (Blueprint, Desktop, Max
   quality, Starter Content **OFF** — amended from ON to stay inside GitHub's free LFS

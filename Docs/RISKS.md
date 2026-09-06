@@ -19,7 +19,11 @@ Severity / probability scale: **High · Medium · Low**.
   validates and applies, all clients converge. 2–3 clients editing the same region with
   deterministic ordering and no permanent divergence.
 - **Owner / task:** T-101B (sub-step 1B)
-- **Result:** *open*
+- **Result:** *open*. CP-008: memory-backend conformance is green, including
+  position-sensitive hashes (density and material rearrangements), exact multi-chunk
+  reporting and point-query freshness. This is same-process reference evidence only;
+  the production adapter, network convergence and cross-platform replay remain untested
+  (DEF-5). No adoption or multiplayer claim follows from these four headless tests.
 - **Decision:** *open*
 
 ## R-002 — Join-in-progress modified-chunk transfer
@@ -55,7 +59,10 @@ Severity / probability scale: **High · Medium · Low**.
   material and confirm the server computes soil / stone / ore quantities
   deterministically from the edit, not from the rendered mesh.
 - **Owner / task:** T-101B (sub-step 1C)
-- **Result:** *open*
+- **Result:** *open*. CP-008: reference-backend tests verify positive Remove and negative
+  Add volumes with the appropriate material, and no physical volume for Paint. The
+  reference linear occupancy map is documented, not calibrated against the production
+  kernel. E-1 and DEF-6 remain open; these tests do not validate economic conservation.
 - **Decision:** *open*
 
 ## R-005 — PCG / foliage invalidation after edits
@@ -188,6 +195,13 @@ named ambiguity counts as a failed increment under R-009.
   the type; a determination made inside a function body would not have surfaced the same way.
   **AR-3** — `DequantiseVoxel` returning the voxel centre — is exactly that shape, and was
   caught only because a test forced it. Assume there are others.
+- **Result — CP-008:** the first-session packet was initially stopped at one named
+  conflict: §4.6 lines 536–538 declared Density/Material/Version while the packet
+  required Sample(FIntVector). The Director authorised a determination (D-027);
+  T-112.2 then completed with a green build and four green headless tests in the same
+  session. API, residency and reference-kernel determinations were exposed in headers
+  and reconciled into ARCHITECTURE at checkpoint. The initial stop is recorded, not
+  counted as implementation; the completed increment is the result. Risk stays open.
 - **Decision:** *open* — keep the rule. Re-evaluate after T-101B, alongside R-009.
 
 ## R-012 — Process weight
@@ -201,3 +215,9 @@ Director cannot restate in one sentence.
 
 Checked at every checkpoint alongside the VISION drift checks. If flagged, the next
 session is spent deleting process, not adding features.
+
+**CP-008 check:** bounded step passed: onboarding and implementation happened together,
+and the outcome is executable conformance evidence. No playable change yet; T-113
+remains the next playable milestone, after T-112.3 and the D-025 upgrade. Checkpoint
+documents were held until explicitly requested. Keep watching the cost of successive
+headless-only steps; no new process task was inserted ahead of the playable milestone.
