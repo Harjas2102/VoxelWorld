@@ -65,8 +65,11 @@ Other verification at CP-006:
   T-101A success signature from the runbook.
 - T-101A dig path: `RemoveSphere` and `AddSphere` at radius 200 — the exact calls
   `BP_ThirdPersonCharacter` makes — both return populated modified-voxel arrays over
-  `VoxelIntBox (-7,-7,-7)..(8,8,8)`. Transient session, not saved. This exercises the edit
-  path, not the LMB input binding, which remains a manual check.
+  `VoxelIntBox (-7,-7,-7)..(8,8,8)`. Transient session, not saved.
+- **Both input bindings confirmed by hand on the from-source build** — RMB built a mound,
+  LMB dug it. **This is the T-101A dig path reproduced after the C++ conversion**, through
+  the same `BP_ThirdPersonCharacter` wiring, and it closes the last open item from build
+  step 0.
 
 ## What happened at CP-004
 
@@ -162,6 +165,16 @@ Source/
   - PlayerStart moved to **(-8228.66, 0, 150)**, ~82 m west of the hill centre, facing it.
   - `BP_ThirdPersonCharacter` wired for digging: LMB → line trace → `RemoveSphere`,
     RMB → `AddSphere`, radius 200, 1000 uu reach, both behind a hit `Branch`.
+  - ⚠️ **The T-101A hill is not persistent** (finding 2e / **R-003**).
+    `Tools/Editor/place_voxel_world.py` sculpts it into the **running editor session
+    only**; any process that loads the level from disk regenerates a **flat plane** from
+    `VoxelFlatGenerator`. **Do not re-run the script expecting a hill in standalone** —
+    build the mound in-game with **RMB**, which is what the CP-004 tunnel test actually
+    did. Terrain first survives a restart at **build step 4**.
+  - ⚠️ **The PlayerStart offset assumes that hill.** (-8228.66, 0, 150) was placed relative
+    to terrain that does not exist at runtime, so standalone spawns on bare ground facing
+    nothing. **Second symptom of the same cause, not a separate issue.** Revisit at
+    **build step 4**.
 - **Voxel Plugin Free Legacy** at `Plugins/VoxelFree/` — **v432 / `e9648b302` / 5.7.0**,
   prebuilt Win64 binaries. **Not committed** (gitignored); reinstall via
   `Tools/Install-VoxelFreeLegacy.ps1`.
