@@ -120,6 +120,37 @@ Queued behind it:
 
 **7-day rule (R-009):** still in force for every task. Passed its first test at T-101A.
 
+## Drift checks (VISION.md, run at CP-004)
+
+- [x] Terrain is smooth-voxel and player-deformable — **proven today**
+- [ ] **Every gameplay system is server-authoritative — FLAGGED**
+- [x] The tech path still leads to electricity and machines
+- [x] Scope is still one planet, 16–32 players
+- [x] Development is still incremental, Minecraft-alpha style
+- [x] The five inspiration games are still the reference set
+- [ ] **The terrain backend remains replaceable (D-010, D-011) — FLAGGED**
+- [x] Voxels are still invisible to the player (D-015) — grid material is placeholder
+
+**Both flags have the same cause: the T-101A dig wiring.**
+`BP_ThirdPersonCharacter` calls `UVoxelSphereTools::RemoveSphere` / `AddSphere`
+**directly, on the client, from gameplay code.** That is simultaneously:
+
+- a violation of **D-011** and `AGENTS.md` section 4 — *gameplay never calls the terrain
+  plugin directly; all terrain access goes through the game-owned terrain service* — and
+  it is named explicitly in the section 9 drift guard as "direct plugin calls from
+  gameplay code"; and
+- client-authoritative, which `AGENTS.md` section 4 forbids outright.
+
+**This is accepted for T-101A only, and must not survive it.** A smoke test whose entire
+purpose is to find out whether the plugin can dig at all has nothing to route through
+yet — the adapter's shape is what the blind benchmark and D-017 exist to decide. Writing
+one first would have been inventing the architecture the gate is supposed to produce.
+
+The obligation this creates: **the first thing built after D-017 is the terrain adapter,
+and this Blueprint is rewired through it or deleted.** It is test scaffolding with a
+gameplay-shaped silhouette, which is exactly the kind of thing that quietly becomes
+permanent. Feature work does not start on top of it.
+
 ## Blockers
 
 None.
