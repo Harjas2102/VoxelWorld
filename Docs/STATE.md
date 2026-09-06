@@ -51,10 +51,10 @@ No gameplay systems yet. No authoritative terrain layer yet. No C++ yet.
 
 ## Current task
 
-- **T-100** *(parallel, Director-run)* — Visual Studio 2022 Community + the
-  "Game development with C++" workload. **Confirmed absent** on this machine (no
-  `vswhere`, no MSVC, no Windows SDK). Does **not** block T-101A — the dig path is
-  Blueprint.
+- ~~**T-100**~~ — **DONE 2026-09-05.** Visual Studio Community 2022 **17.14.37614.0**
+  with the "Game development with C++" workload; MSVC toolset **14.44.35207**
+  (`cl.exe` present), Windows SDK **10.0.26100.0**. **A reboot is pending** — Windows
+  wants one before the toolchain is fully settled. C++ is unblocked from Phase 1B.
 - **T-101A** *(now, one evening)* — Terrain smoke test: place a configured voxel world,
   dig and add in PIE, cut a tunnel or overhang, no editor errors, findings written to
   `Docs/T-101A_FINDINGS.md`. Runbook: `Docs/T-101A_RUNBOOK.md`.
@@ -110,4 +110,4 @@ None.
 | Voxel Plugin 2 | ❌ Paid, gated on owning Pro Legacy — upgrade candidate only (R-008) |
 | Python Editor Script Plugin | ✅ Enabled at CP-002 (agent-driven editor scripting) |
 | Editor Scripting Utilities | ✅ Enabled at CP-002 |
-| **Visual Studio 2022 (C++ workload)** | ❌ **Absent — this is T-100** (parallel; not blocking) |
+| Visual Studio 2022 (C++ workload) | ✅ 17.14.37614.0, MSVC 14.44.35207, Win SDK 10.0.26100 — **reboot pending** |

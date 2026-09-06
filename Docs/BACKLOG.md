@@ -18,12 +18,6 @@ Ordinary survival content does not start until the backend is ruled on. A succes
 "I dug a smooth hole in PIE" demo proves almost nothing about whether the plugin can be
 the permanent world substrate.
 
-### T-100 — Visual Studio 2022 + C++ workload *(parallel, does not block T-101A)*
-
-Community edition with the **"Game development with C++"** workload (`NativeGame`).
-Director runs the winget command and approves the UAC prompt; manual installer is the
-fallback. Needed from the first C++ increment (Phase 1B), not before.
-
 ### T-101A — Terrain smoke test *(one evening, solo, NOW)*
 
 Free Legacy is already installed (v432, see STATE). Remaining: a configured voxel world
@@ -176,3 +170,7 @@ T-101B sub-step 1D, which requires the multiplayer-capable version instead.
   https://github.com/Harjas2102/VoxelWorld.
 - **T-005** *(CP-001)* Claude Code installed, opened in repo, verified it reads CLAUDE.md
   and summarizes the docs correctly.
+- **T-100** *(CP-002)* Visual Studio Community 2022 17.14.37614.0 + "Game development
+  with C++" workload, via winget. MSVC 14.44.35207, Windows SDK 10.0.26100.0.
+  Verified with `vswhere -requires Microsoft.VisualStudio.Workload.NativeGame` and by
+  finding `cl.exe` on disk — not on the installer's exit code.
