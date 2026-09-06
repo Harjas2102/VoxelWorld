@@ -103,9 +103,21 @@ Severity / probability scale: **High · Medium · Low**.
   T-101B gate decides whether Free Legacy is adopted at all. No gameplay code takes a
   dependency on plugin types.
 - **Owner / task:** D-010, D-011, T-101B
-- **Result:** *open* — Free Legacy is provisional, not adopted.
+- **Result — FIRST HIT, 2026-09-05 (T-101A):** **Voxel Graphs are Pro-gated at runtime.**
+  `Voxel: Running Voxel Graphs require Voxel Plugin Pro`. All 106 `VoxelGraphGenerator`
+  example assets produce an **empty world with no error** — the asset loads,
+  `SetGeneratorObject` succeeds, `IsCreated()` returns true, the world reports a
+  generation time, and the density field is empty. Free ships exactly two runnable
+  generators, both C++: `UVoxelFlatGenerator` and `UVoxelEmptyGenerator`.
+  → Procedural generation must be a C++ `UVoxelGenerator` subclass (**T-108**), promoted
+  from "later" to a Phase 1 requirement. Full write-up: `T-101A_FINDINGS.md` section 2b.
+- **What this changes about the risk:** the exposure is worse than "the free tier has
+  fewer features." Gates are **silent at runtime** and are not documented in the headers,
+  so each one is found by something quietly not working. Assume more exist; budget for
+  discovery in every sub-step of T-101B rather than treating each as a surprise.
 - **Decision:** *open* — resolved by the T-101B exit (PASS / CONDITIONAL / FAIL /
-  VISION CHANGE).
+  VISION CHANGE). This finding does not by itself argue for VP2: the C++ generator is
+  work we owed D-011 regardless.
 
 ## R-009 — Director availability and project stall
 

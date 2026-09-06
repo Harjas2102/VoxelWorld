@@ -93,6 +93,23 @@ Everything else — materials, PCG graphs, Sequencer, the wider "first hour" lea
 (AGENTS.md section 11), so broad editor fluency is no longer on the project's critical
 path. Learn it when a task demands it.
 
+### T-108 — C++ voxel generator *(NEW at CP-003; blocks 1C)*
+
+Forced by the T-101A discovery that **Voxel Graphs are Pro-gated** (R-008): the only
+runnable generators on Free are `VoxelFlatGenerator` and `VoxelEmptyGenerator`, so the
+authored test world cannot come from a graph asset.
+
+A `UVoxelGenerator` subclass in C++ producing the GDD's first test world: a 256–512 m
+hill with **several material strata** and **an underground ore body**, plus a cliff and a
+lowland. This is the prerequisite for sub-step **1C** (material field, soil/stone/ore
+query, yield from removed material) — there is nothing to query without it.
+
+Requires the project to gain a C++ module (it is Blueprint-only today). T-100 is done, so
+the toolchain is ready. **R2/R3 boundary — propose before implementing.**
+
+Not a detour: D-011 always put generation semantics in game-owned code. The Pro gate only
+removed the option of postponing it.
+
 ### T-107 — First-person camera rig *(D-009; cheap, slots in any time after 1A)*
 
 Head-socket camera, FOV tuning, near-clip + owner-only head hiding, third-person toggle.
@@ -184,7 +201,7 @@ T-101B sub-step 1D, which requires the multiplayer-capable version instead.
   https://github.com/Harjas2102/VoxelWorld.
 - **T-005** *(CP-001)* Claude Code installed, opened in repo, verified it reads CLAUDE.md
   and summarizes the docs correctly.
-- **T-100** *(CP-002)* Visual Studio Community 2022 17.14.37614.0 + "Game development
+- **T-100** *(CP-003)* Visual Studio Community 2022 17.14.37614.0 + "Game development
   with C++" workload, via winget. MSVC 14.44.35207, Windows SDK 10.0.26100.0.
   Verified with `vswhere -requires Microsoft.VisualStudio.Workload.NativeGame` and by
   finding `cl.exe` on disk — not on the installer's exit code.

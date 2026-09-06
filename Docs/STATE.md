@@ -5,8 +5,32 @@
 
 ---
 
-**Checkpoint:** CP-002 · **Date:** 2026-09-05
+**Checkpoint:** CP-003 · **Date:** 2026-09-05
 **Phase:** 1 — Terrain Feasibility
+
+## What happened at CP-003
+
+Same evening as CP-002, but the state moved enough to warrant its own number.
+
+- **T-100 done.** Visual Studio Community 2022 **17.14.37614.0** with the "Game
+  development with C++" workload, MSVC **14.44.35207**, Windows SDK **10.0.26100.0**.
+  Verified with `vswhere -requires ...NativeGame` and by locating `cl.exe` — winget
+  reports success when the bootstrapper hands off, minutes before the workload lands.
+  **A Windows reboot is pending.**
+- **D-019 ruled** — the repository stays public; the inert Android token stays in history.
+- `CHAT_OPENER.md` rewritten vendor-neutral and made the single canonical opener;
+  **T-006 rescoped** to the four editor skills T-101A actually needs (confirmed not
+  started since June).
+- **⛔ Major backend finding (R-008): Voxel Graphs are Pro-gated.** The first attempt at
+  T-101A produced an empty world and a blue sky. Cause:
+  `Voxel: Running Voxel Graphs require Voxel Plugin Pro`. All 106 example generators are
+  unusable at runtime and **fail silently**. Free ships two runnable generators, both
+  C++. → **T-108** (C++ `UVoxelGenerator`) is now a Phase 1 requirement blocking 1C.
+  Details: `Docs/T-101A_FINDINGS.md` section 2b.
+- **✅ The D-011 yield hook is live.** Sculpting the workaround hill exercised
+  `AddSphere` and returned populated `FModifiedVoxelValue` arrays — 861,781 voxels across
+  five spheres, counts scaling with edit volume. Reachable and working on real data;
+  accuracy and determinism remain 1C's job. Section 2c.
 
 ## What happened at CP-002
 
@@ -34,8 +58,8 @@ non-Nanite" assumption was stale. Plus: the 1 km² island was the wrong first ta
   `LogVoxel` init. Project plugins auto-enable, so this worked without a `.uproject`
   entry. **Not committed** — `Plugins/VoxelFree/` is gitignored; reinstall via
   `Tools/Install-VoxelFreeLegacy.ps1`.
-- **`Content/Maps/VoxelSandbox.umap`** exists and contains `AVoxelWorld` actors placed on
-  2026-07-06. Terrain was meshing (`VoxelProceduralMeshComponent` present).
+- **`Content/Maps/VoxelSandbox.umap`** exists with one `AVoxelWorld` actor, configured at
+  CP-003 to 50 cm voxels / 1024 voxels (512 m) / `VoxelFlatGenerator`.
 - Known non-fatal issue: an `ensure` on `AVoxelWorld::DestroyWorldInternal`
   (GeneratorCache) fires at editor shutdown. Cosmetic; logged, not chased.
 
@@ -48,17 +72,24 @@ non-Nanite" assumption was stale. Plus: the 1 km² island was the wrong first ta
   secrets after CP-002; the inert Android token left in history is covered by D-019.
 - Governance: `AGENTS.md` (constitution) + `CLAUDE.md` (adapter) + `Docs/` (truth).
 
-No gameplay systems yet. No authoritative terrain layer yet. No C++ yet.
+- `Content/Maps/VoxelSandbox.umap` currently holds the **failed-graph state** (empty
+  world) and is intentionally **left uncommitted** — committing an empty world as the
+  test map would mislead anyone restoring it. It gets committed after the re-run.
+
+No gameplay systems yet. No authoritative terrain layer yet. No C++ module yet (the
+toolchain is now ready for one — T-108).
 
 ## Current task
 
-- ~~**T-100**~~ — **DONE 2026-09-05.** Visual Studio Community 2022 **17.14.37614.0**
-  with the "Game development with C++" workload; MSVC toolset **14.44.35207**
-  (`cl.exe` present), Windows SDK **10.0.26100.0**. **A reboot is pending** — Windows
-  wants one before the toolchain is fully settled. C++ is unblocked from Phase 1B.
-- **T-101A** *(now, one evening)* — Terrain smoke test: place a configured voxel world,
-  dig and add in PIE, cut a tunnel or overhang, no editor errors, findings written to
-  `Docs/T-101A_FINDINGS.md`. Runbook: `Docs/T-101A_RUNBOOK.md`.
+- **T-101A** *(in progress — tooling done, PIE test outstanding)*
+  - ✅ Plugin verified, plugins enabled, editor launches clean, API surveyed.
+  - ✅ `Tools/Editor/place_voxel_world.py` works: flat generator + a hill sculpted from
+    five `AddSphere` calls, 512 m world at 50 cm voxels.
+  - ⏳ **Next, in order:** reboot (pending from T-100) → re-run the placement script →
+    Ctrl+S → wire the dig Blueprint (`T-101A_RUNBOOK.md` step 6) → PIE test → screenshots
+    → fill in `T-101A_FINDINGS.md` sections 5 and 6.
+- **T-108** *(new, queued)* — C++ `UVoxelGenerator` for the strata + ore-body test world.
+  Blocks sub-step 1C. Propose before implementing (R2/R3 boundary).
 
 **7-day rule (R-009):** if the first hole is not dug by **2026-09-12**, the plan is wrong,
 not the Director — cut the step smaller.
