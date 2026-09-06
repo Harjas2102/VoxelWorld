@@ -28,8 +28,9 @@
 > 4. **§4.7** — `entities.sqlite` restores **power grids** to its entity set, per D-012 and
 >    VISION pillar 3.
 >
-> No code changes. `Docs/archive/ARCHITECTURE_v0.md`'s header still records these four as v0
-> content; they are no longer *only* v0 content.
+> No code changes. `Docs/archive/ARCHITECTURE_v0.md`'s header records these four as carried
+> into v1 and no longer live in the archived file. The original wording of each is preserved
+> there as the record of what was missing at adoption.
 
 ---
 

@@ -101,8 +101,9 @@ hill with **several material strata** and **an underground ore body**, plus a cl
 lowland. This is the prerequisite for sub-step **1C** (material field, soil/stone/ore
 query, yield from removed material) — there is nothing to query without it.
 
-Requires the project to gain a C++ module (it is Blueprint-only today). T-100 is done, so
-the toolchain is ready. **R2/R3 boundary — propose before implementing.**
+Requires the project to gain a C++ module — **done at CP-006** (T-111, build step 0): the
+project compiles from source and `TerrainCore` exists. T-108 is build step 8 and the
+generator forwards through `ITerrainDensityField` (`ARCHITECTURE.md` §4.6). **R2/R3 boundary — propose before implementing.**
 
 Not a detour: D-011 always put generation semantics in game-owned code. The Pro gate only
 removed the option of postponing it.
@@ -202,6 +203,16 @@ T-101B sub-step 1D, which requires the multiplayer-capable version instead.
   with C++" workload, via winget. MSVC 14.44.35207, Windows SDK 10.0.26100.0.
   Verified with `vswhere -requires Microsoft.VisualStudio.Workload.NativeGame` and by
   finding `cl.exe` on disk — not on the installer's exit code.
+- **T-111** *(CP-006)* **Build step 0 — the project compiles from source for the first
+  time.** `VoxelWorld` (primary game module, depends on `TerrainCore` only) and
+  `TerrainCore` (Core/CoreUObject/Engine, no plugin) with one empty
+  `UTerrainService : UWorldSubsystem` (K7), plus the `Target.cs` pair and the `.uproject`
+  `Modules` array. `VoxelWorldEditor Win64 Development` → `Result: Succeeded`.
+  **The D-011 boundary was tested, not asserted:** a `#include` of a plugin header added to
+  `TerrainCore/Private/` fails with `fatal error C1083 ... No such file or directory`, and
+  the build succeeds again once removed. Editor headless boot exit 0; standalone runs clean
+  with the invoker enabled; `RemoveSphere`/`AddSphere` still return populated modified-voxel
+  arrays. No gameplay change — both drift-check flags remain until build step 2.
 - **T-101A** *(CP-004)* Terrain smoke test — **PASS, with caveats.** A mound built with
   `AddSphere`, tunnelled through with `RemoveSphere` until it broke out the far side:
   rock spanning open air with sky visible through it, which no heightfield can represent
