@@ -73,11 +73,25 @@ deliberately removing arbitrary terrain manipulation from Pillar 1).
 - **1E** — Join-in-progress, chunk relevancy, compression/batching only as needed.
 - **1F** — Stress profile, collision, foliage, nav, streaming → **decide the backend**.
 
-### T-006 — Editor fluency *(standing, parallel, ongoing)*
+### T-006 — Editor fluency *(rescoped at CP-002; not started)*
 
-Viewport navigation, Content Browser, placing/transforming actors, Blueprint editor,
-Epic's "first hour" learning path. Carried over from Phase 0 — not a blocker, not
-"done," just an ongoing habit. Status unverified at CP-002.
+Confirmed not started. Rather than carry an open-ended "learn Unreal" task that has sat
+untouched since June, it is cut down to exactly the skills T-101A actually needs, done
+**inside** T-101A rather than before it:
+
+1. **Viewport navigation** — right-mouse-drag to look, WASD while held, mouse wheel to
+   zoom, **F** to focus the selected actor. (Needed the moment the terrain appears.)
+2. **World Outliner** — find and select an actor by name. (Needed to confirm the script
+   worked.)
+3. **Output Log** — open it, switch the input dropdown from Cmd to Python. (Needed to
+   run any script the agent writes; this is the highest-leverage skill on the list.)
+4. **Blueprint Event Graph** — open a Blueprint, right-click to add a node, drag a wire,
+   Compile, Save. (Needed for runbook step 6.)
+
+Everything else — materials, PCG graphs, Sequencer, the wider "first hour" learning path
+— is **parked**. The governance now routes editor work through config, C++, and Python
+(AGENTS.md section 11), so broad editor fluency is no longer on the project's critical
+path. Learn it when a task demands it.
 
 ### T-107 — First-person camera rig *(D-009; cheap, slots in any time after 1A)*
 

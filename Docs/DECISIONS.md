@@ -183,3 +183,33 @@ mastery — temperature, exposure, darkness, hazards — not default bar-mainten
 Food exists without becoming a tax unless testing proves that loop is fun.
 **Consequences:** The GDD progression and survival sections are rewritten. Survival meters
 remain an open question resolved by testing, not by genre convention.
+
+## D-019 — Repository stays public (2026-09-05) — ACCEPTED
+**Context:** The repo was created private (CP-001) and the Director made it public
+manually so an external ChatGPT audit could read it — the audit that became the CP-002
+architecture review. STATE still said "private" until CP-002 corrected the record. With
+dual-vendor review now part of the workflow (D-014), the question is whether public is
+the right steady state or just an artifact of that one audit.
+**Decision:** **The repository stays public.** Any vendor can then read the constitution
+and state from a raw URL with no connector, no auth, and no upload — which is exactly
+what the blind benchmark (`Docs/DUAL_AGENT_SETUP.md` section 6) needs, since both
+vendors must demonstrably see identical context. Raw URLs are listed in
+`Docs/CHAT_OPENER.md`.
+Note this is a convenience, not a requirement: Codex and similar tools can authenticate
+against a private repo. Public is chosen because the friction saved is real and the cost
+is currently near zero.
+**Consequences:**
+- The repo must stay free of secrets. The CP-002 scan is clean and `.gitignore` now
+  blocks `*.env` and `**/secrets*`.
+- **The generated Android File Server token in history at `4549474` is left in place**,
+  per Director ruling. It only ever authorized the Android File Server (USB/network file
+  push to an Android device running this project); that plugin is now disabled for the
+  project, so nothing regenerates or honours it. Rewriting history to purge it would
+  violate the git rules for no security gain.
+- One concrete cost to watch: **public repos serve Git LFS objects to anyone who clones,
+  and LFS bandwidth is billed to the repo owner** against GitHub's free monthly quota.
+  238 LFS files today. Not a problem at this obscurity, but it is the thing that would
+  make private worth revisiting — not the source code.
+- Revisit if the project ever holds server credentials, private playtest builds, or
+  anything with commercial value. Flipping to private later is one click; un-publishing
+  what was already cloned is not.

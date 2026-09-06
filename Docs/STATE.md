@@ -44,7 +44,8 @@ non-Nanite" assumption was stale. Plus: the 1 km² island was the wrong first ta
 - Git + LFS repo, doc pack committed, pushed to
   **https://github.com/Harjas2102/VoxelWorld** — **visibility: PUBLIC**
   (verified 2026-09-05 via the GitHub API; CP-001 recorded "private" — that was the
-  stale record, now corrected). The repo contains no secrets after CP-002.
+  stale record, now corrected). **Ruled to stay public: D-019.** The repo contains no
+  secrets after CP-002; the inert Android token left in history is covered by D-019.
 - Governance: `AGENTS.md` (constitution) + `CLAUDE.md` (adapter) + `Docs/` (truth).
 
 No gameplay systems yet. No authoritative terrain layer yet. No C++ yet.
@@ -88,7 +89,6 @@ None.
 - Stage 3 transport method (conveyors / pipes / vehicles / drones)
 - Structural integrity & decay model
 - Terrain-under-structure policy
-- **Repo visibility** — currently public; Director to confirm keep or flip
 
 ## Role assignments today (D-014 — operational, not constitutional)
 

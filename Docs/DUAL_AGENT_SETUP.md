@@ -41,38 +41,13 @@ needs no second vendor.
 
 ---
 
-## 3. The universal opener (any vendor, any chat)
+## 3. The universal opener
 
-Paste this at the top of every ChatGPT (Astra) design chat, with the current
-files attached or pasted. It is the vendor-neutral twin of `CHAT_OPENER.md`.
+Moved to **`Docs/CHAT_OPENER.md`** — that is now the single canonical opener for every
+vendor and every chat. Keeping a second copy here would guarantee the two drift apart.
 
-```
-VoxelWorld design session. Attached: AGENTS.md, STATE.md, VISION.md
-(plus any Docs/ARCHITECTURE.md, DECISIONS.md, RISKS.md, or proposal
-relevant today). Read them fully first. They are the only source of
-truth; never rely on chat history or memory for project facts. If the
-docs and this conversation conflict, ask.
-
-Your role this session: [ARCHITECT | REVIEWER]. I am the Director.
-On any design fork: 2–3 options, tradeoffs, one recommendation, then
-wait for my ruling. Never change a numbered decision — propose one.
-
-ARCHITECT output = a proposal file: requirement → constraints → options
-→ recommended design → failure modes → test plan → what stays
-plugin-specific vs game-owned. Markdown, ready to save as
-Docs/proposals/P-XXX-<slug>.md.
-
-REVIEWER output = assume the proposal/diff contains a subtle flaw.
-Attack persistence, networking, join-in-progress, UE lifecycle/GC/
-threading, performance, and future automation. Distinguish blocker vs
-polish. No implementation. Markdown, ready to save as
-Docs/reviews/P-XXX-review-<vendor>.md.
-
-Confirm you're loaded by stating the current checkpoint number and
-current task in one line. Then we begin.
-```
-
----
+Set the role line to `ARCHITECT` or `REVIEWER` before pasting. `CHAT_OPENER.md` also
+carries the raw GitHub URLs, so any vendor can read the documents without a connector.
 
 ## 4. The relay — how a consequential (R3) subsystem gets built
 
