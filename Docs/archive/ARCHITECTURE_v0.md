@@ -5,8 +5,11 @@
 > body below is unchanged from its CP-002 state. Kept because v1 is deliberately narrower
 > than v0 — v1 covers **terrain authority, persistence and replication only**.
 >
-> **Still live in this file.** The following are *not* carried by v1 and remain in force
-> until some later document covers them. They are requirements, not history:
+> **Carried into v1 — no longer live in this file.** The four items below were uncovered by
+> v1 *as adopted*. The **Architect ruling of 2026-09-06** (technical, per D-023; recorded in
+> the header of `Docs/ARCHITECTURE.md`) carried all four into v1. They are requirements of
+> **v1** now, not of this archive; each entry keeps its original wording as the record of what
+> was missing, and names where it went. Implement against `Docs/ARCHITECTURE.md`, never here:
 >
 > 1. **§1 — why the adapter boundary exists.** v1 states the boundary and its enforcement
 >    (v1 §4.1 `Build.cs` separation, §8.1 the ownership table) but not the reasoning: if
@@ -14,20 +17,26 @@
 >    game, resource logic would depend on the renderer, network messages and save files would
 >    become plugin-specific, replacing the backend would become a rewrite, and terrain could
 >    not be tested without a renderer. This is the argument to reach for when the boundary is
->    questioned.
+>    questioned. — **Carried: v1 §4.1.0.**
 > 2. **§1 — surface queries as a consumer of the backend.** v0's bottom layer is "rendered
 >    terrain / collision / **surface queries**". v1 §8.1 assigns meshing, LOD and collision
 >    cooking to the plugin but defines no surface- or trace-query path through
 >    `ITerrainBackend`. Gameplay already needs one — the T-101A dig aims by camera line trace,
->    and placement will need the same. Unowned in v1.
+>    and placement will need the same. — **Carried: v1 §4.3**, as `QueryPoint` and
+>    `FTerrainPointSample`; `ITerrainBackend` goes from ten methods to eleven, and §6.1
+>    `Backend.Conformance` and §10 step 1 were updated to match. (Aiming stays a normal engine
+>    line trace against plugin-cooked collision, which is why it is not a backend method.)
 > 3. **§3 — tool ownership, cooldown and fuel as validation inputs.** v1 §4.4 validates
 >    request identity, reach, radius against tool max, rate limit per source, tool/power/
 >    durability, zone permission, self-clearance and chunk residency. It does **not** validate
->    that the requester owns or has equipped the tool, nor tool cooldown, nor fuel. Live.
+>    that the requester owns or has equipped the tool, nor tool cooldown, nor fuel. —
+>    **Carried: v1 §4.4**, added to the validation list at admission and revalidated at commit
+>    under DEF-7.
 > 4. **§4 — power grids in the entity store.** v0 lists SQLite entities as "players,
 >    inventories, structures, machines, **grids**". v1 §4.7's `entities.sqlite` comment drops
 >    `grids`. The electricity path is a VISION pillar and a standing drift check; the entity
->    store still has to hold power grids. Live.
+>    store still has to hold power grids. — **Carried: v1 §4.7**, per D-012 and VISION
+>    pillar 3.
 >
 > **Discharged, not live.** v0 §5 ("What v1 must add") is a checklist, and v1 delivers every
 > item on it: class and subsystem boundaries (§4.1), data structures and wire format (§4.2),
