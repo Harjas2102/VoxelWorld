@@ -5,8 +5,29 @@
 
 ---
 
-**Checkpoint:** CP-008 · **Date:** 2026-09-06
+**Checkpoint:** CP-009 · **Date:** 2026-09-06
 **Phase:** 1 — Terrain Feasibility
+
+## What happened at CP-009
+
+**Documentation-only session wrap-up, explicitly requested by the Director.**
+
+- README now reflects the built code, four-test baseline, exact UE 5.7 commands and
+  remaining terrain gate. Skimmed all 26 tracked project Markdown files, including
+  archived reviews/benchmark material; historical evidence was left intact.
+- **D-028:** alternate Claude and Codex according to available usage/time, with one
+  active Implementer. **Claude is expected next for T-112.3**; either agent may receive
+  the same handoff. This supersedes a fixed primary vendor, not the role boundaries.
+- `OPERATIONS.md` §5.1 defines receive → scope → brief decision/evidence breadcrumbs
+  → pre-limit save → formal handoff → authorized checkpoint/push. `HANDOFF.md` is the
+  single rolling artifact, linked by AGENTS, README, CLAUDE and the universal opener.
+  It includes the T-112.2 evidence and the next safe steps for T-112.3, without choosing
+  its unspecified API or extending D-027's bounded technical delegation.
+- Updated active workflow docs to remove obsolete vendor gates and reconcile risk
+  rules with AGENTS. The earlier benchmark remains historical, not another startup task.
+- **Validation:** documentation diff/relative-link checks only; no source or assets
+  changed. The last code validation remains CP-008 (`306348a`): build succeeded,
+  four tests passed, 0 failures, exit 0. No new build/PIE result or risk closure claimed.
 
 ## What happened at CP-008
 
@@ -323,6 +344,10 @@ an empty subsystem and does nothing. No backend adapter yet.
 **T-112 — build step 1** (`ARCHITECTURE.md` §9), **in progress**. Split into three
 sub-increments under R-009.
 
+**Incoming Implementer:** Claude expected for T-112.3; either Claude or Codex according
+to availability (D-028). Read `HANDOFF.md` for the numbered restart plan. T-112.3 has
+not started and still needs its bounded scope/API plan confirmed before implementation.
+
 | # | Scope | Status |
 |---|---|---|
 | **T-112.1** | `FTerrainOp` + 58-byte codec, chunk keys, quantiser. Tests `Op.Codec.RoundTrip`, `Op.Quantisation.Stable` | ✅ **Done at CP-007** |
@@ -398,7 +423,7 @@ plugin type/header crosses it. Backend replacement now has an executable factory
 including queries and position-sensitive hashes. The production adapter has not run
 that suite yet; replacement is not proved by the memory backend passing alone.
 
-## R-012 check (process weight, run at CP-008)
+## R-012 check (process weight, run at CP-009)
 
 **PASS for this bounded step; the lack of a playable change remains visible.**
 
@@ -408,6 +433,11 @@ authorised a determination and implementation completed in the same session. No
 checkpoint text or project-doc edits were produced before the Director said
 "checkpoint". **The next playable change is T-113**, one remaining sub-increment and
 the scheduled engine upgrade away. No new process task was inserted before it.
+
+CP-009 is the Director-requested documentation wrap-up. One rolling handoff replaces
+chat reconstruction; no per-agent reports or repeated full-doc skim is required each
+session. This documentation task is finished here; T-112.3 is the next work, with the
+same playable milestone and no additional onboarding gate.
 
 ## Blockers
 
@@ -426,8 +456,8 @@ None.
 | Role | Holder |
 |---|---|
 | Director | Harjas |
-| Implementer | Astra (Codex), onboarded at CP-008 alongside T-112.2 (D-027) |
-| Architect | Opus in the Claude app; T-112.2 determinations explicitly delegated by the Director (D-027) |
+| Implementer | Alternating Claude/Codex (D-028); outgoing Astra, Claude expected next for T-112.3 |
+| Architect | Opus in the Claude app; D-027's delegation was limited to the completed T-112.2 |
 | Independent reviewer | Whichever vendor did not author (R3 only) |
 
 ## Toolchain status

@@ -221,3 +221,9 @@ and the outcome is executable conformance evidence. No playable change yet; T-11
 remains the next playable milestone, after T-112.3 and the D-025 upgrade. Checkpoint
 documents were held until explicitly requested. Keep watching the cost of successive
 headless-only steps; no new process task was inserted ahead of the playable milestone.
+
+**CP-009 check:** the Director requested a docs skim, README refresh and an alternating
+agent handoff. One rolling HANDOFF file and OPERATIONS §5.1 cover both agents; no
+per-agent log tree, repeated full-doc skim or new startup gate is required. This aims
+to reduce usage-limit interruption cost; effectiveness will be tested by the next
+pickup of T-112.3. No terrain risks closed by this documentation-only update.

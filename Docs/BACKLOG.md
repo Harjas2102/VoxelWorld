@@ -22,7 +22,10 @@ the permanent world substrate.
 
 Passed with caveats on 2026-09-06. See the Done log and `Docs/T-101A_FINDINGS.md`.
 
-### Blind benchmark *(between 1A and 1B — NOW)*
+### Blind benchmark — ✅ DONE (CP-005)
+
+Historical task: D-017/D-022 adopted architecture v1. D-028 now supersedes the fixed
+primary-agent assignment. This is not a prerequisite to repeat before T-112.3.
 
 `Docs/DUAL_AGENT_SETUP.md` section 6. Identical context and an identical terrain-authority
 challenge to two vendors, blind, then cross-reviewed. Produces **ARCHITECTURE.md v1**,
@@ -36,6 +39,8 @@ Build order follows `ARCHITECTURE.md` §9. T-112.1 and T-112.2 are in the Done l
 `TerrainCore.Revision.Monotonic` green headless. AR-4 limits this to in-memory
 monotonicity and one bump per affected chunk; compaction coverage stays at step 4.
 Completion means all five TerrainCore tests pass; four pass at CP-008.
+Claude is the expected next Implementer; either agent may resume using `HANDOFF.md`
+and OPERATIONS §5.1 (D-028). The T-112.3 API/scope plan remains to be confirmed.
 
 Then **T-112.5** — UE 5.7 → 5.8 and Unreal MCP, per D-025 — followed by **T-113**,
 the production backend adapter, streaming component and Blueprint service rewire.

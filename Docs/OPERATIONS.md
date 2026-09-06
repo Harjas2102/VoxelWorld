@@ -4,7 +4,11 @@
 > that is expected and fine), open this file. Lives in `/Docs`. Supersedes
 > "The Ongoing Rhythm" table in SETUP.md.
 
-**Effective:** CP-002 (2026-09-05) · **Claude tier:** Opus under Claude Pro
+**Updated:** CP-009 (2026-09-06) · **Implementation:** Claude or Codex, alternating by availability (D-028)
+
+**Current entry point:** read STATE and HANDOFF using AGENTS §1. The Claude-specific
+commands below are conveniences for Claude sessions, not gates for Codex.
+The shared breadcrumb/handoff workflow is §5.1, including returns to the same agent.
 
 ---
 
@@ -39,9 +43,9 @@ persistence, power graph) — never on routine work. Pro usage resets on a
 | Session type | Where | Model / effort | Opens with | Ends with |
 |---|---|---|---|---|
 | **Design** (decisions, architecture, planning, reviews) | Claude app → VoxelWorld Project → new chat | Opus, high effort | Paste `STATE.md` + `VISION.md` (opener auto-applies) | `checkpoint` → paste result into Claude Code |
-| **Build** (code, docs, tooling, plugin setup) | Claude Code in `C:\Dev\VoxelWorld` | Opus via `/model`; `/effort` medium (high for R3 work) | `resume` | `checkpoint` (commits + pushes) |
+| **Build** (code, docs, tooling, plugin setup) | Claude Code or Codex in `C:\Dev\VoxelWorld` | Available agent under the same risk rules | `resume` + HANDOFF | Formal handoff + authorized checkpoint/push |
 | **Test** (UE editor, PIE, friends playtest) | Unreal editor | none | The runbook for the task | Screenshots + logs → next Build session |
-| **Cross-review** (only when Astra is verified — see DUAL_AGENT_SETUP.md) | ChatGPT + Claude | per that doc | proposal/diff file | review file saved to repo |
+| **Cross-review** (R3) | Independent reviewer, separate from author | per DUAL_AGENT_SETUP.md | proposal/diff file | review file saved to repo |
 
 One task per session. If a second task appears, note it in BACKLOG and stop.
 
@@ -62,9 +66,10 @@ claude --version
 - Auth expired → inside the session type `/login` and complete the browser flow.
 
 **Every Build session starts exactly like this:**
+First check for existing work using §5.1; the following assumes a clean worktree.
 ```
 cd C:\Dev\VoxelWorld
-git pull
+git pull --ff-only
 claude
 ```
 Then in Claude Code:
@@ -72,8 +77,8 @@ Then in Claude Code:
 2. Type `resume` — it reads AGENTS.md, STATE.md, VISION.md and recites the
    checkpoint number and current task. **If the recital is wrong, stop and fix
    the docs before doing anything.**
-3. Press **Shift+Tab** until the status line says **plan mode** for anything
-   larger than a one-file edit. Read the plan. Approve. Then it executes.
+3. Follow AGENTS risk classes: R0/R1 bounded implementation; R2 approved plan;
+   R3 proposal + independent review + ruling. File count does not determine risk.
 
 **Every Build session ends exactly like this:**
 1. `/diff` — read what changed.
@@ -140,15 +145,52 @@ in the standard format (goal → what you observed → what you need).
 ## 5. The standard Build session, as a checklist
 
 ```
-[ ] cd C:\Dev\VoxelWorld && git pull && claude
-[ ] /model → Opus     [ ] resume → recital correct
-[ ] next → read plan → go   (plan mode for anything big)
+[ ] Check status and HANDOFF (§5.1); sync a clean tree with git pull --ff-only
+[ ] Open available agent; resume → recital correct
+[ ] next → read plan → go   (risk process from AGENTS §3)
 [ ] Work. Return logs / screenshots / "expected vs actual" when asked.
 [ ] /diff → /review (if code)
 [ ] checkpoint → confirm push
 [ ] /exit
 ```
 Target length: 60–120 minutes. Longer sessions drift; checkpoint and restart.
+
+### 5.1 Breadcrumbs and formal handoff
+
+**One rolling file: `Docs/HANDOFF.md`.** No extra per-agent logs or copied transcripts.
+STATE remains checkpoint truth; the handoff is a working note, never a ruling.
+
+1. **Receive:** check `git status --short`, branch and `git log -3 --oneline`; on a
+   clean tree use `git pull --ff-only`. Preserve dirty work, identify its owner/task,
+   and reconcile it before edits. Read AGENTS' required docs plus HANDOFF. Verify its
+   base commit and unfinished-work claims. Do not depend on access to the old chat.
+2. **Set scope:** record task, risk class, agent/role, approved boundaries and base
+   commit in HANDOFF. Confirm the task as AGENTS requires. Address the eventual
+   handoff to whoever continues; an unknown incoming agent is normal.
+3. **Leave breadcrumbs:** after a meaningful result, failed approach, changed decision
+   or blocker, add **what changed/was learned → why → evidence/file → next action**.
+   Capture useful conclusions and concise rationale, not hidden deliberation or a
+   reasoning transcript. A few lines suffice. Label pending ideas; link approved
+   choices to their ruling.
+4. **Before limits or context reset:** save the exact safe restart point, changed or
+   staged files, incomplete tests, failing commands and any running process or cleanup.
+   Do this before spending the last response. Never label unfinished/untested code done
+   or commit it as a finished increment. Prefer an authorized checkpoint; `push` alone
+   retains its AGENTS meaning.
+5. **Finalize:** replace the rolling handoff with task/outgoing role; completed and
+   remaining work; decision summaries and sources; exact verification commands/results
+   and limits; failures/blockers; base commit/worktree state; and numbered next safe
+   actions with approval boundaries. Use HANDOFF's sections as the template. STATE
+   records the expected next agent if known, but either agent can receive the artifact.
+6. **Save and transfer:** at checkpoint or an explicitly authorized session wrap-up,
+   update checkpoint docs and HANDOFF, review the diff, commit and push. Verify
+   `main -> main` and clean status; report the commit in the final response. The
+   handoff can refer to its enclosing commit; do not amend merely to embed its own SHA.
+   On an interrupted/dirty transfer, identify uncommitted/unpushed work for the receiver
+   to reconcile. Git history preserves older handoffs.
+
+One active Implementer per workspace. Alternation does not require duplicate work or
+another proposal for already approved work. R3 independence and R2 approval remain.
 
 ---
 
@@ -165,15 +207,16 @@ Target length: 60–120 minutes. Longer sessions drift; checkpoint and restart.
 
 ---
 
-## 7. Usage-limit playbook (Pro, 5-hour window)
+## 7. Usage-limit playbook (either agent)
 
 Hitting the limit is a scheduling event, not a crisis.
-1. Don't end the session dirty — if you can, `push` first (one short message).
+1. Finalize HANDOFF before the limit (§5.1); checkpoint/push when authorized. If
+   interrupted with dirty work, record exact files, test state and the safe restart.
 2. Use the pause for work that needs no AI: compile, open the editor, run the
    PIE test, take screenshots, read the runbook, install a tool.
 3. Prepare the report for the next session (logs, screenshots, what happened).
-4. If Astra is verified, design and review work can continue there
-   (`DUAL_AGENT_SETUP.md`).
+4. Switch implementation to Claude or Codex according to availability. Both consume
+   the same handoff; neither is limited to review/doc work (D-028).
 5. Spend Opus on: architecture, subtle bugs, review. Don't spend it on
    renames, comments, or reformatting — batch those.
 
@@ -185,9 +228,10 @@ Hitting the limit is a scheduling event, not a crisis.
 2. Every session ends with `checkpoint` and a confirmed push. No exceptions.
 3. Chats are disposable; the repo is permanent. Retire long chats without guilt.
 4. `resume` first, always. A wrong recital means fix docs before work.
-5. Plan mode before anything bigger than one file.
+5. Follow AGENTS risk classes: R2 approved plan; R3 independent review/ruling before implementation.
 6. Small diffs, small commits (`feat(terrain): …`, `docs: …`, `fix(net): …`).
-7. Nothing is "done" until it compiles and passes its PIE test.
+7. Run the approved task's checks: headless tests for TerrainCore increments, PIE
+   for gameplay/multiplayer, diff/link checks for documentation-only changes.
 8. UE editor problems → screenshot + `Saved/Logs/VoxelWorld.log`, then `stuck`.
 9. Docs beat memory. If an agent "remembers" something not in `/Docs`, it's
    wrong until verified.
@@ -210,8 +254,7 @@ You find the editor hard to navigate. Push as much as possible to the agent:
   you press nothing but Compile.
 - **Blueprint when unavoidable:** it gives numbered node instructions; you
   screenshot; it verifies.
-- **Later (R2 evaluation, not now):** MCP editor control lets the agent drive
-  the editor directly. Evaluate once T-101B is done.
+- **Scheduled:** the D-025 engine/tooling upgrade is T-112.5, before T-113.
 
 When the instruction says "click X," and you can't find X: type `stuck` and
 paste a screenshot. That's the intended path, not a failure.

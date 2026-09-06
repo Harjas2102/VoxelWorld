@@ -7,7 +7,7 @@ This file is vendor-neutral and authoritative. Any model, from any vendor, in an
 obeys it. Tool-specific adapters (`CLAUDE.md`, a Codex instruction file, etc.) add
 session notes only — they never contradict this file.
 
-**Effective:** CP-002 (2026-09-05) · Governance basis: **D-014**
+**Effective:** CP-009 (2026-09-06) · Governance basis: **D-014, D-028**
 
 ---
 
@@ -18,6 +18,16 @@ session notes only — they never contradict this file.
 2. Confirm the current task with the Director before writing code.
 3. Never rely on chat history or memory for project facts. `/Docs` is the only truth.
 4. If the docs and the conversation conflict, **ask**.
+5. Read `Docs/HANDOFF.md` when present and follow `Docs/OPERATIONS.md` §5.1.
+   Verify its base commit and worktree state before acting. Agent identity never
+   substitutes for the handoff; the next worker may be the same agent or another.
+
+**Breadcrumbs and handoff (D-028).** During work, keep brief decision/evidence and
+progress notes in `Docs/HANDOFF.md` after a meaningful result, changed approach or
+blocker, and before a usage limit or context reset. Record conclusions and reasons,
+not a private reasoning transcript. This live work log is not checkpoint text:
+STATE/DECISIONS still change only under their existing authorization rules. At a
+checkpoint or authorized wrap-up, finalize the handoff using OPERATIONS §5.1.
 
 **Handoff labels.** Every block of document text, code, or commit message an Architect
 emits opens with exactly one instruction line stating what the Director does with it:
@@ -121,6 +131,8 @@ On the word `checkpoint`, or at session end:
 2. Add `Docs/DECISIONS.md` entries for any rulings made this session.
 3. Move completed `Docs/BACKLOG.md` items into the Done log with their CP number.
 4. Update `Docs/RISKS.md` — new risks, results, closed risks.
+   Finalize `Docs/HANDOFF.md` with evidence, unresolved work and the next safe action;
+   record the expected next agent in STATE, or say "either" when unknown.
 5. Commit as `type(scope): summary` (feat / fix / docs / chore / test).
 6. Push. Confirm the push line shows `main -> main`. **Not pushed = not saved.**
 

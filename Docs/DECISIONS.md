@@ -482,3 +482,23 @@ No GAME pillar changes; no new module dependency; DEF-5 and DEF-6 remain open.
 
 **Evidence:** T-112.2 build succeeded; four TerrainCore tests passed headless with
 zero failures and process exit 0. The Director then requested this checkpoint.
+
+## D-028 — Alternate Implementers with a shared handoff (2026-09-06) — ACCEPTED
+
+**Recorded:** CP-009 · **Authority:** Director · **Supersedes:** D-018's fixed primary
+Implementer assignment. D-027's earlier onboarding remains completed history.
+
+The Director will alternate Claude and Codex to use available usage limits and time.
+Claude is expected for T-112.3; the next worker is not guaranteed to be a particular
+vendor or even a different agent. One active Implementer works in the shared workspace.
+
+Every agent leaves brief summaries of choices, reasons, evidence and accomplishments
+during meaningful work, then a formal handoff for whoever continues. `Docs/HANDOFF.md`
+is the rolling artifact; `OPERATIONS.md` §5.1 is the single stepwise procedure, linked
+from AGENTS. STATE remains checkpoint truth; approved architecture/rulings remain in
+their existing files. Breadcrumbs are concise conclusions, not reasoning transcripts.
+
+This is scheduling and continuity, not extra architectural authority: R2 approval,
+R3 independent review, allowed-file boundaries and required checks still apply.
+The Director explicitly authorised the README/workflow updates, automatic commit/push
+and session wrap-up. No additional onboarding or review gate is introduced for R0/R1.

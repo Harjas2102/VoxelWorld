@@ -8,10 +8,14 @@
 **Before pasting:** pick the role (`ARCHITECT` or `REVIEWER`) and delete the other, and
 attach or paste the files named on the first line.
 
+For an in-repo implementation session, use `resume` and read `Docs/HANDOFF.md` under
+AGENTS §1 / OPERATIONS §5.1. Claude and Codex alternate (D-028); the design/review
+opener below does not assign the Implementer role.
+
 ---
 
 ```
-VoxelWorld design session. Attached: AGENTS.md, STATE.md, VISION.md
+VoxelWorld design session. Attached: AGENTS.md, STATE.md, VISION.md, HANDOFF.md
 (plus Docs/ARCHITECTURE.md, DECISIONS.md, RISKS.md, or a specific
 proposal if today's task needs them).
 
@@ -56,6 +60,7 @@ no auth, and no upload:
 |---|---|
 | AGENTS.md | `https://raw.githubusercontent.com/Harjas2102/VoxelWorld/main/AGENTS.md` |
 | STATE.md | `https://raw.githubusercontent.com/Harjas2102/VoxelWorld/main/Docs/STATE.md` |
+| HANDOFF.md | `https://raw.githubusercontent.com/Harjas2102/VoxelWorld/main/Docs/HANDOFF.md` |
 | VISION.md | `https://raw.githubusercontent.com/Harjas2102/VoxelWorld/main/Docs/VISION.md` |
 | DECISIONS.md | `https://raw.githubusercontent.com/Harjas2102/VoxelWorld/main/Docs/DECISIONS.md` |
 | RISKS.md | `https://raw.githubusercontent.com/Harjas2102/VoxelWorld/main/Docs/RISKS.md` |
@@ -70,7 +75,7 @@ blind benchmark, where both vendors must genuinely see identical context.
 
 Per `OPERATIONS.md` section 1 and `DUAL_AGENT_SETUP.md` section 2. The rule that matters:
 **writer is not reviewer for R3 work.** Whoever authored a proposal does not review it.
-For R0–R2 there is no second vendor and no ceremony — just do the work.
+R0/R1 do not require another vendor; R2 still requires an approved plan under AGENTS §3.
 
 ## Ending a design session
 
