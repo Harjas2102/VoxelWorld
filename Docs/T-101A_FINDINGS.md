@@ -200,6 +200,91 @@ It is still not *proof*: 1C must confirm the counts are accurate against known v
 deterministic across runs, and stable with `bMultiThreaded` and the async variants. But
 the mechanism the whole economic design rests on is demonstrably live.
 
+## 2d. ⛔ The plugin's mesh cannot be a multiplayer movement base
+
+Found by accident: PIE was still on the CP-001 replication settings
+(`PlayNetMode=PIE_ListenServer`, `PlayNumberOfClients=3`) when the first dig test ran.
+Two things broke at once, and both are architecture input, not noise.
+
+**1. No invoker means no terrain.** The plugin logs, once per PIE client:
+
+```
+Voxel World: Can't use camera as invoker in multiplayer!
+You need to add a VoxelInvokerComponent to your character
+```
+
+In any non-standalone net mode `AVoxelWorld` refuses to treat the player camera as its
+LOD invoker. The render octree then never subdivides: the world generates
+(`took 0.123081s to generate`), collision exists, but it renders as a single coarse blob
+and line traces into it return no hit. **Multiplayer terrain is therefore gated on
+putting a `VoxelInvokerComponent` on the character** — it is not optional polish, it is
+the difference between visible terrain and none.
+
+**2. The procedural mesh is not a replicable object.** Repeated, once per correction:
+
+```
+LogNetPackageMap: Warning: FNetGUIDCache::SupportsObject:
+  VoxelProceduralMeshComponent ...VoxelWorld_UAID_....Root.VoxelProceduralMeshComponent_0
+  NOT Supported.
+LogNetPlayerMovement: Warning: ClientAdjustPosition_Implementation could not resolve the
+  new relative movement base actor, ignoring server correction!
+  Client currently at world location X=-8228.700 Y=70.000 Z=92.100
+  on base VoxelProceduralMeshComponent_0
+```
+
+The character stands on the voxel mesh, so the server sets that component as the
+**relative movement base** — and the client cannot resolve it, because the component has
+no net GUID. Every movement correction is discarded. On flat ground this is survivable;
+the open question is what it does to a player standing on terrain that is actively being
+edited underneath them.
+
+This is a **new T-101B question and a new risk**: standing on voxel terrain currently
+degrades client movement correction in the exact way that matters for a dig-while-someone
+-else-digs test. It was not on the gate list; it is now.
+
+## 2e. ⛔ Voxel edits do not persist — the world regenerates on every load
+
+The hill sculpted in section 2c **does not survive into any other process.** Confirmed
+three ways:
+
+1. `AVoxelWorld::SaveObject` defaults to null (`VoxelWorld.h:109`), and its comment is
+   `// Automatically loaded on creation`. With no save object there is nothing to load,
+   so `CreateWorldInternal` falls back to the generator.
+2. The voxel world's actor package is **4745 bytes**, written *after* an edit touching
+   861,781 voxels. The data is demonstrably not in the level.
+3. A standalone launch logs `VoxelWorld_... took 0.251192s to generate` and puts the
+   player on a bare flat plane — the `VoxelFlatGenerator` output, with no hill.
+
+This is how Free Legacy works, not a misconfiguration. Two consequences:
+
+- **Anything sculpted from the editor is a session-local prop.** The T-101A test terrain
+  has to be rebuilt by script each session, or the world has to be given a save object.
+- **Persistence is an explicit, opt-in step**, and its cost is unmeasured. `SaveObject`
+  is a `UVoxelWorldSaveObject` asset; `UVoxelDataTools::GetCompressedSave` /
+  `LoadFromCompressedSave` and `GetSave` / `LoadFromSave` are the Blueprint-exposed
+  paths. **`AVoxelWorld::SaveData()` is `WITH_EDITOR` only** — the editor's save button
+  is not available at runtime, so the shipping path must go through the data tools.
+
+For Pillar 1 — *the world permanently records what the players did to it* — this is the
+whole ballgame, and it is now a measured unknown rather than an assumption. It stays
+T-101B's question (Critical #5, #8, R-003): how large does the save get, how long does it
+take, and does a restart reproduce the world exactly.
+
+## 2f. ⚠️ Editing near your own feet drops you through the floor
+
+Reported from the first playable standalone run: adding a sphere too close to the
+character **glitches the player through the ground and into an endless fall**. Digging at
+range is fine.
+
+Most likely the collision mesh is rebuilt asynchronously after an edit, leaving a window
+with no collision under the capsule — the character falls through before the new mesh
+lands, and there is no floor below to catch it.
+
+Not chased at T-101A (it is a solo smoke test), but it is a **gameplay-facing** problem,
+not cosmetic: digging beneath yourself is a thing players do constantly in this genre.
+Carried to T-101B as an edit-latency question, and it wants a KillZ or a respawn volume
+before anyone plays for real.
+
 ## 3. Useful assets discovered
 
 | Asset | Why it matters |
@@ -224,25 +309,72 @@ Nothing here is evidence about the questions that decide adoption. Carried into 
 | Is `ModifiedValues` accurate and deterministic enough to pay resources from? | Critical #7 | R-004 |
 | What happens to foliage and navigation over removed terrain? | Observe | R-005, R-006 |
 | Does any of this require client-only plugin behaviour? | architecture check | R-007 |
+| **Does an unreplicable mesh as movement base break players standing on edited terrain?** | **new, from 2d** | **R-010** |
+| **Cost of a `VoxelInvokerComponent` per character, and its LOD behaviour at 16–32 players?** | **new, from 2d** | **R-010** |
+| **How big and how slow is a `UVoxelWorldSaveObject` for a real dug-out world?** | **new, from 2e** | **R-003** |
+| **Is there a no-collision window after an edit, and does it drop players?** | **new, from 2f** | **R-010** |
 | **How much work is a C++ `UVoxelGenerator` with strata and an ore body?** | **new, from 2b** | **R-008** |
 
 ---
 
-## 5. PIE run results *(to be filled in from the PIE run)*
+## 5. Run results — 2026-09-06, standalone
 
-- **Dig / add work in PIE:** *pending*
-- **Tunnel or overhang achieved:** *pending* — the one that proves the representation is
-  genuinely volumetric and not a deformed heightfield
-- **Terrain reads as smooth, not blocky:** *pending* (Pillar 2)
-- **Editing feel / latency:** *pending*
-- **Collision correct after edits** (cannot walk on removed ground, added ground is
-  solid): *pending*
-- **New errors in the log:** *pending*
-- **Screenshots:** *pending*
+Run **standalone, not PIE**, and deliberately so: PIE is on the CP-001 three-player
+settings, where the plugin refuses the camera as LOD invoker and renders nothing usable
+(section 2d, R-010). Launched with `Tools\Play-Solo.ps1`. Log:
+`Saved\Logs\Standalone_T101A.log`.
 
-## 6. Verdict *(to be filled in from the PIE run)*
+- **Dig / add work:** ✅ **Yes.** `RemoveSphere` on LMB and `AddSphere` on RMB, wired in
+  `BP_ThirdPersonCharacter` via a camera-forward line trace at 1000 uu with a 200 uu
+  brush. Both fire reliably. `Trace Complex` was never needed — the procedural mesh is
+  hit by an ordinary Visibility trace with simple collision.
+- **Tunnel or overhang achieved:** ✅ **Yes — decisively.**
+  ![Tunnel through a player-built mound](images/T-101A_tunnel.png)
+  A mound built entirely from `AddSphere`, then tunnelled through with `RemoveSphere`
+  until it broke out the far side. **Rock spans above open air with sky visible through
+  the opening.** No heightfield can represent that. This is the single result T-101A
+  existed to obtain.
+- **Terrain reads as smooth, not blocky:** ✅ **Yes** — no cubes, no stair-stepping, no
+  voxel grid visible in the silhouette (Pillar 2, D-015). It reads as organic rock.
+  Caveat: the surface shows obvious **sphere-brush lobing** — the mound is legibly a pile
+  of spheres. That is a *brush and material* problem, not a representation problem, and
+  belongs to tooling later. The checkerboard exaggerates it.
+- **Collision correct after edits:** ⚠️ **Mostly.** Added ground is immediately solid and
+  walkable; removed ground stops supporting the player. **But** editing close to your own
+  feet drops you through the floor into an endless fall — see section 2f. So collision
+  updates, but not atomically with the edit.
+- **Editing feel / latency:** **Not measured.** No stutter was reported at a 200 uu brush
+  on a 512 m world, but no frame timings were taken. Do not treat this as evidence;
+  T-101B measures it.
+- **New errors in the log:** ✅ **None.** The only warnings are two missing VisionOS
+  editor icons (`Platform_VisionOS_24x.png`), entirely unrelated to this project. The
+  known `DestroyWorldInternal` shutdown `ensure` is editor-only and did not appear.
+- **Screenshots:** `Docs/images/T-101A_tunnel.png`. One image, and it carries the
+  mound, the excavation and the overhang together. A separate flat-ground pit shot was
+  not taken.
 
-*Does Free Legacy clear the bar to continue into T-101B? Yes / No / With caveats.*
+**What this run did NOT test**, and must not be read as evidence about: concurrency,
+persistence, join-in-progress, yield accuracy, or performance under load. Per **D-013**
+none of those can be judged from solo sculpting.
 
-Remember what this verdict is and is not: passing T-101A means the backend is worth
-testing properly. **It does not adopt it.**
+## 6. Verdict — PASS, with caveats
+
+**Does Free Legacy clear the bar to continue into T-101B? Yes.**
+
+It renders smooth deformable terrain, both edit tools work from gameplay code, the
+representation is genuinely volumetric, and the yield hook the economic design depends on
+returns real data (section 2c). That is everything T-101A asked for.
+
+**This verdict does not adopt the backend.** It says the backend is worth testing
+properly. Four findings go into T-101B as known costs, not surprises:
+
+| Finding | Cost it imposes |
+|---|---|
+| 2b — Voxel Graphs are Pro-gated | procedural generation must be C++ (**T-108**) |
+| 2d — mesh is not a replicable movement base; invoker required | multiplayer terrain is not free, and standing on terrain is the failure case |
+| 2e — no persistence by default | Pillar 1's core promise is an unmeasured opt-in step |
+| 2f — edit near your feet drops you through the floor | edit/collision atomicity is a gameplay-facing bug |
+
+The honest summary: **the representation is proven; everything that makes it a
+multiplayer persistent world is still unproven.** That is exactly the state T-101A was
+scoped to produce.

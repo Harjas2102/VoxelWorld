@@ -130,5 +130,31 @@ Severity / probability scale: **High · Medium · Low**.
   task is scoped to one evening. Agents prefer config, C++, and Python-scripted editor
   actions over menu instructions (AGENTS.md section 11).
 - **Owner / task:** T-101A, and every task definition thereafter
-- **Result:** *open* — clock starts 2026-09-05.
-- **Decision:** *open*
+- **Result:** ✅ **First test passed.** The deadline was 2026-09-12; the first hole *and*
+  the tunnel landed **2026-09-06**, six days early, in one working session. The rule has
+  now been exercised once and held. It stays in force for every subsequent task — one
+  success does not retire the largest observed failure mode of this project.
+- **Decision:** *open* — keep the rule; re-evaluate after T-101B, which is a much larger
+  task and the real test of whether one-evening scoping survives contact with the gate.
+
+## R-010 — Voxel terrain is a hostile multiplayer movement base
+
+- **Severity:** High — it sits directly on Pillar 1 and on the T-101B pass criteria.
+  Players stand on terrain constantly; if standing on it is unsound under replication,
+  no amount of correct edit-sync saves the feel.
+- **Probability:** Observed, not hypothetical — reproduced on the first PIE run at
+  T-101A (2026-09-06), which was accidentally still on the CP-001 3-player settings.
+- **Evidence:** `VoxelProceduralMeshComponent` is reported `NOT Supported` by
+  `FNetGUIDCache::SupportsObject`, so when the server sets it as a character's relative
+  movement base the client cannot resolve it and **every `ClientAdjustPosition`
+  correction is discarded**. Separately, `AVoxelWorld` refuses to use the player camera
+  as its LOD invoker outside standalone net mode, so multiplayer terrain does not render
+  at all without a `VoxelInvokerComponent` on the character. Full write-up:
+  `T-101A_FINDINGS.md` section 2d.
+- **What this changes:** two items the T-101B gate did not have. The invoker is a hard
+  requirement, not polish. The movement-base failure needs a deliberate test — a player
+  standing on terrain while another player edits it — because that is the exact case the
+  game is built around and the exact case this breaks in.
+- **Owner / task:** T-101B; the invoker also blocks any multiplayer terrain test at all
+- **Result:** *open*
+- **Decision:** *open* — feeds D-017 (terrain architecture v1)

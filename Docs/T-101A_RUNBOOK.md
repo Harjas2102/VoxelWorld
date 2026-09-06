@@ -153,6 +153,29 @@ like nothing happened.
 make the test meaningless, so the script keeps the first and removes the rest. To keep
 them, set `CLEAN_DUPLICATES = False` at the top of the script.
 
+## Step 5b — Move the player spawn out of the hill
+
+The hill's main lump is a sphere of radius 3000 (30 m) centred on the voxel world's
+origin, and the ThirdPerson template's PlayerStart sits ~12 m from that same origin.
+Straight after step 5 the player therefore spawns **encased in solid voxel**: no view,
+no movement. Fix it without touching a menu:
+
+```
+py C:\Dev\VoxelWorld\Tools\Editor\fix_player_spawn.py
+```
+
+It measures how far the sculpted hill actually reaches, moves every PlayerStart to open
+ground west of it facing the hill, and **saves the level itself**. Expect:
+
+```
+[fix_player_spawn] PlayerStart was BURIED - 2698 cm inside the r=3000 sphere at (0, 0, 0).
+[fix_player_spawn]    -> (-8229, 0, 150), facing +X toward the hill.
+[fix_player_spawn] Level SAVED.
+```
+
+If it reports `was already clear of the hill`, something other than burial is wrong —
+stop and diagnose rather than continuing.
+
 ## Step 6 — Wire up digging (Blueprint)
 
 No C++ and no compiler — T-100 is not required. **No new assets either:** plain key-event
@@ -214,10 +237,39 @@ top-right of the node search box.
 and used with `InputAction VoxelDig` nodes — also no asset creation. Ask for this if
 preferred.
 
-## Step 7 — Test in PIE and record the result
+## Step 7 — Test standalone and record the result
 
-1. Press **Play**.
-2. Walk to a hillside. **Left-click** to dig, **right-click** to add.
+> ### ⚠️ Do not use PIE for this step
+> PIE is configured for the CP-001 three-player replication test
+> (`PlayNetMode=PIE_ListenServer`, `PlayNumberOfClients=3`), and that is correct —
+> T-101B needs it. But in any non-standalone net mode the plugin logs
+> `Can't use camera as invoker in multiplayer!`, never subdivides the render
+> octree, and shows the world as one coarse blob that line traces miss. It also
+> spams `ClientAdjustPosition` warnings, because `VoxelProceduralMeshComponent`
+> cannot serve as a replicated movement base. Both are real findings, written up
+> in `T-101A_FINDINGS.md` section 2d and `RISKS.md` **R-010** — not things to fix
+> here. T-101A is a solo test (**D-013**), so run it solo.
+
+1. Launch standalone. It is a separate process, so the editor can stay open:
+
+```powershell
+cd C:\Dev\VoxelWorld
+.\Tools\Play-Solo.ps1
+```
+
+   Confirm in `Saved\Logs\Standalone_T101A.log`:
+
+```
+World NetMode = Standalone
+LogVoxel: Voxel Invoker enabled; Name: VoxelInvokerAutoCameraComponent_0
+LogVoxel: No Voxel Invoker found, using camera as invoker
+```
+
+   If `Can't use camera as invoker` appears, the launch was not standalone — stop
+   and fix that before interpreting anything else you see.
+
+2. Walk to the hillside (it is ~82 m ahead of the spawn set by
+   `Tools\Editor\fix_player_spawn.py`). **Left-click** to dig, **right-click** to add.
 3. Get all three of these:
    - a clear **hole**
    - a clear **mound**

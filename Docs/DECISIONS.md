@@ -213,3 +213,44 @@ is currently near zero.
 - Revisit if the project ever holds server credentials, private playtest builds, or
   anything with commercial value. Flipping to private later is one click; un-publishing
   what was already cloned is not.
+
+## D-020 — `Lvl_ThirdPerson` is the T-101A test map; `VoxelSandbox` is abandoned (2026-09-06) — ACCEPTED
+**Context:** `Content/Maps/VoxelSandbox.umap` was created at CP-002 as the dedicated
+terrain sandbox. At CP-003 it ended up holding the failed Voxel-Graph state (an empty
+world) and was deliberately left uncommitted. When `place_voxel_world.py` was re-run on
+2026-09-06 the editor happened to be on the ThirdPerson template map, so the voxel world
+was spawned into `Lvl_ThirdPerson` instead — and that turned out to be the better host,
+because it already carries the PlayerStart, GameMode and `BP_ThirdPersonCharacter` that
+the dig test needs. `VoxelSandbox` has none of them.
+**Decision:** **`Content/ThirdPerson/Lvl_ThirdPerson` is the T-101A map of record.**
+`Content/Maps/VoxelSandbox.umap` was reverted to its committed state and is abandoned for
+this task, not deleted.
+**Consequences:**
+- The voxel world actor, the moved PlayerStart and the dig wiring all live in
+  `Lvl_ThirdPerson` and its `__ExternalActors__` packages. That level uses One File Per
+  Actor, so **each actor is its own package and saving the level does not save them** —
+  a trap that cost three failed test launches at T-101A. Scripts must save
+  `actor.get_package()`, never `actor.get_outer().get_outermost()`.
+- Editing a template map means template content is mixed with test content. Acceptable
+  for a smoke test; T-101B should get a purpose-built map with its own PlayerStart and
+  GameMode rather than inheriting this one.
+- `VoxelSandbox.umap` stays in the repo at its CP-002 state. If a clean sandbox is wanted
+  later it needs a PlayerStart and a GameMode added before it is usable.
+
+## D-021 — Solo terrain work runs standalone, not PIE (2026-09-06) — ACCEPTED
+**Context:** PIE is configured for the CP-001 three-player replication test
+(`PlayNetMode=PIE_ListenServer`, `PlayNumberOfClients=3`). In any non-standalone net mode
+Voxel Plugin Free Legacy refuses to use the player camera as its LOD invoker, never
+subdivides the render octree, and shows the world as one coarse blob that line traces
+miss — while spamming `ClientAdjustPosition` failures, because
+`VoxelProceduralMeshComponent` cannot serve as a replicated movement base
+(`T-101A_FINDINGS.md` 2d, **R-010**).
+**Decision:** **PIE stays on the three-player settings** — that is what T-101B needs.
+Solo terrain testing launches standalone via `Tools\Play-Solo.ps1`, which runs as a
+separate process so the editor can stay open beside it.
+**Consequences:**
+- Any solo terrain result obtained through PIE is invalid and should be re-run standalone.
+- Multiplayer terrain testing is **blocked on adding a `VoxelInvokerComponent`** to the
+  character. That is a hard requirement, not polish, and it is now a T-101B entry cost.
+- Standalone writes to `Saved\Logs\Standalone_T101A.log`, separate from the editor's
+  `VoxelWorld.log`, so "check the log" stays unambiguous while both run.

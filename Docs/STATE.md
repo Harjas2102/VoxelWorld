@@ -5,44 +5,63 @@
 
 ---
 
-**Checkpoint:** CP-003 · **Date:** 2026-09-05
+**Checkpoint:** CP-004 · **Date:** 2026-09-06
 **Phase:** 1 — Terrain Feasibility
+
+## What happened at CP-004
+
+**T-101A is done. The first hole is dug, and the tunnel goes all the way through.**
+
+A mound built entirely from `AddSphere`, then tunnelled with `RemoveSphere` until it
+broke out the far side — **rock spanning open air with sky visible through the opening**
+(`Docs/images/T-101A_tunnel.png`). No heightfield can represent that geometry. The
+terrain reads smooth and organic, never blocky (Pillar 2, D-015). Log clean.
+
+**Verdict: PASS, with caveats.** Per **D-013** this does *not* adopt the backend; it says
+the backend is worth testing properly at T-101B.
+
+> **The honest one-line summary: the representation is proven; everything that makes it a
+> persistent multiplayer world is not.**
+
+Four costs were discovered and are now carried into T-101B as known entry costs rather
+than surprises. All four are written up in `Docs/T-101A_FINDINGS.md`:
+
+| § | Finding | Consequence |
+|---|---|---|
+| 2d | `VoxelProceduralMeshComponent` is `NOT Supported` by `FNetGUIDCache`, so a character standing on terrain has an unresolvable movement base; and the plugin refuses camera-as-invoker outside standalone | A `VoxelInvokerComponent` on the character is a **hard requirement** for any multiplayer terrain test. → **R-010** |
+| 2e | **Voxel edits do not persist.** `SaveObject` defaults to null, so the world regenerates from the generator on every load | Pillar 1's core promise is an unmeasured opt-in step. `SaveData()` is editor-only; the runtime path is `UVoxelDataTools`. → **R-003** |
+| 2f | Editing near your own feet drops the player through the floor into an endless fall | Edit/collision atomicity is a gameplay-facing bug, not cosmetic. → **R-010** |
+| 2b | *(from CP-003)* Voxel Graphs are Pro-gated | Procedural generation must be C++. → **T-108** |
+
+Also this session:
+
+- **D-020** — `Lvl_ThirdPerson` is the T-101A map of record; `VoxelSandbox` reverted and
+  abandoned for this task. The template map already had the PlayerStart, GameMode and
+  character the dig test needed.
+- **D-021** — solo terrain work runs **standalone** (`Tools\Play-Solo.ps1`), not PIE.
+  PIE stays on the three-player settings because T-101B needs them.
+- **R-009 first test passed.** The 7-day deadline was 2026-09-12; the hole and the tunnel
+  landed on the **6th**, six days early. The rule stays in force.
+- **A One File Per Actor trap cost three failed test launches**, and is worth never
+  repeating: `Lvl_ThirdPerson` stores each actor in its own package, so saving the level
+  does **not** save its actors. Scripts must save `actor.get_package()` — *not*
+  `actor.get_outer().get_outermost()`, which silently saves the map instead. Symptom:
+  PIE looks correct (it duplicates the in-memory world) while standalone, which loads
+  from disk, does not.
 
 ## What happened at CP-003
 
-Same evening as CP-002, but the state moved enough to warrant its own number.
-
-- **T-100 done.** Visual Studio Community 2022 **17.14.37614.0** with the "Game
-  development with C++" workload, MSVC **14.44.35207**, Windows SDK **10.0.26100.0**.
-  Verified with `vswhere -requires ...NativeGame` and by locating `cl.exe` — winget
-  reports success when the bootstrapper hands off, minutes before the workload lands.
-  **A Windows reboot is pending.**
-- **D-019 ruled** — the repository stays public; the inert Android token stays in history.
-- `CHAT_OPENER.md` rewritten vendor-neutral and made the single canonical opener;
-  **T-006 rescoped** to the four editor skills T-101A actually needs (confirmed not
-  started since June).
-- **⛔ Major backend finding (R-008): Voxel Graphs are Pro-gated.** The first attempt at
-  T-101A produced an empty world and a blue sky. Cause:
-  `Voxel: Running Voxel Graphs require Voxel Plugin Pro`. All 106 example generators are
-  unusable at runtime and **fail silently**. Free ships two runnable generators, both
-  C++. → **T-108** (C++ `UVoxelGenerator`) is now a Phase 1 requirement blocking 1C.
-  Details: `Docs/T-101A_FINDINGS.md` section 2b.
-- **✅ The D-011 yield hook is live.** Sculpting the workaround hill exercised
-  `AddSphere` and returned populated `FModifiedVoxelValue` arrays — 861,781 voxels across
-  five spheres, counts scaling with edit volume. Reachable and working on real data;
-  accuracy and determinism remain 1C's job. Section 2c.
+T-100 done (VS 2022 Community 17.14.37614.0, MSVC 14.44.35207, Win SDK 10.0.26100.0).
+D-019 ruled the repo stays public. `CHAT_OPENER.md` made the single canonical opener and
+T-006 rescoped. **R-008 found: Voxel Graphs are Pro-gated**, making T-108 a Phase 1
+requirement. The D-011 yield hook was proven live — 861,781 voxels across five spheres.
 
 ## What happened at CP-002
 
-External architecture review (GPT-5.6, two documents) plus a response review (Claude
-Fable 5.1), **accepted in full by the Director**. Recorded as **D-010 … D-016**.
-Governance became vendor-neutral (`AGENTS.md`); the roadmap was reordered around a
-terrain feasibility gate. Both reviews are archived in `Docs/reviews/`.
-
-Three June errors corrected: D-001 bundled the gameplay requirement with the vendor;
-terrain multiplayer was deferred to Phase 3 despite D-002; and the "voxel terrain is
-non-Nanite" assumption was stale. Plus: the 1 km² island was the wrong first target, and
-`CLAUDE.md` as constitution was vendor lock.
+External architecture review (GPT-5.6) plus a response review (Claude Fable 5.1),
+accepted in full as **D-010 … D-016**. Governance became vendor-neutral (`AGENTS.md`);
+the roadmap was reordered around a terrain feasibility gate. Reviews archived in
+`Docs/reviews/`.
 
 ## What exists right now
 
@@ -50,61 +69,56 @@ non-Nanite" assumption was stale. Plus: the 1 km² island was the wrong first ta
 
 - UE 5.7 Third Person template project **VoxelWorld** (Blueprint, Desktop, Max quality,
   Starter Content OFF), shaders compiled, runs clean.
-- 3-player PIE replication verified (Listen Server, movement replicates across all three
-  windows).
-- **Voxel Plugin Free Legacy is installed** at `Plugins/VoxelFree/` —
-  **v432 / `e9648b302` / EngineVersion 5.7.0**, prebuilt Win64 binaries, obtained
-  2026-07-06. The editor log confirms `Mounting Project plugin VoxelFree` and clean
-  `LogVoxel` init. Project plugins auto-enable, so this worked without a `.uproject`
-  entry. **Not committed** — `Plugins/VoxelFree/` is gitignored; reinstall via
+- **`Content/ThirdPerson/Lvl_ThirdPerson` — the T-101A map of record (D-020).** Contains:
+  - `VoxelWorld_T101A` — 50 cm voxels, 1024 voxels (512 m), `VoxelFlatGenerator`,
+    collisions on, `WorldGridMaterial` (the engine checker grid — projected from world
+    position, so it reads correctly on UV-less procedural meshes and makes holes and
+    overhangs legible; plain `BasicShapeMaterial` rendered white-on-white).
+  - PlayerStart moved to **(-8228.66, 0, 150)**, ~82 m west of the hill centre, facing it.
+  - `BP_ThirdPersonCharacter` wired for digging: LMB → line trace → `RemoveSphere`,
+    RMB → `AddSphere`, radius 200, 1000 uu reach, both behind a hit `Branch`.
+- **Voxel Plugin Free Legacy** at `Plugins/VoxelFree/` — **v432 / `e9648b302` / 5.7.0**,
+  prebuilt Win64 binaries. **Not committed** (gitignored); reinstall via
   `Tools/Install-VoxelFreeLegacy.ps1`.
-- **`Content/Maps/VoxelSandbox.umap`** exists with one `AVoxelWorld` actor, configured at
-  CP-003 to 50 cm voxels / 1024 voxels (512 m) / `VoxelFlatGenerator`.
+- `Content/Maps/VoxelSandbox.umap` — at its CP-002 committed state, abandoned (D-020).
+  Would need a PlayerStart and GameMode before it is usable.
 - Known non-fatal issue: an `ensure` on `AVoxelWorld::DestroyWorldInternal`
-  (GeneratorCache) fires at editor shutdown. Cosmetic; logged, not chased.
+  (GeneratorCache) at editor shutdown. Cosmetic; logged, not chased.
+- 3-player PIE replication verified at CP-001 (movement only, no terrain).
+
+**Tooling (all scripted; no menu navigation required):**
+
+| Tool | Does |
+|---|---|
+| `Tools/Editor/place_voxel_world.py` | Places and configures the voxel world, sculpts the test hill, saves the actor package |
+| `Tools/Editor/fix_player_spawn.py` | Measures the hill's real reach and moves every PlayerStart clear of it, saving the actor's own package |
+| `Tools/Editor/clean_duplicate_skysphere.py` | Removes an accidental duplicate sky sphere |
+| `Tools/Play-Solo.ps1` | Launches standalone single-player (D-021); separate process, own log |
+| `Tools/Install-VoxelFreeLegacy.ps1` | Idempotent plugin reinstall |
 
 **Repository:**
 
-- Git + LFS repo, doc pack committed, pushed to
-  **https://github.com/Harjas2102/VoxelWorld** — **visibility: PUBLIC**
-  (verified 2026-09-05 via the GitHub API; CP-001 recorded "private" — that was the
-  stale record, now corrected). **Ruled to stay public: D-019.** The repo contains no
-  secrets after CP-002; the inert Android token left in history is covered by D-019.
+- Git + LFS, pushed to **https://github.com/Harjas2102/VoxelWorld** — **PUBLIC** (D-019).
 - Governance: `AGENTS.md` (constitution) + `CLAUDE.md` (adapter) + `Docs/` (truth).
 
-- `Content/Maps/VoxelSandbox.umap` currently holds the **failed-graph state** (empty
-  world) and is intentionally **left uncommitted** — committing an empty world as the
-  test map would mislead anyone restoring it. It gets committed after the re-run.
-
-No gameplay systems yet. No authoritative terrain layer yet. No C++ module yet (the
-toolchain is now ready for one — T-108).
+No gameplay systems yet. No authoritative terrain layer yet. No C++ module yet.
 
 ## Current task
 
-- **T-101A** *(in progress — tooling done, PIE test outstanding)*
-  - ✅ Plugin verified, plugins enabled, editor launches clean, API surveyed.
-  - ✅ `Tools/Editor/place_voxel_world.py` works: flat generator + a hill sculpted from
-    five `AddSphere` calls, 512 m world at 50 cm voxels.
-  - ⏳ **Next, in order:** reboot (pending from T-100) → re-run the placement script →
-    Ctrl+S → wire the dig Blueprint (`T-101A_RUNBOOK.md` step 6) → PIE test → screenshots
-    → fill in `T-101A_FINDINGS.md` sections 5 and 6.
-- **T-108** *(new, queued)* — C++ `UVoxelGenerator` for the strata + ore-body test world.
-  Blocks sub-step 1C. Propose before implementing (R2/R3 boundary).
+**Blind benchmark** — `Docs/DUAL_AGENT_SETUP.md` section 6. Identical context and an
+identical terrain-authority challenge to two vendors, blind, then cross-reviewed.
+Produces **ARCHITECTURE.md v1**, **D-017** (terrain architecture) and **D-018** (primary
+implementer). It runs now, after T-101A, so the proposals are written against the
+plugin's real API and its four measured costs rather than against a guess.
 
-**7-day rule (R-009):** if the first hole is not dug by **2026-09-12**, the plan is wrong,
-not the Director — cut the step smaller.
+Queued behind it:
 
-## Definition of done for T-101A
+- **T-101B** — Terrain Feasibility Gate (tiered). Entry cost: a `VoxelInvokerComponent`
+  on the character, or there is no multiplayer terrain to test at all.
+- **T-108** — C++ `UVoxelGenerator` for strata + ore bodies. Blocks sub-step 1C.
+  Propose before implementing (R2/R3 boundary).
 
-1. Screenshot of a dug hole **and** an added mound in PIE.
-2. A tunnel or an overhang — proof the representation is genuinely volumetric.
-3. No errors in `Saved/Logs/VoxelWorld.log` beyond the known shutdown `ensure`.
-4. Script and `.uproject` changes committed and pushed.
-5. `Docs/T-101A_FINDINGS.md` written: plugin API notes, and what the plugin does and does
-   not provide for materials, saves, and multiplayer.
-
-Solo is acceptable **for 1A only**. Per **D-013**, no backend is accepted on solo
-sculpting — concurrency, save/restart, and join-in-progress are T-101B pass criteria.
+**7-day rule (R-009):** still in force for every task. Passed its first test at T-101A.
 
 ## Blockers
 
@@ -113,10 +127,9 @@ None.
 ## Open decisions
 
 - **D-008** — working title
-- **D-017** — terrain architecture v1 (from the blind benchmark,
-  `Docs/DUAL_AGENT_SETUP.md` section 6)
+- **D-017** — terrain architecture v1 (from the blind benchmark)
 - **D-018** — primary implementer for Phase 1B+ (same benchmark)
-- Survival meter set — resolved by testing, not by convention (D-016)
+- Survival meter set — resolved by testing, not convention (D-016)
 - Stage 3 transport method (conveyors / pipes / vehicles / drones)
 - Structural integrity & decay model
 - Terrain-under-structure policy
@@ -135,10 +148,11 @@ None.
 | Tool | Status |
 |---|---|
 | UE 5.7 | ✅ `C:\Program Files\Epic Games\UE_5.7` — installed, shaders compiled |
-| Git + LFS | ✅ git-lfs 3.7.1, 238 LFS files, push credentials verified |
+| Git + LFS | ✅ git-lfs 3.7.1, push credentials verified |
 | Claude Code | ✅ Installed, verified in-repo |
-| **Voxel Plugin Free Legacy** | ✅ **v432 / e9648b302 / 5.7 — installed, mounts clean** (gitignored) |
+| **Voxel Plugin Free Legacy** | ✅ **v432 / e9648b302 / 5.7 — mounts clean** (gitignored) |
 | Voxel Plugin 2 | ❌ Paid, gated on owning Pro Legacy — upgrade candidate only (R-008) |
-| Python Editor Script Plugin | ✅ Enabled at CP-002 (agent-driven editor scripting) |
+| Python Editor Script Plugin | ✅ Enabled at CP-002 — the primary way work gets done here |
 | Editor Scripting Utilities | ✅ Enabled at CP-002 |
-| Visual Studio 2022 (C++ workload) | ✅ 17.14.37614.0, MSVC 14.44.35207, Win SDK 10.0.26100 — **reboot pending** |
+| Visual Studio 2022 (C++ workload) | ✅ 17.14.37614.0, MSVC 14.44.35207, Win SDK 10.0.26100 — **not yet exercised; no C++ module has been built** |
+| Editor revision control | ⚠️ Enabled and failing checkout on every scripted save, popping a modal each time. Saves succeed anyway. Set Provider to None when it gets in the way. |

@@ -18,14 +18,11 @@ Ordinary survival content does not start until the backend is ruled on. A succes
 "I dug a smooth hole in PIE" demo proves almost nothing about whether the plugin can be
 the permanent world substrate.
 
-### T-101A — Terrain smoke test *(one evening, solo, NOW)*
+### T-101A — Terrain smoke test — ✅ **DONE (CP-004)**
 
-Free Legacy is already installed (v432, see STATE). Remaining: a configured voxel world
-in `VoxelSandbox`, dig and add in PIE, a tunnel or overhang, no editor errors,
-screenshots, and findings written to `Docs/T-101A_FINDINGS.md`.
-Runbook: `Docs/T-101A_RUNBOOK.md`. **Solo is acceptable for 1A only.**
+Passed with caveats on 2026-09-06. See the Done log and `Docs/T-101A_FINDINGS.md`.
 
-### Blind benchmark *(between 1A and 1B)*
+### Blind benchmark *(between 1A and 1B — NOW)*
 
 `Docs/DUAL_AGENT_SETUP.md` section 6. Identical context and an identical terrain-authority
 challenge to two vendors, blind, then cross-reviewed. Produces **ARCHITECTURE.md v1**,
@@ -205,3 +202,18 @@ T-101B sub-step 1D, which requires the multiplayer-capable version instead.
   with C++" workload, via winget. MSVC 14.44.35207, Windows SDK 10.0.26100.0.
   Verified with `vswhere -requires Microsoft.VisualStudio.Workload.NativeGame` and by
   finding `cl.exe` on disk — not on the installer's exit code.
+- **T-101A** *(CP-004)* Terrain smoke test — **PASS, with caveats.** A mound built with
+  `AddSphere`, tunnelled through with `RemoveSphere` until it broke out the far side:
+  rock spanning open air with sky visible through it, which no heightfield can represent
+  (`Docs/images/T-101A_tunnel.png`). Smooth, not blocky. Clean log. Run standalone, not
+  PIE (**D-021**), in `Lvl_ThirdPerson`, not `VoxelSandbox` (**D-020**).
+  Four costs discovered and carried into T-101B rather than treated as surprises:
+  Voxel Graphs are Pro-gated (2b, → **T-108**); the mesh cannot be a replicated movement
+  base and an invoker is mandatory (2d, **R-010**); **voxel edits do not persist** — the
+  world regenerates from the generator on every load (2e, **R-003**); and editing near
+  your own feet drops the player through the floor (2f).
+  **The representation is proven; everything that makes it a persistent multiplayer
+  world is not.** Passing 1A does not adopt the backend (**D-013**).
+  Tooling produced: `Tools/Editor/place_voxel_world.py`,
+  `Tools/Editor/fix_player_spawn.py`, `Tools/Editor/clean_duplicate_skysphere.py`,
+  `Tools/Play-Solo.ps1`.
