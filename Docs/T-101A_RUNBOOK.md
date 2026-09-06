@@ -115,32 +115,43 @@ py C:\Dev\VoxelWorld\Tools\Editor\place_voxel_world.py
 **Expected output** (verified by running it):
 
 ```
-[place_voxel_world] T-101A terrain setup
-[place_voxel_world] Existing AVoxelWorld actors in this level: 4
-[place_voxel_world] Reusing 'VoxelWorld_0'.
-[place_voxel_world] WARNING: Removing 3 duplicate voxel world(s) ...
 [place_voxel_world]    voxel_size            = 50.0 cm
-[place_voxel_world]    generator             = VoxelExample_IQNoise
-[place_voxel_world]    voxel_material        = M_VoxelMaterial_Colors
+[place_voxel_world]    generator             = VoxelFlatGenerator (C++; graphs are Pro-only)
+[place_voxel_world]    voxel_material        = BasicShapeMaterial
 [place_voxel_world]    world_size_in_voxel   = 1024  (render_octree_depth 5)
 [place_voxel_world]    -> 512 m across at 50 cm voxels
-[place_voxel_world]    recreated (existing edits preserved)
-[place_voxel_world]    is_created = True
+[place_voxel_world]    recreated (existing voxel edits DISCARDED - clean baseline)
+[place_voxel_world] Sculpting a hill (add_sphere)
+[place_voxel_world]    +sphere r=3000   at (0, 0, 0)  -> 514627 voxels changed
+[place_voxel_world]    ... (5 spheres)
+[place_voxel_world]    total voxels modified: 861781
 ```
 
+> ### ⚠️ Why not a noise generator?
+> **Voxel Graphs require Voxel Plugin Pro.** Assigning any of the 106 example graph
+> generators gives you `Voxel: Running Voxel Graphs require Voxel Plugin Pro` and an
+> **empty world — blue sky, no error**. Free ships exactly two runnable generators, both
+> C++: `VoxelFlatGenerator` and `VoxelEmptyGenerator`.
+>
+> So the script generates flat ground and then **sculpts the hill with `AddSphere`** —
+> the same tool the gameplay will use. Full write-up in `T-101A_FINDINGS.md` section 2b.
+>
+> `PRESERVE_EDITS = False` at the top of the script means a re-run **discards voxel
+> edits** and rebuilds a clean baseline. Correct for first setup. **Flip it to `True`
+> once you have digging worth keeping.**
+
 4. **Press Ctrl+S to save the level.** The script never saves for you.
-5. You should see hilly terrain around the origin. If the viewport looks empty, select
-   the actor in the World Outliner and press **F** to focus it.
+5. You should see a **grey hill** around the origin. If the viewport looks empty, select
+   `VoxelWorld_T101A` in the World Outliner and press **F** to focus it.
 
 **About the numbers:** 50 cm voxels across 1024 voxels is a **512 m** world — the upper
 end of the GDD's 256–512 m first test world. 50 cm rather than the default 100 cm matters
 for the next step: at 100 cm voxels a 100 cm dig brush removes a *single* voxel and looks
 like nothing happened.
 
-**About the duplicates:** the level currently holds four `AVoxelWorld` actors from the
-July session. Overlapping voxel worlds make the test meaningless, so the script keeps the
-first and removes the rest. To keep them, set `CLEAN_DUPLICATES = False` at the top of
-the script.
+**About duplicates:** if the level holds more than one `AVoxelWorld`, overlapping worlds
+make the test meaningless, so the script keeps the first and removes the rest. To keep
+them, set `CLEAN_DUPLICATES = False` at the top of the script.
 
 ## Step 6 — Wire up digging (Blueprint)
 

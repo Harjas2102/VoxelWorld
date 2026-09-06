@@ -28,8 +28,18 @@ WHY THESE NUMBERS
 import unreal
 
 # --- Tunables ----------------------------------------------------------------
-GENERATOR_PATH = "/Voxel/Examples/VoxelGraphs/IQNoise/VoxelExample_IQNoise"
-MATERIAL_PATH = "/Voxel/Examples/Materials/RGB/M_VoxelMaterial_Colors"
+# Free Legacy CANNOT RUN VOXEL GRAPHS ("Running Voxel Graphs require Voxel Plugin
+# Pro"). All 106 VoxelGraphGenerator example assets are therefore unusable here and
+# silently produce an EMPTY WORLD - blue sky, no error. The only runnable generators
+# in Free are the C++ ones: VoxelFlatGenerator and VoxelEmptyGenerator.
+# So: generate flat ground, then sculpt a hill with the plugin's own sphere tools.
+MATERIAL_PATH = "/Engine/BasicShapes/BasicShapeMaterial"   # plain grey; holes read clearly
+MATERIAL_FALLBACK = "/Voxel/Examples/Materials/RGB/M_VoxelMaterial_Colors"
+SCULPT_HILL = True         # re-running the script sculpts AGAIN, making the hill taller
+# False = discard existing voxel edits and rebuild a clean baseline. Correct for first
+# setup (the July map holds stale depth-10 save data from the failed graph attempt).
+# FLIP THIS TO TRUE once you have digging you care about keeping.
+PRESERVE_EDITS = False
 VOXEL_SIZE = 50.0          # cm per voxel
 WORLD_SIZE_VOXELS = 1024   # 1024 * 50 cm = 512 m across
 ENABLE_COLLISIONS = True
@@ -120,14 +130,12 @@ def main():
     world.set_editor_property("voxel_size", VOXEL_SIZE)
     say("   voxel_size            = %s cm" % world.get_editor_property("voxel_size"))
 
-    generator = load(GENERATOR_PATH, "generator graph")
-    if generator is not None:
-        world.set_generator_object(generator)
-        say("   generator             = %s" % generator.get_name())
-    else:
-        warn("keeping the existing generator; terrain may be empty or flat.")
+    world.set_generator_class(unreal.VoxelFlatGenerator)
+    say("   generator             = VoxelFlatGenerator (C++; graphs are Pro-only)")
 
-    material = load(MATERIAL_PATH, "RGB voxel material")
+    material = load(MATERIAL_PATH, "terrain material")
+    if material is None:
+        material = load(MATERIAL_FALLBACK, "fallback terrain material")
     if material is not None:
         try:
             world.set_editor_property("voxel_material", material)
@@ -158,8 +166,9 @@ def main():
     # is only used when the world is not already created.
     try:
         if world.is_created():
-            unreal.VoxelBlueprintLibrary.recreate(world, save_data=True)
-            say("   recreated (existing edits preserved)")
+            unreal.VoxelBlueprintLibrary.recreate(world, save_data=PRESERVE_EDITS)
+            say("   recreated (existing voxel edits %s)"
+                % ("preserved" if PRESERVE_EDITS else "DISCARDED - clean baseline"))
         else:
             world.create_world(unreal.VoxelWorldCreateInfo())
             say("   created")
@@ -169,11 +178,42 @@ def main():
 
     say("   is_created = %s" % world.is_created())
 
+    # --- 3b. Sculpt a hill ---------------------------------------------------
+    # The flat generator gives a plane. A plane is diggable, but a hill is what the
+    # GDD asks for and what makes a tunnel/overhang obvious. Build it out of spheres
+    # using the same tools the gameplay will use - which also proves, right here,
+    # that AddSphere works and reports what it changed.
+    if SCULPT_HILL:
+        say("-" * 62)
+        say("Sculpting a hill (add_sphere)")
+        origin = world.get_actor_location()
+        lumps = [
+            (0.0, 0.0, 0.0, 3000.0),
+            (0.0, 0.0, 1400.0, 2400.0),
+            (600.0, -400.0, 2600.0, 1500.0),
+            (2800.0, 1800.0, 200.0, 1900.0),
+            (-2400.0, -2000.0, 100.0, 1700.0),
+        ]
+        total = 0
+        for dx, dy, dz, radius in lumps:
+            pos = unreal.Vector(origin.x + dx, origin.y + dy, origin.z + dz)
+            try:
+                modified, _bounds = unreal.VoxelSphereTools.add_sphere(world, pos, radius)
+                n = len(modified)
+                total += n
+                say("   +sphere r=%-6.0f at (%.0f, %.0f, %.0f)  -> %d voxels changed"
+                    % (radius, pos.x, pos.y, pos.z, n))
+            except Exception as exc:
+                warn("   add_sphere failed: %r" % (exc,))
+        say("   total voxels modified: %d" % total)
+        say("   ^ that count comes from FModifiedVoxelValue - the same hook D-011 needs")
+        say("     to pay resources for material actually removed.")
+
     # --- 4. What to do next --------------------------------------------------
     say("=" * 62)
     say("DONE. Next:")
     say("  1. Press Ctrl+S to SAVE THE LEVEL. This script does not save.")
-    say("  2. You should see hilly terrain around the origin in the viewport.")
+    say("  2. You should see a grey hill around the origin in the viewport.")
     say("     If the viewport looks empty, press F to focus the selected actor.")
     say("  3. Wire up digging: Docs/T-101A_RUNBOOK.md, step 6.")
     say("=" * 62)

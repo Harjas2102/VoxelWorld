@@ -28,6 +28,9 @@ PIE run)* are the Director's to answer — see `Docs/T-101A_RUNBOOK.md` step 7.
 (GeneratorCache, `VoxelWorld.cpp:1071`) fires at editor *shutdown*, logged as an error
 with a callstack. Harmless. Do not chase it.
 
+**Generators:** see section 2b — **Voxel Graphs are Pro-only**, so only the two C++
+generators run on Free. This is the headline limitation of the free tier.
+
 **Rendering:** Free Legacy renders terrain through `VoxelProceduralMeshComponent` —
 **no runtime Nanite**. Voxel Plugin 2 supports runtime Nanite and Lumen, but it is paid
 and gated on owning Pro Legacy (R-008). Until then, **terrain material quality carries
@@ -139,16 +142,75 @@ truth outside the server's authority and violate D-002 and D-011 in one step.
 Read it for how diffs are packed and applied. **Build the authoritative layer ourselves**
 (D-011), which is precisely what T-101B sub-step 1B exists to prove.
 
+## 2b. ⛔ Free Legacy cannot run Voxel Graphs — found the hard way
+
+```
+Voxel: Running Voxel Graphs require Voxel Plugin Pro
+```
+
+Assigning `VoxelExample_IQNoise` (a `VoxelGraphGenerator`) produced **an empty world and
+a blue sky**. The asset loaded fine, `SetGeneratorObject` accepted it, `IsCreated()`
+returned true, and the world reported `took 0.230478s to generate`. Everything looked
+healthy. The generator simply produced no density.
+
+**This is the most important limitation found in T-101A**, for three reasons:
+
+1. **It is silent.** Not an error, not a warning — one `Voxel:` line among hundreds. The
+   symptom is empty sky, which reads as "I placed the actor wrong."
+2. **It voids the example library.** All **106** `VoxelGraphGenerator` assets shipped in
+   `/Voxel/Examples/` are Pro-gated at runtime. They are readable as documentation and
+   useless as code.
+3. **The only runnable generators in Free are the two C++ ones:**
+   `UVoxelFlatGenerator` and `UVoxelEmptyGenerator`. That is the entire list.
+
+**Consequence for the roadmap — procedural world generation must be C++.** A
+`UVoxelGenerator` subclass is now a **Phase 1 requirement**, not a later nicety: strata,
+an ore body, and the 256–512 m authored hill (GDD, World) cannot come from a graph asset
+on this backend. T-100 landing the same evening is what makes that path open.
+
+**Consequence for the architecture — mild, and arguably positive.** D-011 already says
+gameplay owns material semantics and generation; shipping a vendor's graph asset as the
+authoritative world generator would have violated it. What is lost is the *prototyping
+shortcut*, not the design. Recorded against **R-008**: this is exactly the class of
+"maintenance-mode free tier" limitation that risk exists to track.
+
+**Workaround in use for T-101A:** `VoxelFlatGenerator` for the ground, then the hill is
+**sculpted with `AddSphere`** from `Tools/Editor/place_voxel_world.py` — using the same
+tools gameplay will use.
+
+## 2c. ✅ The yield hook works, with real numbers
+
+Sculpting the hill exercised `UVoxelSphereTools::AddSphere` from Python and it returned
+`(ModifiedValues, EditedBounds)` on every call:
+
+```
++sphere r=3000 at (0, 0, 0)        -> 514627 voxels changed
++sphere r=2400 at (0, 0, 1400)     -> 121175 voxels changed
++sphere r=1500 at (600, -400, 2600) ->  27922 voxels changed
++sphere r=1900 at (2800, 1800, 200) -> 121581 voxels changed
++sphere r=1700 at (-2400, -2000, 100) -> 76476 voxels changed
+total voxels modified: 861781
+```
+
+So `FModifiedVoxelValue` is not merely present in a header — it is **populated with
+plausible counts, reachable from script, and it scales with edit volume**. That is the
+D-011 yield mechanism working on real data.
+
+It is still not *proof*: 1C must confirm the counts are accurate against known volumes,
+deterministic across runs, and stable with `bMultiThreaded` and the async variants. But
+the mechanism the whole economic design rests on is demonstrably live.
+
 ## 3. Useful assets discovered
 
 | Asset | Why it matters |
 |---|---|
-| `/Voxel/Examples/VoxelGraphs/IQNoise/VoxelExample_IQNoise` | Hilly noise generator — the T-101A test terrain |
+| `/Voxel/Examples/VoxelGraphs/IQNoise/VoxelExample_IQNoise` | ⛔ Pro-gated — produced an empty world (section 2b) |
+| `UVoxelFlatGenerator` (C++) | The generator actually in use for T-101A |
 | `/Voxel/Examples/Materials/RGB/M_VoxelMaterial_Colors` | Matches the default `RGB` material config |
 | `/Voxel/Examples/Maps/Tools/HighResolutionDigging` | A working digging demo to compare against |
 | `/Voxel/Examples/Maps/Multiplayer/VoxelExample_TcpMultiplayerMap` | The edit-sync reference above |
-| `/Voxel/Examples/VoxelGraphs/Cliffs`, `Cave`, `Ravines`, `Erosion` | Generator references for strata and an ore body (1C) |
-| 106 `VoxelGraphGenerator` assets total | A large worked-example library |
+| `/Voxel/Examples/VoxelGraphs/Cliffs`, `Cave`, `Ravines`, `Erosion` | Readable references for the C++ generator we must now write (1C) |
+| 106 `VoxelGraphGenerator` assets total | ⛔ **All Pro-gated at runtime** (section 2b) — readable as documentation only |
 
 ## 4. Answers T-101B still needs
 
@@ -162,6 +224,7 @@ Nothing here is evidence about the questions that decide adoption. Carried into 
 | Is `ModifiedValues` accurate and deterministic enough to pay resources from? | Critical #7 | R-004 |
 | What happens to foliage and navigation over removed terrain? | Observe | R-005, R-006 |
 | Does any of this require client-only plugin behaviour? | architecture check | R-007 |
+| **How much work is a C++ `UVoxelGenerator` with strata and an ore body?** | **new, from 2b** | **R-008** |
 
 ---
 
