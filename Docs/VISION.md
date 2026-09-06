@@ -33,6 +33,34 @@ simple terrain generation first, then grow.
 
 ---
 
+## Identity (D-015)
+
+**The world permanently records what the players did to it.**
+
+That sentence, not any technology, is the game. A mountain existed when a friend group
+first joined the server. They tunnelled through it, found ore, widened the excavation,
+built a road, installed power, established a quarry, automated the material handling —
+and months later the shape of that valley visibly records the history of the server.
+
+### Voxels are infrastructure, not art direction
+
+Only **terrain and geology** are volumetric: soil, stone, ore, tunnels, trenches, slopes,
+quarry faces, basements, embankments.
+
+Everything else is conventional: buildings, machines, props, trees, rocks, and foliage are
+normal meshes, Nanite, and PCG. Player structures are a modular mesh/entity system, not
+cubes.
+
+> **The test for every asset decision: the voxel grid should be as invisible to the player
+> as the physics broadphase.**
+
+The player never sees a "voxel." They see dirt, rock, ore, cliff, tunnel walls, and quarry
+faces. "Voxel" describes a possible internal representation; it is not the emotional
+identity of this game, and `VoxelWorld` is a codename only — the final title should not
+mention voxels.
+
+---
+
 ## Inspiration Matrix — what we take, what we leave
 
 | Source | We take | We leave |
@@ -81,6 +109,8 @@ Run at every checkpoint. Any unchecked box halts feature work until resolved.
 - [ ] Scope is still one planet, 16–32 players
 - [ ] Development is still incremental, Minecraft-alpha style
 - [ ] The five inspiration games above are still the reference set
+- [ ] The terrain backend remains replaceable (D-010, D-011)
+- [ ] Voxels are still invisible to the player (D-015)
 
 ---
 

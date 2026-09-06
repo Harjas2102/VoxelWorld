@@ -1,5 +1,7 @@
 # SETUP.md — Phase 0: From Zero to Working Brain
 
+> **Superseded for daily operation by `Docs/OPERATIONS.md`; kept as the environment build record.**
+
 > The complete, ordered setup. Follow top to bottom. Each step states the
 > goal, exact actions, and expected output. Report results between phases.
 > When finished, this file lives in `/Docs` as the record of how the

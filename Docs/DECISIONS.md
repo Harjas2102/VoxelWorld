@@ -19,6 +19,7 @@ UE Landscape cannot deform at runtime; blocky voxels violate Pillar 2.
 tier to prototype, Pro when justified). Nanite reserved for static meshes.
 **Consequences:** Terrain look depends on materials, not Nanite. A custom
 replication + persistence layer for voxel edits is our engineering burden.
+**Superseded in part by D-010 (backend provisional; requirement retained).**
 
 ## D-002 — Server-authoritative from day one (2026-06-12) — ACCEPTED
 **Context:** Retrofitting multiplayer into a single-player UE project is
@@ -98,3 +99,87 @@ and work in both views (no duplicate viewmodel meshes, a hidden tax of the
 floating-arms approach we avoided). **Known flag:** third-person corner-
 peeking is a PvP balance problem — decide whether PvP zones force first
 person when D-004 ships.
+
+## D-010 — Terrain requirement vs. backend (2026-09-05) — ACCEPTED
+**Context:** D-001 fused three separate decisions into one: the gameplay requirement,
+the world representation, and the vendor. Only the first is durable.
+**Decision:** The game requires a persistent, server-authoritative, deformable world
+supporting arbitrary volumetric excavation and addition — tunnels, mining, earthworks,
+and later industrial-scale terraforming. **This requirement is durable.** The terrain
+backend is **provisional**: the initial candidate is **Voxel Plugin Free Legacy** (free,
+ships 5.7 binaries); **Voxel Plugin 2** is the upgrade candidate when budget and engine
+compatibility allow. No backend is permanent until it passes the **T-101B feasibility
+gate**.
+**Consequences:** Backend code is isolated behind the D-011 adapter. R-008 tracks the
+licensing and version risk. A successful solo dig proves almost nothing — the gate
+decides.
+
+## D-011 — Authoritative terrain service (2026-09-05) — ACCEPTED
+**Context:** If gameplay calls the terrain plugin directly, the plugin API embeds itself
+across the whole game: resource logic depends on the renderer, network messages and save
+formats become plugin-specific, and replacing the backend becomes a rewrite.
+**Decision:** Gameplay owns edit operations, material semantics, permissions, revisions,
+and resource yield. The plugin sits behind a game-owned adapter and is **never the
+economic authority**. Gameplay code never includes plugin headers directly.
+**Consequences:** The backend is replaceable and the service is testable without a
+renderer. Plugin-specific types stay inside the adapter module. Mining yield is computed
+by the simulation from material actually removed, never inferred from the rendered mesh.
+
+## D-012 — Persistence model (2026-09-05) — ACCEPTED (provisional)
+**Context:** Persistence is the pillar. "We changed the struct and the server world is
+gone" must never become normal — for a friends server the emotional value of the world
+eventually exceeds that of the code.
+**Decision:** The deterministic base world (seed + generator version + authored stamps)
+is never saved redundantly. Each modified chunk stores a snapshot at revision R plus an
+append-only operation journal after R, compacted on thresholds. Revisions are monotonic.
+SQLite holds entities — players, inventories, structures, machines, grids; chunk data
+lives in versioned files.
+**Consequences:** Join-in-progress = snapshot + operations since. Every format carries a
+schema version and a migration path. Old-save fixtures are kept under `Tests/Saves/`.
+
+## D-013 — Terrain multiplayer moves into the gate (2026-09-05) — ACCEPTED
+**Context:** D-002 requires server authority from day one, yet the June BACKLOG scoped
+T-101 as solo and deferred terrain edit sync to Phase 3 — exempting the riskiest system
+from the project's own principle.
+**Decision:** **No terrain backend is accepted on solo sculpting.** Concurrent edits,
+save/restart, and join-in-progress are pass criteria of **T-101B**. This supersedes the
+June BACKLOG phasing that deferred sync to Phase 3.
+**Consequences:** Phase 1 is terrain feasibility. Ordinary survival content waits until
+one hill is trustworthy.
+
+## D-014 — Vendor-neutral AI governance (2026-09-05) — ACCEPTED
+**Context:** `CLAUDE.md` as the project constitution made one vendor structurally
+load-bearing. The 3-month gap and a cross-vendor review proved the repo-brain works — and
+that it should not be branded.
+**Decision:** `/Docs` plus `AGENTS.md` are the constitution. Roles — Architect,
+Implementer, Reviewer — are functions held by replaceable models. Current implementer:
+**Claude Code on Opus under Claude Pro**. The primary implementer for Phase 1B onward is
+chosen by the blind benchmark (`Docs/DUAL_AGENT_SETUP.md` section 6). **Writer is not
+reviewer for R3 work.** No API spending until programmatic orchestration has real value.
+The GLM worker strategy is **parked** until at least 10 bounded tasks exist.
+**Consequences:** `CLAUDE.md` becomes a thin adapter. Any vendor can be swapped without
+changing the workflow.
+
+## D-015 — VISION amendment: voxels are infrastructure, not art direction (2026-09-05) — ACCEPTED
+**Context:** The codename made an implementation detail sound like the identity. The June
+GDD already built this way in practice; the principle was simply never stated.
+**Decision:** Add to VISION.md the principle that **only terrain and geology are
+volumetric** — buildings, machines, props, trees, rocks, and foliage are conventional
+meshes / Nanite / PCG. The voxel grid should be as invisible to the player as the physics
+broadphase. Add the identity statement: **the world permanently records what the players
+did to it.** Add two drift checks: "terrain backend remains replaceable" and "voxels are
+invisible to the player."
+**Consequences:** The codename stays a codename; the final title should not mention
+voxels. Every asset decision is tested against the invisibility rule.
+
+## D-016 — Progression identity (2026-09-05) — ACCEPTED
+**Context:** "Primitive → workbench → electricity → automation" is a generic tech tree. It
+describes any survival game and distinguishes none.
+**Decision:** Technology progression is framed as **increasing scale of environmental
+control** — Stage 0 human labour, Stage 1 organized workshop, Stage 2 powered control,
+Stage 3 industrial logistics, Stage 4 landscape-scale infrastructure. **"The map
+physically records the factory's growth."** Survival pressure comes from environment
+mastery — temperature, exposure, darkness, hazards — not default bar-maintenance chores.
+Food exists without becoming a tax unless testing proves that loop is fun.
+**Consequences:** The GDD progression and survival sections are rewritten. Survival meters
+remain an open question resolved by testing, not by genre convention.
