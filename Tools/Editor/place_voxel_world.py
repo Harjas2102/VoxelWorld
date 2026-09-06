@@ -33,8 +33,14 @@ import unreal
 # silently produce an EMPTY WORLD - blue sky, no error. The only runnable generators
 # in Free are the C++ ones: VoxelFlatGenerator and VoxelEmptyGenerator.
 # So: generate flat ground, then sculpt a hill with the plugin's own sphere tools.
-MATERIAL_PATH = "/Engine/BasicShapes/BasicShapeMaterial"   # plain grey; holes read clearly
-MATERIAL_FALLBACK = "/Voxel/Examples/Materials/RGB/M_VoxelMaterial_Colors"
+# BasicShapeMaterial is flat untextured grey: terrain, holes and added spheres all
+# render the same white and the shape is unreadable. WorldGridMaterial is the engine's
+# checkered grid, projected from WORLD POSITION rather than UVs - so it works correctly
+# on procedural voxel meshes that have no meaningful UVs, and gives every surface a
+# visible scale reference. Holes, mounds and overhangs read instantly.
+MATERIAL_PATH = "/Engine/EngineMaterials/WorldGridMaterial"
+MATERIAL_FALLBACK = "/Engine/BasicShapes/BasicShapeMaterial"
+SAVE_AFTER = True          # save the actor's own package; see the note in main()
 SCULPT_HILL = True         # re-running the script sculpts AGAIN, making the hill taller
 # False = discard existing voxel edits and rebuild a clean baseline. Correct for first
 # setup (the July map holds stale depth-10 save data from the failed graph attempt).
@@ -209,13 +215,50 @@ def main():
         say("   ^ that count comes from FModifiedVoxelValue - the same hook D-011 needs")
         say("     to pay resources for material actually removed.")
 
+    # --- 3c. Persistence reality check ---------------------------------------
+    # AVoxelWorld::SaveObject is "Automatically loaded on creation" and defaults to
+    # null. With no save object the world REGENERATES FROM THE GENERATOR every time
+    # it is created, so the hill sculpted above exists only in this editor session.
+    # A standalone launch, or any process that loads the level from disk, gets the
+    # bare flat plane. This is not a misconfiguration - it is how Free Legacy works.
+    say("-" * 62)
+    say("Persistence")
+    try:
+        save_object = world.get_editor_property("save_object")
+    except Exception as exc:
+        warn("could not read save_object: %r" % (exc,))
+        save_object = None
+    if save_object is None:
+        warn("save_object = None. The sculpted hill lives ONLY in this editor")
+        warn("session. Standalone and PIE regenerate a FLAT plane from")
+        warn("VoxelFlatGenerator. See T-101A_FINDINGS.md section 2e.")
+    else:
+        say("   save_object = %s" % save_object.get_name())
+
+    # --- 3d. Save the actor's own package ------------------------------------
+    # Under One File Per Actor the voxel world actor has its own package; saving the
+    # level does NOT save it, so property changes above would not reach disk.
+    if SAVE_AFTER:
+        say("-" * 62)
+        say("Saving")
+        try:
+            pkg = world.get_package()
+            say("   package: %s" % pkg.get_name())
+            ok = unreal.EditorLoadingAndSavingUtils.save_packages([pkg], False)
+            say("   actor package SAVED." if ok else "   save_packages() returned False.")
+        except Exception as exc:
+            warn("could not save the actor package: %r" % (exc,))
+            warn("Use File > Save All instead.")
+
     # --- 4. What to do next --------------------------------------------------
     say("=" * 62)
     say("DONE. Next:")
-    say("  1. Press Ctrl+S to SAVE THE LEVEL. This script does not save.")
-    say("  2. You should see a grey hill around the origin in the viewport.")
+    say("  1. You should see a grid-textured hill around the origin in the viewport.")
     say("     If the viewport looks empty, press F to focus the selected actor.")
-    say("  3. Wire up digging: Docs/T-101A_RUNBOOK.md, step 6.")
+    say("  2. Move the player spawn out of the hill:")
+    say("       py C:/Dev/VoxelWorld/Tools/Editor/fix_player_spawn.py")
+    say("  3. Test standalone, NOT PIE (RISKS.md R-010):")
+    say(r"       .\Tools\Play-Solo.ps1")
     say("=" * 62)
 
 
