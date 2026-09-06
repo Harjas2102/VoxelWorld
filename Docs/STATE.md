@@ -5,8 +5,98 @@
 
 ---
 
-**Checkpoint:** CP-006 · **Date:** 2026-09-06
+**Checkpoint:** CP-007 · **Date:** 2026-09-06
 **Phase:** 1 — Terrain Feasibility
+
+## What happened at CP-007
+
+**Build step 1 is half done, and the half that is done is the half with a permanent format
+in it.** The `TerrainCore` value types, the `FTerrainOp` wire codec and the world→voxel
+quantiser exist, with two headless automation tests green and the process exiting 0.
+
+```text
+Build: Result: Succeeded
+Run:   Found 2 automation tests based on 'TerrainCore'
+       Test Completed. Result={Success} Name={RoundTrip} Path={TerrainCore.Op.Codec.RoundTrip}
+       Test Completed. Result={Success} Name={Stable}    Path={TerrainCore.Op.Quantisation.Stable}
+       **** TEST COMPLETE. EXIT CODE: 0 ****
+```
+
+Six new files, no existing file modified:
+
+| File | Holds |
+|---|---|
+| `Public/TerrainTypes.h` | §4.2 field-for-field — `FTerrainOpSeq`/`FTerrainRev`/`FTerrainMatId`, `FTerrainChunkKey` (+ `operator==`, `GetTypeHash`), `FTerrainBox`, `ETerrainRole`, `FTerrainMaterialVolume`, `FTerrainEditResult`, `ETerrainRegionEncoding`, `FTerrainRegionData`, `FTerrainStreamingInterest`, and §4.3's `FTerrainPointSample` |
+| `Public/TerrainOp.h` + `Private/TerrainOp.cpp` | `ETerrainOpKind` / `ETerrainShape` / `ETerrainSource`, `FTerrainOp`, and the codec |
+| `Public/TerrainQuantise.h` + `Private/TerrainQuantise.cpp` | `QuantiseEdit`, `DequantiseVoxel`, `QuantiseRadiusQ16` |
+| `Private/Tests/` | `TerrainOpCodecTest.cpp`, `TerrainQuantiseTest.cpp` — both `WITH_DEV_AUTOMATION_TESTS`-guarded |
+
+**The 58 bytes are measured, not asserted in a comment.** §4.2 fixes the encoded body at 58;
+the test logs the number rather than reporting only the absence of a failure:
+
+```text
+LogAutomationController: Encoded FTerrainOp body measured 58 bytes (ARCHITECTURE.md 4.2 fixes it at 58)
+```
+
+Layout, little-endian, declaration order: OpSeq 8 · TransactionId 8 · Kind/Shape/Source 1+1+1
+· SourceId 4 · ToolId 4 · CentreVox 12 · RadiusVoxQ16 4 · ExtentVox 12 · MaterialId 2 ·
+Flags 1. No `sizeof`, no `memcpy` of the struct, no padding on the wire — a compiler that
+repacks `FTerrainOp` cannot change what an old save means. Unknown enum bytes fail
+deserialisation rather than silently casting to `Remove`.
+
+### The boundary held again, and this time without being probed
+
+`TerrainCore.Build.cs` is byte-identical to its CP-006 state (`git diff --quiet`). The
+complete include set across the module is nine engine headers plus our own; no plugin header
+appears anywhere. No "Voxel" in any new file or type name (D-015) — it survives only where
+`ARCHITECTURE.md` §4.2 and the packet's own signatures put it (`CentreVox`, `VoxelSizeCm`,
+`DequantiseVoxel`), as a unit of space, never as an identity.
+
+### Two things the tests were wrong about first, and what they taught
+
+Neither was a defect in the quantiser. Both are floating-point limits that the first draft of
+the test asserted past, and both are now written into the test file rather than worked around
+quietly — because the next person to read `Op.Quantisation.Stable` needs to know where the
+guarantee actually stops.
+
+1. **Sub-ULP nudges around a boundary are not separable after the transform.** The quantiser
+   converts to terrain-local *before* flooring, and that subtraction rounds. A world-space
+   perturbation smaller than one ULP of the terrain-**local** coordinate is unrepresentable
+   afterwards and collapses back onto the boundary exactly. First run:
+   `Boundary voxel 64 axis 1 at 1 ULP: on=64 up=64 down=64` — world 1152.0, local 3200.0,
+   half an ULP at 3200. The test now sizes its nudge in ULPs of the coarser of the two
+   magnitudes, so the perturbation provably survives, and separately asserts the strict
+   single-raw-ULP form under an exactly-invertible origin, where the question is well posed.
+2. **Voxel 0 under an identity origin cannot take the raw-ULP form at all.** One ULP below
+   0.0 is the smallest denormal; dividing it by the voxel size underflows to −0.0, whose
+   floor is 0, not −1. No divide-then-floor rule can do otherwise — the two positions are
+   not separable after the division. Unreachable in play (5e−324 cm is not a position), and
+   voxel 0 is still covered by the scaled-nudge loop, whose reference magnitude is floored at
+   the voxel size precisely so its nudge stays normal.
+
+**This does not establish DEF-5.** Integer ops remove one conversion hazard; deterministic
+replay across builds, platforms and backends is a separate claim with no evidence yet, and
+DEF-5 stays open and bound to build step 3.
+
+### R-011 was exercised for the first time, and it worked
+
+The packet named `ETerrainRole` in its file list. `ARCHITECTURE.md` mentions `role` exactly
+once — **line 325**, in the §4.3 `Initialize` comment — and never enumerates its values.
+Under R-011 the increment was **not** returned unstarted: the ambiguity is named to the line,
+`{ Server, Client }` was taken as the only pair the document's own language supports, nothing
+else in the increment was made to depend on it, and it is routed to the Architect as
+**D-025 (PENDING)** rather than becoming permanent by silence.
+
+**D-025** also carries the second determination: `DequantiseVoxel` returns the voxel
+**centre**, not its minimum corner. That one is forced rather than chosen — the corner does
+not survive `Quantise(Dequantise(Q)) == Q`, because a transform is not exactly invertible and
+a corner landing one ULP below its own face floors to Q−1.
+
+One packet-level correction worth keeping: the §6.1 test identifiers `Op.Codec.RoundTrip` and
+`Op.Quantisation.Stable` match nothing under `Automation RunTests TerrainCore`, which is a
+substring match (`AutomationCommandline.cpp:142`). The tests are registered as
+`TerrainCore.Op.Codec.RoundTrip` and `TerrainCore.Op.Quantisation.Stable`, preserving the
+§6.1 names as suffixes.
 
 ## What happened at CP-005 / CP-006
 
@@ -128,15 +218,21 @@ the roadmap was reordered around a terrain feasibility gate. Reviews archived in
 
 ## What exists right now
 
-**C++ (new at CP-006 — the project builds from source):**
+**C++ (the project builds from source; value types, codec and quantiser new at CP-007):**
 
 ```text
 Source/
-  VoxelWorld.Target.cs          Game target      | BuildSettingsVersion.V6
-  VoxelWorldEditor.Target.cs    Editor target    | EngineIncludeOrderVersion.Unreal5_7
-  VoxelWorld/                   primary game module — depends on TerrainCore ONLY
-  TerrainCore/                  Core, CoreUObject, Engine. NO plugin dependency.
-    Public/TerrainService.h     UTerrainService : UWorldSubsystem — empty (K7)
+  VoxelWorld.Target.cs             Game target      | BuildSettingsVersion.V6
+  VoxelWorldEditor.Target.cs       Editor target    | EngineIncludeOrderVersion.Unreal5_7
+  VoxelWorld/                      primary game module — depends on TerrainCore ONLY
+  TerrainCore/                     Core, CoreUObject, Engine. NO plugin dependency.
+    Public/TerrainService.h        UTerrainService : UWorldSubsystem — still empty (K7)
+    Public/TerrainTypes.h          §4.2 value types + §4.3 FTerrainPointSample
+    Public/TerrainOp.h             FTerrainOp + the 58-byte codec's declarations
+    Public/TerrainQuantise.h       QuantiseEdit / DequantiseVoxel / QuantiseRadiusQ16
+    Private/TerrainOp.cpp          the codec — PERMANENT FORMAT
+    Private/TerrainQuantise.cpp    world→voxel, Floor, fixed by §4.3
+    Private/Tests/                 TerrainOpCodecTest.cpp, TerrainQuantiseTest.cpp
 ```
 
 - **`VoxelWorld`** — the primary game module (`IMPLEMENT_PRIMARY_GAME_MODULE`). Gameplay,
@@ -145,9 +241,14 @@ Source/
 - **`TerrainCore`** — game-owned, compiles headless, holds no plugin type. **Its `Build.cs`
   is the boundary** (§4.1, §4.1.0). Adding a plugin to that dependency list breaks D-011 and
   the `AGENTS.md` §9 drift guard and requires a numbered decision, not an edit.
-- **`UTerrainService : UWorldSubsystem`** — empty at step 0. A subsystem, not an actor:
-  K7, ruled by D-024. Validation, sequencing, revisions, journalling and yield arrive at
-  build steps 1 and 3.
+- **`UTerrainService : UWorldSubsystem`** — **still empty at CP-007.** A subsystem, not an
+  actor: K7, ruled by D-024. Validation, sequencing, revisions, journalling and yield arrive
+  at build steps 1 and 3.
+- **The §4.2 value types, the `FTerrainOp` codec and the quantiser** — new at CP-007, and the
+  first thing in this repo with a **permanent format** in it. The encoded op body is 58 bytes
+  and is simultaneously the wire format and the journal record body, so changing it changes
+  what old saves mean: it is a persistence format under `AGENTS.md` §4 and moves by numbered
+  decision, not by edit. Nothing calls any of it yet.
 - **`VoxelWorld.uproject`** now carries a `Modules` array (`TerrainCore` first, then
   `VoxelWorld`). Both DLLs build into `Binaries/Win64/` (gitignored).
 - `TerrainBackendVPLegacy` — the only module that may ever include plugin headers — **does
@@ -204,23 +305,27 @@ an empty subsystem and does nothing. No backend adapter yet.
 
 ## Current task
 
-**T-112 — build step 1** (`ARCHITECTURE.md` §9). `FTerrainOp`, chunk keys,
-`ITerrainBackend`, `FMemoryTerrainBackend`, and the `UTerrainService` skeleton.
-**Ends with codec, quantisation and revision tests passing headless.** No gameplay change;
-nothing is wired to the dig yet.
-
-Step 1 is where two things first exist:
+**T-112 — build step 1, second half** (`ARCHITECTURE.md` §9). Done at CP-007: `FTerrainOp`,
+the value types, the 58-byte codec and the quantiser, with `Op.Codec.RoundTrip` and
+`Op.Quantisation.Stable` green. **Still owed by step 1:**
 
 - **The eleven-method `ITerrainBackend`** (§4.3) — ten from the adopted proposal plus
   `QueryPoint`, carried in from v0 by the Architect ruling. Everything the game ever does to
   terrain goes through those eleven methods.
+- **`FMemoryTerrainBackend`** — a dense `TMap<FTerrainChunkKey, TArray<int16>>`, no renderer,
+  no plugin.
+- **The `UTerrainService` skeleton** — still literally empty at CP-007.
+- **The revision tests** — `Revision.Monotonic` (§6.1): chunk revs never decrease, including
+  across payload deletion, and a multi-chunk op bumps every affected chunk exactly once.
 - **The `Backend.Conformance` suite** (§6.1) — *"This suite is the definition of the
-  contract; there is no other one"* (§10 step 2). `FMemoryTerrainBackend`, a dense
-  `TMap<FTerrainChunkKey, TArray<int16>>` with no renderer and no plugin, is its first
-  subject — which is what makes acceptance criterion **A5** reachable before the adapter
+  contract; there is no other one"* (§10 step 2). `FMemoryTerrainBackend` is its first
+  subject, which is what makes acceptance criterion **A5** reachable before the adapter
   exists.
 
-No defect in §14 and no fork in §15 is bound to step 1.
+Step 1 ends when those pass headless. No gameplay change; nothing is wired to the dig yet.
+
+No defect in §14 and no fork in §15 is bound to step 1. **D-025 is pending but does not block
+it** — nothing in the second half depends on `ETerrainRole`'s value set either.
 
 Queued:
 
@@ -236,14 +341,14 @@ Server authority is not proven until build step 3.
 
 **Process:** R-012 in force. The next three tasks all end in something that runs.
 
-## Drift checks (VISION.md, run at CP-006)
+## Drift checks (VISION.md, run at CP-007)
 
-**Both flags REMAIN.** Build step 0 changed no gameplay code — that was its whole
-specification — so `BP_ThirdPersonCharacter` still calls `UVoxelSphereTools::RemoveSphere`
-and `AddSphere` directly, on the client. Creating `TerrainCore` does not clear them; the
-service is empty and nothing routes through it yet. **They clear at build step 2 (T-113),
-when the Blueprint is rewired through `RequestEdit` and the direct calls are deleted — and
-then for standalone only.** Server authority is not proven until build step 3.
+**Both flags REMAIN, unchanged and for the unchanged reason.** CP-007 added value types, a
+codec and a quantiser. None of it is called by anything yet, so
+`BP_ThirdPersonCharacter` still calls `UVoxelSphereTools::RemoveSphere` and `AddSphere`
+directly, on the client. **They clear at build step 2 (T-113)**, when the Blueprint is rewired
+through `RequestEdit` and the direct calls are deleted — and then for standalone only. Server
+authority is not proven until build step 3.
 
 - [x] Terrain is smooth-voxel and player-deformable — proven at T-101A
 - [ ] **Every gameplay system is server-authoritative — FLAGGED**
@@ -274,19 +379,33 @@ and this Blueprint is rewired through it or deleted.** It is test scaffolding wi
 gameplay-shaped silhouette, which is exactly the kind of thing that quietly becomes
 permanent. Feature work does not start on top of it.
 
-## R-012 check (process weight, run at CP-006)
+**Second-order check, new at CP-007.** The second flag is about the backend staying
+*replaceable*, and CP-007 is the first session that wrote types the backend interface will be
+expressed in. They were checked against the flag rather than assumed to be fine: no plugin
+header in the module, `Build.cs` byte-identical, no plugin index anywhere near
+`FTerrainMatId`, and `FTerrainRegionData::ValueConfig` carries a plugin concept as an opaque
+`uint8` rather than as a plugin type. Nothing added at CP-007 makes the backend harder to
+replace.
+
+## R-012 check (process weight, run at CP-007)
 
 **PASS.** The warning signs are a session that produces no playable change, a document whose
 only reader is another document, and a decision the Director cannot restate in one sentence.
 
-This session produced **a project that compiles from source** and **a boundary claim that was
-tested rather than asserted** — a probe that fails with a specific compiler error and passes
-when removed. The doc changes it made were two stale-sentence corrections, both forced by a
-real change. Nothing here is process added for its own sake.
+This session produced running code and two tests that fail loudly when the format changes.
+Nothing playable — correctly so; step 1 is explicitly a headless step, and it ends in
+something that runs, which is what R-012 asks for. The doc changes it made are this
+checkpoint, one pending decision entry, and one result line on R-011.
 
-Watch item, not a flag: `ARCHITECTURE.md` is 65 KB and §14 carries ten defects. That is
-earned weight for an R3 subsystem, but the next checkpoint should confirm it is still being
-read as a spec rather than maintained as a document.
+D-025 in one sentence, for the restatement test: *two small technical questions the
+architecture never answered, decided the only way the tests would allow, and written down so
+the Architect can overrule them cheaply.*
+
+Watch item, carried from CP-006 and still open: `ARCHITECTURE.md` is 65 KB with ten defects in
+§14. **It was read as a spec this session, not maintained as a document** — §4.2 was copied
+field-for-field, §4.3 fixed the rounding rule, and the one place it did not determine an
+answer (line 325) is the one thing routed back. That is the test CP-006 asked for, and it
+passed.
 
 ## Blockers
 
@@ -294,6 +413,10 @@ None.
 
 ## Open decisions
 
+- **D-025** — *pending Architect, raised CP-007.* Two technical determinations the Implementer
+  made under R-011 rather than returning the increment unstarted: `ETerrainRole`'s value set
+  (`ARCHITECTURE.md` line 325 names the concept and never enumerates it), and
+  `DequantiseVoxel` returning the voxel centre. Neither blocks build step 1's second half.
 - **D-008** — working title
 - Survival meter set — resolved by testing, not convention (D-016)
 - Stage 3 transport method (conveyors / pipes / vehicles / drones)

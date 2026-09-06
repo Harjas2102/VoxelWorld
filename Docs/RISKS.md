@@ -168,6 +168,20 @@ blocked, it returns one specific blocking question naming the ambiguous line of
 `ARCHITECTURE.md`, not a general request for a ruling. A packet returned without a
 named ambiguity counts as a failed increment under R-009.
 
+- **Result — first exercised 2026-09-06 (CP-007):** ✅ **held.** The build-step-1 packet named
+  `ETerrainRole` in its file list; `ARCHITECTURE.md` names the concept once, at **line 325**,
+  and never enumerates its values. The increment was delivered complete — codec, quantiser and
+  two green tests — with the ambiguity named to the line and routed as **D-025 (pending
+  Architect)**, and with nothing else in the increment made to depend on the answer. The rule
+  produced the behaviour it was written for: work shipped, the open question visible rather
+  than absorbed.
+- **What to watch:** the failure mode this rule *cannot* catch is an ambiguity the implementer
+  does not notice and resolves silently. D-025 exists because the packet happened to name the
+  type; a determination made inside a function body would not have surfaced the same way. The
+  second determination in D-025 — `DequantiseVoxel` returning the voxel centre — is exactly
+  that shape, and was caught only because a test forced it. Assume there are others.
+- **Decision:** *open* — keep the rule. Re-evaluate after T-101B, alongside R-009.
+
 ## R-012 — Process weight
 
 **Ruled:** 2026-09-06 (CP-005)

@@ -355,3 +355,48 @@ scarce resource on this project and it is spent on the game.
 `ARCHITECTURE.md` §3 now reads **Ruled (D-024)** for all ten, and §15 "Open forks" is
 replaced with a line pointing at this ruling. §4.5 is reconciled with the K4 ruling;
 DEF-4 remains open, because the ruling picks the thread and does not discharge the defect.
+
+## D-025 — Two determinations made under R-011 (2026-09-06) — **PENDING ARCHITECT**
+
+**Raised:** 2026-09-06 (CP-007) · **Class:** technical (per D-023) · **Raised by:** Implementer
+
+**This entry is a record and a routing, not a ruling.** The Implementer has no architectural
+authority (`AGENTS.md` §2). R-011 forbids returning an increment unstarted, so the two
+questions below were decided the only way the increment could proceed, and are written down
+here so the Architect can overrule either one cheaply — before either becomes permanent by
+having been in the tree for a month.
+
+### 1. `ETerrainRole` — the values are not in the spec
+
+**Context:** `ARCHITECTURE.md` mentions `role` exactly once, at **line 325**, in the §4.3
+`ITerrainBackend::Initialize` comment — `// seed, gen version, voxel size, bounds, density
+field, role`. The enum's values are never enumerated anywhere in the document. This is the
+named ambiguous line R-011 requires.
+
+**Taken:** `enum class ETerrainRole : uint8 { Server, Client };` — the only pair the
+document's own language supports (§4.3 *"Server: full result. Client: result ignored."*; §4.4
+*"exists on both server and client; `HasAuthority` gates the authoritative half"*). No
+dedicated/listen/standalone split, because the dedicated-server case is already carried by
+`FTerrainStreamingInterest::bRender` (§4.2).
+
+**Consequence if overruled:** cheap. Nothing in build step 1 depends on the value set —
+`ETerrainRole` is declared and not yet consumed. It is first read by `FTerrainBackendInit` at
+step 1's second half and by the adapter at step 2.
+
+### 2. `DequantiseVoxel` returns the voxel centre, not its minimum corner
+
+**Context:** the packet specifies `FVector DequantiseVoxel(const FIntVector&, const
+FTransform&, float)` and requires `QuantiseEdit(DequantiseVoxel(Q)) == Q` for every `Q`.
+`ARCHITECTURE.md` does not say which point in the voxel the function returns.
+
+**Taken:** the centre. This is **forced, not chosen.** A transform is not exactly invertible
+in floating point, so a minimum corner that lands one ULP below its own face floors to `Q−1`
+and the required identity fails. The centre sits half a voxel from either face — orders of
+magnitude more slack than the transform's error.
+
+**Consequence if overruled:** the identity in §6.1 has to be given up, or the fixed §4.3
+rounding rule has to change. Both are larger changes than this one.
+
+**Neither determination touches the wire format, the 58 bytes, or the rounding rule.** Those
+are fixed by §4.2 and §4.3 and were copied, not decided.
+
