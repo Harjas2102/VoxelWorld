@@ -356,47 +356,38 @@ scarce resource on this project and it is spent on the game.
 replaced with a line pointing at this ruling. §4.5 is reconciled with the K4 ruling;
 DEF-4 remains open, because the ruling picks the thread and does not discharge the defect.
 
-## D-025 — Two determinations made under R-011 (2026-09-06) — **PENDING ARCHITECT**
+## D-025 — Engine version and agentic editor tooling (2026-09-06)
 
-**Raised:** 2026-09-06 (CP-007) · **Class:** technical (per D-023) · **Raised by:** Implementer
+> **Numbering note.** An earlier CP-007 commit (`bf1b432`) used D-025 for a pending
+> Implementer routing entry covering `ETerrainRole` and `DequantiseVoxel`. The Architect
+> ruled both in the same session as **AR-2** and **AR-3** in `ARCHITECTURE.md`'s header
+> ruling block — technical, so they carry no `DECISIONS.md` entry of their own (D-023).
+> That placeholder is therefore answered and folded in, and D-025 is the ruling below.
+> The superseded text remains in git history at `bf1b432`.
 
-**This entry is a record and a routing, not a ruling.** The Implementer has no architectural
-authority (`AGENTS.md` §2). R-011 forbids returning an increment unstarted, so the two
-questions below were decided the only way the increment could proceed, and are written down
-here so the Architect can overrule either one cheaply — before either becomes permanent by
-having been in the tree for a month.
+**Ruling.** Stay on UE 5.7 for T-112. Upgrade to UE 5.8 and adopt Epic's
+first-party Unreal MCP plugin as **T-112.5**, scheduled between T-112 and T-113.
 
-### 1. `ETerrainRole` — the values are not in the spec
+**Basis.**
+- Unreal MCP (`ModelContextProtocol` + `AllToolsets`) shipped with **UE 5.8**. It does
+  not exist in 5.7. This is an engine upgrade, not a plugin toggle.
+- UE 5.8 is Epic's **last planned major UE5 release**. The upgrade is inevitable;
+  only its date is a choice.
+- **The expected blocker does not exist:** VoxelPluginFreeLegacy publishes prebuilt
+  binaries for both 5.7 and 5.8. `Tools/Install-VoxelFreeLegacy.ps1` repoints to a
+  different release asset.
+- T-112 is the most engine-agnostic task on the roadmap (`TerrainCore` against
+  Core/CoreUObject/Engine, headless, no plugin, no world), so deferring the upgrade
+  past it costs ~nothing.
+- T-113 is the first task that both *needs* MCP (Blueprint rewiring) and *must not*
+  be written twice (`FVPLegacyBackend` binds to plugin headers). The adapter is
+  authored once, against the plugin build we keep.
 
-**Context:** `ARCHITECTURE.md` mentions `role` exactly once, at **line 325**, in the §4.3
-`ITerrainBackend::Initialize` comment — `// seed, gen version, voxel size, bounds, density
-field, role`. The enum's values are never enumerated anywhere in the document. This is the
-named ambiguous line R-011 requires.
+**Guard.** Unreal MCP is a **dev-time editor tool**. It is never referenced from
+`VoxelWorld` or `TerrainCore`, and `IModelContextProtocolModule::StartServer()` is
+never called from any game target. T-112.5 adds this to the AGENTS §9 drift guard.
 
-**Taken:** `enum class ETerrainRole : uint8 { Server, Client };` — the only pair the
-document's own language supports (§4.3 *"Server: full result. Client: result ignored."*; §4.4
-*"exists on both server and client; `HasAuthority` gates the authoritative half"*). No
-dedicated/listen/standalone split, because the dedicated-server case is already carried by
-`FTerrainStreamingInterest::bRender` (§4.2).
-
-**Consequence if overruled:** cheap. Nothing in build step 1 depends on the value set —
-`ETerrainRole` is declared and not yet consumed. It is first read by `FTerrainBackendInit` at
-step 1's second half and by the adapter at step 2.
-
-### 2. `DequantiseVoxel` returns the voxel centre, not its minimum corner
-
-**Context:** the packet specifies `FVector DequantiseVoxel(const FIntVector&, const
-FTransform&, float)` and requires `QuantiseEdit(DequantiseVoxel(Q)) == Q` for every `Q`.
-`ARCHITECTURE.md` does not say which point in the voxel the function returns.
-
-**Taken:** the centre. This is **forced, not chosen.** A transform is not exactly invertible
-in floating point, so a minimum corner that lands one ULP below its own face floors to `Q−1`
-and the required identity fails. The centre sits half a voxel from either face — orders of
-magnitude more slack than the transform's error.
-
-**Consequence if overruled:** the identity in §6.1 has to be given up, or the fixed §4.3
-rounding rule has to change. Both are larger changes than this one.
-
-**Neither determination touches the wire format, the 58 bytes, or the rounding rule.** Those
-are fixed by §4.2 and §4.3 and were copied, not decided.
-
+**Watch item, not a ruling.** UE 5.8 ships **Mesh Terrain**, a mesh-based terrain
+system supporting overlapping geometry. Unknown whether it is runtime-deformable or
+replicable. Logged against R-008. It is a §10 conformance candidate or it is nothing;
+no fork opens until there is evidence.

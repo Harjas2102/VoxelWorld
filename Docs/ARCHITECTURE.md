@@ -27,7 +27,37 @@
 >    list, at admission and revalidated at commit under DEF-7.
 > 4. **§4.7** — `entities.sqlite` restores **power grids** to its entity set, per D-012 and
 >    VISION pillar 3.
+
+> **Architect ruling, 2026-09-06 (technical, per D-023) — four gaps closed at T-112.1.**
+> `ARCHITECTURE.md` v1 left four items undefined that build step 1 depends on. Ruled here,
+> not routed to the Director. No GAME decision is involved.
 >
+> 5. **AR-1 §4.2 — `FTerrainBox`.** Used by `FTerrainEditResult::EditedBounds`, never
+>    defined. `struct FTerrainBox { FIntVector Min, Max; }`, voxel space, **Min inclusive,
+>    Max exclusive**, empty iff any `Max[i] <= Min[i]`. Half-open makes chunk enumeration
+>    and volume arithmetic exact and tiles cleanly at the 32-voxel stride.
+> 6. **AR-2 §4.3 — `FTerrainBackendInit`.** `{ int32 Seed; uint32 GeneratorVersion;
+>    float VoxelSizeCm; FTerrainBox WorldBoundsVox; const ITerrainDensityField*
+>    DensityField; ETerrainRole Role; }`. **`ETerrainRole` is `{ Server, Client }`** —
+>    authority is binary; standalone (D-021) is `Server`; the dedicated-server case is
+>    already carried by `FTerrainStreamingInterest::bRender`. `DensityField` may be null,
+>    meaning no natural shape: unwritten space is **not resident**, not air.
+>    `ITerrainDensityField` is declared at step 1 and implemented at T-108.
+> 7. **AR-3 §6.1 — `Op.Quantisation.Stable` semantics.** Line 704's "across 10,000
+>    randomised transforms" is ambiguous, since §4.3 has the client never quantising. The
+>    test asserts three properties of the single server-side quantiser and makes **no
+>    cross-machine claim**: (a) determinism over randomised inputs incl. negative octants;
+>    (b) idempotence, `Quantise(Dequantise(Q)) == Q`; (c) boundary stability. The rounding
+>    rule is fixed: transform to terrain-local in `double`, then
+>    `FMath::FloorToInt32(Local / VoxelSizeCm)` — **Floor, never Round**.
+>    **`DequantiseVoxel` returns the voxel centre, not its minimum corner.** Idempotence
+>    requires it: a corner one ULP below its own face floors to Q−1 under a transform that
+>    is not exactly invertible. Cross-build and cross-platform determinism remains DEF-5.
+> 8. **AR-4 §6.1 — `Revision.Monotonic` scope at step 1.** In-memory only: revs never
+>    decrease; a multi-chunk op bumps every affected chunk exactly once. The "including
+>    across payload deletion" clause depends on compaction and defers to build step 4
+>    (DEF-9).
+
 > No code changes. `Docs/archive/ARCHITECTURE_v0.md`'s header records these four as carried
 > into v1 and no longer live in the archived file. The original wording of each is preserved
 > there as the record of what was missing at adoption.
@@ -718,6 +748,10 @@ Run against `FMemoryTerrainBackend`. Seconds, on every build.
 | `Migration.Fixtures` | Every fixture in `Tests/Saves/` loads and produces its expected region hash |
 | `Query.Point` | `QueryPoint` returns the material and density sign the region was written with, at chunk interiors and at all eight chunk corners; reports `bResident` false outside loaded regions; never returns a stale sample after `ApplyOp` or `WriteRegion` |
 | `Backend.Conformance` | A shared suite run against **both** `FMemoryTerrainBackend` and `FVPLegacyBackend`, covering all eleven methods, `QueryPoint` included. Any future backend must pass it. **This is the operational meaning of "replaceable"** |
+
+**Test identifiers are prefixed `TerrainCore.` in code.** `Automation RunTests` does a
+substring match (`AutomationCommandline.cpp`), so the bare names in this table match
+nothing on the command line. The table names the assertion; the prefix names the test.
 
 ### 6.2 In-engine, single process
 

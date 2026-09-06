@@ -19,6 +19,13 @@ session notes only — they never contradict this file.
 3. Never rely on chat history or memory for project facts. `/Docs` is the only truth.
 4. If the docs and the conversation conflict, **ask**.
 
+**Handoff labels.** Every block of document text, code, or commit message an Architect
+emits opens with exactly one instruction line stating what the Director does with it:
+**"→ Paste into Claude Code, verbatim."** / **"→ No action. For your reading only."** /
+**"→ Your ruling needed."** A block with no label is a defect and the Director should say
+so. Checkpoint text (STATE.md, DECISIONS.md, commit messages) is emitted **only** when
+the Director says "checkpoint" — never unprompted mid-session.
+
 ## 2. Roles
 
 Roles are functions, not brands. Who holds each role today is an operational choice

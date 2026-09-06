@@ -51,6 +51,10 @@ struct FTerrainChunkKey
  * Voxel-space axis-aligned box. Game type — never a plugin box (§4.2, §4.3).
  *
  * Min is INCLUSIVE, Max is EXCLUSIVE. The box is empty iff Max[i] <= Min[i] on any axis.
+ *
+ * Ruled by AR-1 (ARCHITECTURE.md header block, Architect, 2026-09-06): v1 used FTerrainBox
+ * in FTerrainEditResult::EditedBounds without ever defining it. Half-open is what makes
+ * chunk enumeration and volume arithmetic exact and tiles cleanly at the 32-voxel stride.
  */
 struct FTerrainBox
 {
@@ -85,15 +89,14 @@ struct FTerrainBox
 };
 
 /**
- * Which half of the service this backend instance serves (§4.3 Initialize, "... role").
+ * Which half of the service this backend instance serves (§4.3 FTerrainBackendInit).
  *
- * AMBIGUITY, NAMED (R-011): ARCHITECTURE.md mentions `role` only in the §4.3 Initialize
- * comment (line 325) and never enumerates its values. The two values below are the only
- * ones the document's own language supports — §4.3 "Server: full result. Client: result
- * ignored." and §4.4 "exists on both server and client; HasAuthority gates the
- * authoritative half." No dedicated/listen distinction is implied here: the dedicated-server
- * case is carried by FTerrainStreamingInterest::bRender (§4.2). If the Architect intends a
- * wider set, this enum is the one thing in this increment that changes.
+ * RULED by AR-2 (ARCHITECTURE.md header block, Architect, 2026-09-06). The values were
+ * raised as an R-011 ambiguity at T-112.1 — v1 mentioned `role` only in the §4.3
+ * Initialize comment and never enumerated it — and were ruled in the same session.
+ *
+ * Authority is binary. Standalone (D-021) is Server. The dedicated-server case is not a
+ * third role: it is carried by FTerrainStreamingInterest::bRender (§4.2).
  */
 enum class ETerrainRole : uint8
 {

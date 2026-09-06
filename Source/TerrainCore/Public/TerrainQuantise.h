@@ -41,6 +41,10 @@ TERRAINCORE_API bool QuantiseEdit(const FVector& WorldPos,
 /**
  * The world-space position of a voxel — its CENTRE, not its minimum corner.
  *
+ * Ruled by AR-3 (ARCHITECTURE.md header block, Architect, 2026-09-06), which also fixes the
+ * three properties Op.Quantisation.Stable asserts and confirms the test makes no cross-machine
+ * claim.
+ *
  * Centre is required, not cosmetic. QuantiseEdit(DequantiseVoxel(Q)) == Q must hold for every
  * Q, and the corner does not survive that round trip: a transform is not exactly invertible
  * in floating point, so a corner that lands one ULP below its own boundary floors to Q-1.

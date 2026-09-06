@@ -115,6 +115,13 @@ Severity / probability scale: **High · Medium · Low**.
   fewer features." Gates are **silent at runtime** and are not documented in the headers,
   so each one is found by something quietly not working. Assume more exist; budget for
   discovery in every sub-step of T-101B rather than treating each as a surprise.
+- **Watch item, logged 2026-09-06 (CP-007, per D-025):** UE 5.8 ships **Mesh Terrain**, a
+  mesh-based terrain system supporting overlapping geometry. Unknown whether it is
+  runtime-deformable or replicable — the two properties Pillar 1 actually needs. It is a §10
+  conformance candidate or it is nothing: if it can be driven through the eleven
+  `ITerrainBackend` methods and passes `Backend.Conformance`, it is a second backend and this
+  risk gets cheaper; if it cannot, it is irrelevant. **No fork opens until there is evidence.**
+  First look is T-112.5, when the engine is on 5.8 anyway.
 - **Decision:** *open* — resolved by the T-101B exit (PASS / CONDITIONAL / FAIL /
   VISION CHANGE). This finding does not by itself argue for VP2: the C++ generator is
   work we owed D-011 regardless.
@@ -171,15 +178,16 @@ named ambiguity counts as a failed increment under R-009.
 - **Result — first exercised 2026-09-06 (CP-007):** ✅ **held.** The build-step-1 packet named
   `ETerrainRole` in its file list; `ARCHITECTURE.md` names the concept once, at **line 325**,
   and never enumerates its values. The increment was delivered complete — codec, quantiser and
-  two green tests — with the ambiguity named to the line and routed as **D-025 (pending
-  Architect)**, and with nothing else in the increment made to depend on the answer. The rule
+  two green tests — with the ambiguity named to the line and nothing else in the increment made
+  to depend on the answer. The Architect ruled it in the same session as **AR-2**
+  (`ETerrainRole = { Server, Client }`), alongside **AR-1**, **AR-3** and **AR-4**. The rule
   produced the behaviour it was written for: work shipped, the open question visible rather
-  than absorbed.
+  than absorbed, and answered inside one session.
 - **What to watch:** the failure mode this rule *cannot* catch is an ambiguity the implementer
-  does not notice and resolves silently. D-025 exists because the packet happened to name the
-  type; a determination made inside a function body would not have surfaced the same way. The
-  second determination in D-025 — `DequantiseVoxel` returning the voxel centre — is exactly
-  that shape, and was caught only because a test forced it. Assume there are others.
+  does not notice and resolves silently. AR-2 was surfaced because the packet happened to name
+  the type; a determination made inside a function body would not have surfaced the same way.
+  **AR-3** — `DequantiseVoxel` returning the voxel centre — is exactly that shape, and was
+  caught only because a test forced it. Assume there are others.
 - **Decision:** *open* — keep the rule. Re-evaluate after T-101B, alongside R-009.
 
 ## R-012 — Process weight
