@@ -46,6 +46,9 @@ Severity / probability scale: **High · Medium · Low**.
   operation journal can be compacted into a compact chunk snapshot at revision R.
 - **Owner / task:** T-101B (sub-steps 1D, 1F)
 - **Result:** *open*
+- **CP-010 evidence:** in-memory revision monotonicity and atomic overflow rejection
+  pass in Revision.Monotonic. This does not cover payload deletion or revision
+  recovery after restart; AR-4 defers those to build step 4/DEF-9.
 - **Decision:** *open*
 
 ## R-004 — Material-yield accuracy
@@ -202,6 +205,11 @@ named ambiguity counts as a failed increment under R-009.
   session. API, residency and reference-kernel determinations were exposed in headers
   and reconciled into ARCHITECTURE at checkpoint. The initial stop is recorded, not
   counted as implementation; the completed increment is the result. Risk stays open.
+- **Result — CP-010:** T-112.3's missing index/service API was exposed in a bounded
+  R2 plan; Director approved with "go" (D-029). Implementation, UE 5.7 build and
+  all five headless tests completed. Future edit integration must reject revision
+  exhaustion before terrain mutation; the metadata helper alone does not resolve
+  DEF-7. No continuing architectural delegation or terrain-risk closure follows.
 - **Decision:** *open* — keep the rule. Re-evaluate after T-101B, alongside R-009.
 
 ## R-012 — Process weight
@@ -227,3 +235,8 @@ agent handoff. One rolling HANDOFF file and OPERATIONS §5.1 cover both agents; 
 per-agent log tree, repeated full-doc skim or new startup gate is required. This aims
 to reduce usage-limit interruption cost; effectiveness will be tested by the next
 pickup of T-112.3. No terrain risks closed by this documentation-only update.
+
+**CP-010 check:** bounded step passed. The shared handoff enabled pickup; one R2
+plan approval preceded code, then T-112 completed with five green tests. No new
+process task was inserted. No playable change yet; T-113 remains next for gameplay,
+after the scheduled T-112.5 upgrade. No risks closed by this headless increment.

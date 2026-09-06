@@ -502,3 +502,23 @@ This is scheduling and continuity, not extra architectural authority: R2 approva
 R3 independent review, allowed-file boundaries and required checks still apply.
 The Director explicitly authorised the README/workflow updates, automatic commit/push
 and session wrap-up. No additional onboarding or review gate is introduced for R0/R1.
+
+## D-029 — Bounded T-112.3 revision/service plan approval (2026-09-06) — ACCEPTED
+
+**Recorded:** CP-010 · **Authority:** Director · **Class:** R2 · **Scope:** T-112.3 only.
+
+The Director requested "Start 112.3", reviewed the concrete revision-index/service
+plan and approved it with **"go"** before implementation. This approves a local API
+within AR-4 and K7; it does not extend D-027's architectural delegation.
+
+The index reads unseen chunks as zero, increments each distinct affected chunk
+once per call and rejects the entire update if any revision would overflow.
+The service privately owns the index, exposes read queries and gates its internal
+metadata update on initialized lifetime/world, game-thread execution and server
+authority. Initialization/teardown govern ownership. Exact APIs and limits are
+reconciled in ARCHITECTURE's CP-010 block.
+
+**Evidence:** UE 5.7 build succeeded; all five TerrainCore tests passed with zero
+failures and exit 0. The revision test is worldless per §6.1; live client/server
+authority and persistence are not established. No gameplay, dependency or format
+change. DEF-7 and DEF-9 remain open. Director then requested checkpoint.

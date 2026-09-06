@@ -38,18 +38,18 @@ the environment was built.
 
 ## Status
 
-**CP-009 (2026-09-06) — Phase 1: Terrain Feasibility.** Milestone: *one hill is trustworthy.*
+**CP-010 (2026-09-06) — Phase 1: Terrain Feasibility.** Milestone: *one hill is trustworthy.*
 
 - Smooth digging and a through-tunnel were demonstrated in T-101A. The terrain backend
   remains provisional; multiplayer edits, persistence, join-in-progress and yield still
   need the T-101B gate.
-- UE **5.7** builds from C++. T-112.1 and T-112.2 are complete: op codec, quantiser,
-  backend interfaces, a memory backend and a reusable conformance suite.
-- Last code validation, **CP-008**: build succeeded; **four TerrainCore tests passed,
-  zero failures, exit 0**. CP-009 changes documentation only.
-- **Next: T-112.3**, revision index and service skeleton. Claude is the expected next
-  Implementer; either agent can pick it up from the handoff. Then T-112.5 (the D-025
-  engine/tooling upgrade) and T-113 (production adapter and Blueprint service rewire).
+- UE **5.7** builds from C++. **T-112 is complete:** op codec, quantiser, backend
+  interfaces, memory backend, revision index, service skeleton and headless tests.
+- Last code validation, **CP-010**: build succeeded; **five TerrainCore tests passed,
+  zero failures, exit 0**. Service metadata is tested; live multiplayer authority
+  and persistent terrain remain unproven.
+- **Next: T-112.5**, the D-025 engine/tooling upgrade, then T-113 (production adapter
+  and Blueprint service rewire). Either agent can pick up from the handoff.
 
 ## Build and headless tests
 
@@ -60,8 +60,8 @@ From `C:\Dev\VoxelWorld`, with the installed UE 5.7 and VS C++ toolchain:
 & 'C:\Program Files\Epic Games\UE_5.7\Engine\Binaries\Win64\UnrealEditor-Cmd.exe' 'C:\Dev\VoxelWorld\VoxelWorld.uproject' '-ExecCmds=Automation RunTests TerrainCore; Quit' -unattended -nopause -nosplash -nullrhi -log
 ```
 
-Expected now: `Result: Succeeded`, four successful TerrainCore tests and automation
-exit 0. `Revision.Monotonic` becomes the fifth test at T-112.3. Test output is in
+Expected now: `Result: Succeeded`, five successful TerrainCore tests (including
+`Revision.Monotonic`) and automation exit 0. Test output is in
 `Saved/Logs/VoxelWorld.log`. See [SETUP](Docs/SETUP.md) for the environment record and
 [STATE](Docs/STATE.md) for installed dependencies.
 

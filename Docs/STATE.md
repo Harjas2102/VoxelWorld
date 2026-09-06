@@ -5,8 +5,37 @@
 
 ---
 
-**Checkpoint:** CP-009 · **Date:** 2026-09-06
+**Checkpoint:** CP-010 · **Date:** 2026-09-06
 **Phase:** 1 — Terrain Feasibility
+
+## What happened at CP-010
+
+**T-112.3 and T-112 complete. Five TerrainCore tests pass headless.**
+
+- Director approved the bounded R2 revision-index/service plan with "go" (D-029).
+  Codex implemented three new source files and updated TerrainService.h/.cpp.
+- `FTerrainRevisionIndex` returns zero for unseen keys without insertion, bumps
+  each distinct affected key once per call, and rejects an entire update before
+  mutation if any revision would overflow. Empty input succeeds without changes.
+- `UTerrainService` privately owns the index. Its metadata update helper requires
+  the game thread, initialized subsystem/world, a game world and non-client mode.
+  Repeated initialization preserves history; teardown releases ownership. No
+  backend execution, global sequencing or public gameplay edit API exists yet.
+- `TerrainCore.Revision.Monotonic` checks 256 overlapping batches against an
+  independent per-key oracle, duplicates, negative/extreme keys, empty input,
+  unaffected chunks and atomic overflow. Worldless service ownership, lifecycle
+  and missing-world/worker-thread rejection are checked without creating UWorld.
+- **Verification:** UE 5.7 `VoxelWorldEditor Win64 Development` succeeded, exit 0.
+  All five TerrainCore tests passed at **2026-09-06 17:25:08 UTC**; zero failures,
+  automation and process exit 0. Evidence: `Saved/Logs/VoxelWorld.log` (local).
+  Exact commands and limits are in HANDOFF and README. Author diff review and
+  whitespace checks passed; Build.cs and existing interfaces remain unchanged.
+- **Limits:** no live server/client authority, multiplayer PIE, persistence,
+  compaction or production-backend result. Existing drift flags and terrain risks
+  remain open. Future edit integration must handle revision exhaustion before
+  terrain mutation; DEF-7 is not resolved by metadata atomicity.
+- **Next:** T-112.5 under D-025. Expected incoming Implementer: **either** agent.
+  This checkpoint saves the completed increment; it does not start the upgrade.
 
 ## What happened at CP-009
 
@@ -248,7 +277,7 @@ the roadmap was reordered around a terrain feasibility gate. Reviews archived in
 
 ## What exists right now
 
-**C++ (builds from source; memory backend and conformance suite added at CP-008):**
+**C++ (builds from source; T-112 complete at CP-010):**
 
 ```text
 Source/
@@ -256,7 +285,8 @@ Source/
   VoxelWorldEditor.Target.cs       Editor target    | EngineIncludeOrderVersion.Unreal5_7
   VoxelWorld/                      primary game module — depends on TerrainCore ONLY
   TerrainCore/                     Core, CoreUObject, Engine. NO plugin dependency.
-    Public/TerrainService.h        UTerrainService : UWorldSubsystem — still empty (K7)
+    Public/TerrainService.h        UTerrainService : UWorldSubsystem — revision skeleton
+    Public/TerrainRevisionIndex.h in-memory, monotonic per-chunk revisions
     Public/TerrainTypes.h          §4.2 value types + §4.3 FTerrainPointSample
     Public/TerrainOp.h             FTerrainOp + the 58-byte codec's declarations
     Public/TerrainQuantise.h       QuantiseEdit / DequantiseVoxel / QuantiseRadiusQ16
@@ -266,8 +296,11 @@ Source/
     Private/TerrainOp.cpp          the codec — PERMANENT FORMAT
     Private/TerrainQuantise.cpp    world→voxel, Floor, fixed by §4.3
     Private/MemoryTerrainBackend.cpp synchronous data, edits, queries, interest, transfer
+    Private/TerrainRevisionIndex.cpp distinct-key updates with atomic overflow rejection
+    Private/TerrainService.cpp    index ownership, lifecycle and authority gates
     Private/Tests/                 TerrainOpCodecTest.cpp, TerrainQuantiseTest.cpp
                                    BackendConformance.h/.cpp (factory suite + Query.Point)
+                                   TerrainRevisionTest.cpp (Revision.Monotonic)
 ```
 
 - **`VoxelWorld`** — the primary game module (`IMPLEMENT_PRIMARY_GAME_MODULE`). Gameplay,
@@ -276,9 +309,10 @@ Source/
 - **`TerrainCore`** — game-owned, compiles headless, holds no plugin type. **Its `Build.cs`
   is the boundary** (§4.1, §4.1.0). Adding a plugin to that dependency list breaks D-011 and
   the `AGENTS.md` §9 drift guard and requires a numbered decision, not an edit.
-- **`UTerrainService : UWorldSubsystem`** — **still empty at CP-008.** A subsystem, not an
-  actor: K7, ruled by D-024. Validation, sequencing, revisions, journalling and yield arrive
-  at build steps 1 and 3.
+- **`UTerrainService : UWorldSubsystem`** — **revision skeleton at CP-010.** K7/D-024.
+  Owns a private in-memory revision index and gates its internal metadata helper.
+  Backend execution, validation, global sequencing, journalling and yield remain
+  later build-step work; gameplay still does not route through this service.
 - **The §4.2 value types, the `FTerrainOp` codec and the quantiser** — new at CP-007, and the
   first thing in this repo with a **permanent format** in it. The encoded op body is 58 bytes
   and is simultaneously the wire format and the journal record body, so changing it changes
@@ -336,26 +370,25 @@ Source/
 - Git + LFS, pushed to **https://github.com/Harjas2102/VoxelWorld** — **PUBLIC** (D-019).
 - Governance: `AGENTS.md` (constitution) + `CLAUDE.md` (adapter) + `Docs/` (truth).
 
-No gameplay systems yet. No authoritative terrain layer yet — `UTerrainService` exists as
-an empty subsystem and does nothing. No backend adapter yet.
+No gameplay systems yet. `UTerrainService` owns revision metadata but does not execute
+terrain edits. No production backend adapter or authoritative gameplay edit path yet.
 
 ## Current task
 
-**T-112 — build step 1** (`ARCHITECTURE.md` §9), **in progress**. Split into three
-sub-increments under R-009.
+**Next: T-112.5 — engine/tooling upgrade under D-025**, not started.
 
-**Incoming Implementer:** Claude expected for T-112.3; either Claude or Codex according
-to availability (D-028). Read `HANDOFF.md` for the numbered restart plan. T-112.3 has
-not started and still needs its bounded scope/API plan confirmed before implementation.
+**Incoming Implementer: either** Claude or Codex according to availability (D-028).
+Read `HANDOFF.md`; confirm T-112.5's bounded task/risk plan before implementation.
+**T-112 — build step 1** (`ARCHITECTURE.md` §9) is complete:
 
 | # | Scope | Status |
 |---|---|---|
 | **T-112.1** | `FTerrainOp` + 58-byte codec, chunk keys, quantiser. Tests `Op.Codec.RoundTrip`, `Op.Quantisation.Stable` | ✅ **Done at CP-007** |
 | **T-112.2** | `ITerrainBackend` (eleven methods), `ITerrainDensityField` declaration, `FMemoryTerrainBackend`, `Backend.Conformance` + `Query.Point` | ✅ **Done at CP-008** |
-| **T-112.3** | `FTerrainRevisionIndex`, `UTerrainService` skeleton. Test `Revision.Monotonic` | ⏭ **Next** |
+| **T-112.3** | `FTerrainRevisionIndex`, `UTerrainService` skeleton. Test `Revision.Monotonic` | ✅ **Done at CP-010** |
 
-T-112 is complete when all five TerrainCore tests are green headless. Four now pass;
-`Revision.Monotonic` remains. T-112.3 is in-memory only per AR-4: revisions never
+All five TerrainCore tests pass headless at CP-010, completing T-112.
+T-112.3 is in-memory only per AR-4: revisions never
 decrease, and each affected chunk bumps exactly once. Payload deletion/compaction
 coverage stays at build step 4. The reusable backend suite and position-sensitive hash
 checks are implemented; `Flatten` and `Smooth` remain unsupported under DEF-5.
@@ -380,9 +413,9 @@ Server authority is not proven until build step 3.
 
 **Process:** R-012 in force. The next three tasks all end in something that runs.
 
-## Drift checks (VISION.md, run at CP-008)
+## Drift checks (VISION.md, run at CP-010)
 
-**Both flags REMAIN.** CP-008 added a memory backend and headless contract tests.
+**Both flags REMAIN.** CP-010 added revision metadata and headless invariant tests.
 Gameplay still does not route through the service, so
 `BP_ThirdPersonCharacter` still calls `UVoxelSphereTools::RemoveSphere` and `AddSphere`
 directly, on the client. **They clear at build step 2 (T-113)**, when the Blueprint is rewired
@@ -418,26 +451,20 @@ and this Blueprint is rewired through it or deleted.** It is test scaffolding wi
 gameplay-shaped silhouette, which is exactly the kind of thing that quietly becomes
 permanent. Feature work does not start on top of it.
 
-**Boundary evidence at CP-008.** The dependency list remains byte-identical and no
+**Boundary evidence at CP-010.** The dependency list remains byte-identical and no
 plugin type/header crosses it. Backend replacement now has an executable factory suite,
 including queries and position-sensitive hashes. The production adapter has not run
 that suite yet; replacement is not proved by the memory backend passing alone.
 
-## R-012 check (process weight, run at CP-009)
+## R-012 check (process weight, run at CP-010)
 
 **PASS for this bounded step; the lack of a playable change remains visible.**
 
-T-112.2 supplies executable contract tests and a headless backend, as specified. The
-initial stop named the density-field conflict at §4.6 lines 536–538; the Director
-authorised a determination and implementation completed in the same session. No
-checkpoint text or project-doc edits were produced before the Director said
-"checkpoint". **The next playable change is T-113**, one remaining sub-increment and
-the scheduled engine upgrade away. No new process task was inserted before it.
-
-CP-009 is the Director-requested documentation wrap-up. One rolling handoff replaces
-chat reconstruction; no per-agent reports or repeated full-doc skim is required each
-session. This documentation task is finished here; T-112.3 is the next work, with the
-same playable milestone and no additional onboarding gate.
+The shared handoff enabled pickup without reconstructing the previous chat. The
+bounded R2 plan required one approval, then T-112.3 built and all five tests passed
+in the same session. Breadcrumbs remained in HANDOFF; checkpoint docs waited for
+"checkpoint". **The next playable change is T-113**, after the scheduled T-112.5
+upgrade. No additional process task was inserted; no playable-change claim is made.
 
 ## Blockers
 
@@ -456,7 +483,7 @@ None.
 | Role | Holder |
 |---|---|
 | Director | Harjas |
-| Implementer | Alternating Claude/Codex (D-028); outgoing Astra, Claude expected next for T-112.3 |
+| Implementer | Alternating Claude/Codex (D-028); outgoing Codex, either agent next for T-112.5 |
 | Architect | Opus in the Claude app; D-027's delegation was limited to the completed T-112.2 |
 | Independent reviewer | Whichever vendor did not author (R3 only) |
 

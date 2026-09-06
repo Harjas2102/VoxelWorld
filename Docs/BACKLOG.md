@@ -32,18 +32,13 @@ challenge to two vendors, blind, then cross-reviewed. Produces **ARCHITECTURE.md
 **D-017** (terrain architecture) and **D-018** (primary implementer). Runs *after* T-101A
 so the proposals are written against the plugin's real API, not against a guess.
 
-### T-112 — TerrainCore build step 1 — in progress (CP-008)
+### T-112.5 — Engine/tooling upgrade — next (D-025)
 
-Build order follows `ARCHITECTURE.md` §9. T-112.1 and T-112.2 are in the Done log.
-**Next: T-112.3** — `FTerrainRevisionIndex` and `UTerrainService` skeleton;
-`TerrainCore.Revision.Monotonic` green headless. AR-4 limits this to in-memory
-monotonicity and one bump per affected chunk; compaction coverage stays at step 4.
-Completion means all five TerrainCore tests pass; four pass at CP-008.
-Claude is the expected next Implementer; either agent may resume using `HANDOFF.md`
-and OPERATIONS §5.1 (D-028). The T-112.3 API/scope plan remains to be confirmed.
-
-Then **T-112.5** — UE 5.7 → 5.8 and Unreal MCP, per D-025 — followed by **T-113**,
-the production backend adapter, streaming component and Blueprint service rewire.
+T-112 is complete at CP-010; all five TerrainCore tests pass. Its sub-increments
+are in the Done log. Next is UE 5.7 → 5.8 and Unreal MCP, per D-025, followed by
+**T-113**, the production backend adapter, streaming component and Blueprint
+service rewire. Neither has started. Confirm the bounded task/risk plan first.
+Either agent may resume using HANDOFF and OPERATIONS §5.1 (D-028).
 **T-110 onboarding was brought forward and completed with T-112.2** (D-027).
 
 ### T-101B — Terrain Feasibility Gate *(tiered)*
@@ -206,6 +201,12 @@ T-101B sub-step 1D, which requires the multiplayer-capable version instead.
 
 ## Done
 
+- **T-112 / T-112.3** *(CP-010)* Build step 1 complete. Added FTerrainRevisionIndex
+  and the UTerrainService revision skeleton under the approved R2 plan (D-029).
+  Revision.Monotonic checks duplicate/overlapping updates, unaffected keys,
+  atomic overflow and worldless service lifecycle/rejection. UE 5.7 build and
+  all five TerrainCore tests pass, zero failures, exit 0. Build.cs unchanged.
+  AR-4 remains in-memory only; no multiplayer/persistence/compaction claim.
 - **T-110** *(CP-008)* Astra onboarded as Implementer against the existing repo;
   read the constitution/docs and T-112.1, extended the code, built with UE 5.7 and ran
   four headless tests successfully. Brought forward by the Director (D-027).

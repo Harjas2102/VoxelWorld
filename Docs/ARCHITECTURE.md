@@ -105,6 +105,34 @@
 > backend; the production adapter has not been tested. The suite checks contract
 > properties and full server reporting; clients may ignore edit-result reporting.
 
+> **T-112.3 bounded R2 plan, CP-010, 2026-09-06 — Director-approved (D-029).**
+> Implements AR-4 and the existing K7 subsystem; no new subsystem architecture.
+>
+> - `FTerrainRevisionIndex::GetRevision(Key) const` returns zero for unseen keys
+>   without insertion. `TryBumpRevisions(TConstArrayView<FTerrainChunkKey>)`
+>   increments each distinct key once per call; repeated calls are separate updates.
+>   Empty input succeeds. If any affected revision equals MAX_uint32, the entire
+>   call returns false before any insertion/increment. Unaffected keys retain their
+>   revisions. No public setter, reset, removal, assignment or restore API.
+> - `UTerrainService` privately owns the index. Public GetRevision/HasAuthority and
+>   lifecycle calls are game-thread-only. Its private TryAdvanceRevisions rejects
+>   off-thread calls before world access, then requires index ownership, an
+>   initialized game world and non-client net mode. Initialize creates ownership;
+>   repeated Initialize retains history; Deinitialize releases it.
+> - This is a **metadata-only skeleton**, with no backend execution, global OpSeq
+>   assignment or public gameplay mutation entry point. Later edit integration must
+>   address revision exhaustion before mutating terrain; metadata atomicity does
+>   not resolve DEF-7. Persistence/compaction remain step 4 under AR-4/DEF-9.
+> - Revision.Monotonic stays worldless under §6.1: 256 overlapping batches against
+>   a per-key oracle, duplicates, empty input, extreme/negative and unaffected keys,
+>   overflow atomicity, service ownership/lifecycle and worldless/thread rejection.
+>   Development-only friends seed fixtures without shipping setters. Live net-mode
+>   authority behavior remains later multiplayer verification.
+>
+> **Evidence:** UE 5.7 build succeeded; five TerrainCore tests passed, zero failures,
+> automation/process exit 0 at 2026-09-06 17:25:08 UTC. T-112 complete. Build.cs and
+> existing value/backend interfaces unchanged; no save or wire format change.
+
 ---
 
 ## 1. Requirement
