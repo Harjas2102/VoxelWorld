@@ -184,6 +184,37 @@ Food exists without becoming a tax unless testing proves that loop is fun.
 **Consequences:** The GDD progression and survival sections are rewritten. Survival meters
 remain an open question resolved by testing, not by genre convention.
 
+## D-017 — Terrain architecture v1: adopt-and-amend (2026-09-06) — ACCEPTED
+
+**Ruled:** 2026-09-06 (CP-005) · **Class:** R3
+
+`P-001-terrain-claude.md` is adopted as the basis for `Docs/ARCHITECTURE.md` v1.
+`P-001-terrain-astra.md` is not adopted as an architecture; its evidence table and
+experiment discipline are carried into v1.
+
+Astra's review blockers B1–B10 are adopted as a numbered defect list
+(`ARCHITECTURE.md` §14), each bound to the earliest build step that depends on it,
+rather than as a precondition for all implementation. A build step may not start
+while an unresolved defect is bound to it.
+
+Rationale: build steps 0–2 discharge STATE.md's standing obligation (adapter first,
+T-101A Blueprint rewired or deleted) and clear both flagged drift checks. Ruling the
+full revision first buys correctness that is not yet load-bearing, at the cost of the
+project's largest observed failure mode (R-009).
+
+## D-018 — Primary implementer for Phase 1B+ (2026-09-06) — ACCEPTED
+
+**Ruled:** 2026-09-06 (CP-005) · **Amended:** 2026-09-06 (CP-005) · **Class:** R2
+
+Astra (OpenAI, via Codex CLI) is primary implementer for Phase 1B onward.
+Claude Code becomes independent reviewer for R3 increments, per D-014.
+
+**Amendment, same session:** the handover happens at **build step 3**, not
+immediately. Build steps 0–2 are implemented by Claude Code, which is already
+installed and verified in-repo. Installing and validating a second agent before any
+C++ module exists adds a session and delays the first compile. Astra is onboarded
+against a repo that already builds.
+
 ## D-019 — Repository stays public (2026-09-05) — ACCEPTED
 **Context:** The repo was created private (CP-001) and the Director made it public
 manually so an external ChatGPT audit could read it — the audit that became the CP-002
@@ -254,3 +285,73 @@ separate process so the editor can stay open beside it.
   character. That is a hard requirement, not polish, and it is now a T-101B entry cost.
 - Standalone writes to `Saved\Logs\Standalone_T101A.log`, separate from the editor's
   `VoxelWorld.log`, so "check the log" stays unambiguous while both run.
+
+## D-022 — ARCHITECTURE.md v1 adopted (2026-09-06) — ACCEPTED
+
+**Ruled:** 2026-09-06 (CP-005) · **Class:** R3
+
+> **Numbering note.** CP-005 drafted this ruling and the two below as D-019, D-020 and
+> D-021. Those numbers were already taken (D-019 repository stays public, D-020
+> `Lvl_ThirdPerson` is the T-101A test map, D-021 solo work runs standalone), and
+> `ARCHITECTURE.md` v1 §2.1 and §6.3 cite D-020 and D-021 with their existing meanings.
+> Per "never deleted, only superseded", the existing rulings keep their numbers and the
+> CP-005 rulings were renumbered to D-022, D-023 and D-024. D-017 and D-018 are
+> unaffected.
+
+`Docs/ARCHITECTURE.md` v1 is the implementation spec for terrain authority,
+persistence and replication. It supersedes ARCHITECTURE.md v0 §2 where they differ.
+
+§3 records forks K1–K10. §14 records defects DEF-1…DEF-10, each bound to a build
+step. §11 records unknowns E-1…E-9 with their experiments. A build step may not start
+while an unresolved defect is bound to it.
+
+**Consequence:** ARCHITECTURE v0 is archived at `Docs/archive/ARCHITECTURE_v0.md`. v1 is
+deliberately narrower than v0, so v0's header now records the four things v0 covers that
+v1 does not — the adapter-boundary rationale, surface queries as a backend consumer, tool
+ownership / cooldown / fuel as validation inputs, and power grids in the entity store.
+Those remain live requirements until a later document covers them.
+
+## D-023 — Decision classes: technical rulings move to the Architect (2026-09-06) — ACCEPTED
+
+**Ruled:** 2026-09-06 (CP-005) · **Class:** R2 · **Amends D-014**
+
+Decisions are split into two classes, and only one of them reaches the Director.
+
+**GAME decisions — Director rules.** What the player does, sees, feels and can build.
+Scope. Pace of progression. What is fun. What goes in the world. What the game is
+called. Anything a player would notice.
+
+**TECHNICAL decisions — Architect rules and logs.** Code structure, module names,
+data formats, wire protocols, threading, persistence layout, class shapes, defect
+sequencing, tooling. The Director is notified in one line and takes no action.
+
+A technical decision is escalated to the Director only if it (a) changes something a
+player would notice, (b) changes project scope, or (c) costs money. AGENTS §10's
+"stop at ambiguity" still applies between agents — it no longer routes to the
+Director by default.
+
+Rationale: presenting the Director with technical options he cannot evaluate, and
+receiving the recommended option back, is not direction. It is ceremony that consumes
+the Director's attention and produces no signal. The Director's judgement is the
+scarce resource on this project and it is spent on the game.
+
+## D-024 — Forks K1–K10 ruled (2026-09-06) — ACCEPTED
+
+**Ruled:** 2026-09-06 (CP-005) · **Class:** technical (per D-023) · **Architect ruling**
+
+| Fork | Ruling |
+|---|---|
+| K1 | Revision model: **both** — global `OpSeq` and per-chunk `Rev` |
+| K2 | Authority chunk size: **32³ voxels**, revisited only if E-3 fails |
+| K3 | Snapshot content: **sparse diff, dense fallback**, chosen per chunk by byte size |
+| K4 | Edit execution: **game thread**, bounded by `MaxVoxelsPerOp`. A dedicated terrain thread only if §7.1 measurement demands it and E-5 supports it. Plugin thread-safety is undocumented; do not assume it |
+| K5 | Durability: **journal record durable before inventory is credited.** Slower and correct. Revisit only with measurement |
+| K6 | Client delivery: **generator + ops**; snapshots only on subscribe (already required by AGENTS §4) |
+| K7 | Service shape: **`UWorldSubsystem`.** The service is authority, not a thing in the world |
+| K8 | Module names: **`TerrainCore`, `TerrainBackendVPLegacy`** — no "Voxel" in game-owned names, per D-015 |
+| K9 | Material config: **`SingleIndex`**, game-owned id↔index table in the adapter, 255 terrain materials max. Nothing visible changes while terrain is on the placeholder grid material; if it later affects how terrain looks, that becomes a GAME decision at that time |
+| K10 | Field ownership: **adapter-held density, journal as the durable record.** Split ownership is reconsidered at T-108, when the C++ density field exists and the comparison is concrete |
+
+`ARCHITECTURE.md` §3 now reads **Ruled (D-024)** for all ten, and §15 "Open forks" is
+replaced with a line pointing at this ruling. §4.5 is reconciled with the K4 ruling;
+DEF-4 remains open, because the ruling picks the thread and does not discharge the defect.

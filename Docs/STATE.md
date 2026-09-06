@@ -105,20 +105,25 @@ No gameplay systems yet. No authoritative terrain layer yet. No C++ module yet.
 
 ## Current task
 
-**Blind benchmark** — `Docs/DUAL_AGENT_SETUP.md` section 6. Identical context and an
-identical terrain-authority challenge to two vendors, blind, then cross-reviewed.
-Produces **ARCHITECTURE.md v1**, **D-017** (terrain architecture) and **D-018** (primary
-implementer). It runs now, after T-101A, so the proposals are written against the
-plugin's real API and its four measured costs rather than against a guess.
+**T-111 — build step 0.** Create the `VoxelWorld` and `TerrainCore` C++ modules with
+one empty `UWorldSubsystem`. **The project builds from source for the first time.**
+Implemented by Claude Code (D-018 amendment). No gameplay change.
 
-Queued behind it:
+Queued:
 
-- **T-101B** — Terrain Feasibility Gate (tiered). Entry cost: a `VoxelInvokerComponent`
-  on the character, or there is no multiplayer terrain to test at all.
-- **T-108** — C++ `UVoxelGenerator` for strata + ore bodies. Blocks sub-step 1C.
-  Propose before implementing (R2/R3 boundary).
+- **T-112** — build step 1: `FTerrainOp`, chunk keys, `ITerrainBackend`,
+  `FMemoryTerrainBackend`, `UTerrainService` skeleton. Headless tests pass.
+- **T-113** — build step 2: `FVPLegacyBackend` and `UTerrainStreamingComponent`;
+  **rewire the T-101A dig Blueprint through the service and delete the direct plugin
+  calls.** Both flagged drift checks clear here, standalone only.
+- **T-110** — onboard Astra (Codex CLI) against a repo that builds. After T-113.
+- **T-101B** — Terrain Feasibility Gate. Build steps 3–7.
+- **T-108** — C++ density field, strata and ore. Build step 8.
 
-**7-day rule (R-009):** still in force for every task. Passed its first test at T-101A.
+**Drift checks:** both flags remain until T-113, and then only for standalone.
+Server authority is not proven until build step 3.
+
+**Process:** R-012 in force. The next three tasks all end in something that runs.
 
 ## Drift checks (VISION.md, run at CP-004)
 
@@ -158,8 +163,6 @@ None.
 ## Open decisions
 
 - **D-008** — working title
-- **D-017** — terrain architecture v1 (from the blind benchmark)
-- **D-018** — primary implementer for Phase 1B+ (same benchmark)
 - Survival meter set — resolved by testing, not convention (D-016)
 - Stage 3 transport method (conveyors / pipes / vehicles / drones)
 - Structural integrity & decay model
@@ -181,6 +184,7 @@ None.
 | UE 5.7 | ✅ `C:\Program Files\Epic Games\UE_5.7` — installed, shaders compiled |
 | Git + LFS | ✅ git-lfs 3.7.1, push credentials verified |
 | Claude Code | ✅ Installed, verified in-repo |
+| Codex CLI (Astra, D-018) | ⏳ Not installed — deferred to T-110, after the repo builds |
 | **Voxel Plugin Free Legacy** | ✅ **v432 / e9648b302 / 5.7 — mounts clean** (gitignored) |
 | Voxel Plugin 2 | ❌ Paid, gated on owning Pro Legacy — upgrade candidate only (R-008) |
 | Python Editor Script Plugin | ✅ Enabled at CP-002 — the primary way work gets done here |

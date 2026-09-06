@@ -28,7 +28,8 @@ Then, in order of authority:
 | [`Docs/DECISIONS.md`](Docs/DECISIONS.md) | Every numbered ruling. Never deleted, only superseded. |
 | [`Docs/BACKLOG.md`](Docs/BACKLOG.md) | Ordered task list. |
 | [`Docs/RISKS.md`](Docs/RISKS.md) | Architectural unknowns, each with the experiment that resolves it. |
-| [`Docs/ARCHITECTURE.md`](Docs/ARCHITECTURE.md) | System shape. v0 stub until the terrain gate rules. |
+| [`Docs/ARCHITECTURE.md`](Docs/ARCHITECTURE.md) | System shape. **v1** — the implementation spec for terrain authority, persistence and replication. |
+| [`Docs/archive/ARCHITECTURE_v0.md`](Docs/archive/ARCHITECTURE_v0.md) | The v0 stub, archived. Its header lists what v0 still covers that v1 does not. |
 | [`Docs/GDD.md`](Docs/GDD.md) | Game design detail. |
 
 `Docs/reviews/` holds external architecture reviews; `Docs/SETUP.md` is the record of how

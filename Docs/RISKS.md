@@ -158,3 +158,24 @@ Severity / probability scale: **High · Medium · Low**.
 - **Owner / task:** T-101B; the invoker also blocks any multiplayer terrain test at all
 - **Result:** *open*
 - **Decision:** *open* — feeds D-017 (terrain architecture v1)
+
+## R-011 — Implementation deferral
+
+**Ruled:** 2026-09-06 (CP-005)
+
+An implementation increment may not be returned unstarted. If the implementer is
+blocked, it returns one specific blocking question naming the ambiguous line of
+`ARCHITECTURE.md`, not a general request for a ruling. A packet returned without a
+named ambiguity counts as a failed increment under R-009.
+
+## R-012 — Process weight
+
+**Ruled:** 2026-09-06 (CP-005)
+
+Governance exists to protect the game, and stops being useful when it costs more
+Director attention than the game does. Warning signs: a session that produces no
+playable change; a document whose only reader is another document; a decision the
+Director cannot restate in one sentence.
+
+Checked at every checkpoint alongside the VISION drift checks. If flagged, the next
+session is spent deleting process, not adding features.
