@@ -4,3 +4,12 @@ Intermediate/
 Saved/
 .vs/
 *.sln
+
+# Terrain backend — reinstall via Tools/Install-VoxelFreeLegacy.ps1 (D-010, R-008)
+Plugins/VoxelFree/
+
+# Staging + secrets
+_incoming/
+Tools/downloads/
+*.env
+**/secrets*
