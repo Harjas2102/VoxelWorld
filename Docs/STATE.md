@@ -5,8 +5,56 @@
 
 ---
 
-**Checkpoint:** CP-010 · **Date:** 2026-09-06
+**Checkpoint:** CP-011 · **Date:** 2026-09-06
 **Phase:** 1 — Terrain Feasibility
+
+## What happened at CP-011
+
+**T-112.5 complete: the project is on UE 5.8.2 and Unreal MCP is in, editor-only.**
+
+- **Director rulings (D-030):** install 5.8 **side-by-side, keeping 5.7.4** as the
+  rollback; **split T-112.5** into a bump half and an MCP half, one commit each.
+- **T-112.5a.** `EngineAssociation` 5.8; VoxelFree **432 → 434 / engine 5.8.0**;
+  `Install-VoxelFreeLegacy.ps1` parametrised `-EngineVersion` with a per-version
+  known-good fallback table. **The whole CP-006 verification set was re-run green
+  under 5.8**, including the `#include` boundary probe — D-011 is still enforced by
+  the compiler, not by review — and the Director's by-hand LMB/RMB dig.
+- **T-112.5b.** `ModelContextProtocol` + `AllToolsets` enabled with
+  `"TargetAllowList": ["Editor"]`; `.mcp.json` generated; the D-025 guard added to
+  **AGENTS §9**. The guard is load-bearing: the plugin ships **Runtime** modules, so
+  the allow-list is the only thing keeping it out of a game target. Proven from the
+  build receipts — the game target lists none of those plugins and zero matching build
+  products, against 278 plugins and 70 products for the editor target.
+- **Three defects found and fixed, none of them in the approved plan:** the 5.8 plugin
+  archive has no wrapping folder (a latent `Substring` bug in the installer, after a
+  successful 1.56 GB download); `-Force` parked the old install *inside* `Plugins\`,
+  where UBT scans recursively and saw every `Build.cs` twice (`CS0101`); and both
+  `Target.cs` pinned `BuildSettingsVersion.V6` / `Unreal5_7`, which 5.8 rejects as a
+  conflict with the installed engine's shared build environment. Bumped to **V7 /
+  `Unreal5_8`** — recorded as an Implementer determination in **D-030 §3**, cheap to
+  overrule while it is one line in each of two files.
+- **`Source/**` needed no logic change at all.** The two `Target.cs` lines were the
+  only source-tree edit across the whole engine upgrade — evidence for the §4.1 claim
+  that `TerrainCore` is engine-agnostic, rather than a restatement of it.
+- **Verification:** build `Result: Succeeded` exit 0; five TerrainCore tests
+  `Result={Success}`, zero failures, `**** TEST COMPLETE. EXIT CODE: 0 ****` — once
+  after the bump (**2026-09-07 01:24:44 UTC**) and again with MCP enabled
+  (**02:18:39 UTC**); headless boot with `TerrainService` resolving and PlayerStart
+  unchanged at (-8228.66, 0, 150); standalone invoker signature clean with zero
+  `LogVoxel` errors; live MCP `initialize` handshake returning **HTTP 200**,
+  protocol 2025-06-18, 52 toolsets discoverable.
+- **Two things the register now carries (R-008, R-010).** MCP is Epic-**Experimental**,
+  accepted deliberately because it is never shipped. And the first cold-cache 5.8 launch
+  dropped the player into an endless void: 150 PSO hitches and 18–55 s RTPSO compiles at
+  spawn, above a plane whose collision did not exist yet. A warm relaunch generated in
+  0.130s and played correctly. Not an upgrade defect — but it is now the *second* route
+  into an unrecoverable fall, and the first needs no player action. **A KillZ or respawn
+  volume is a prerequisite for real play, not polish.**
+- **Limits:** no gameplay, terrain architecture, dependency or save-format change. No
+  multiplayer, persistence or production-backend claim. UE 5.8's **Mesh Terrain was not
+  evaluated** — T-112.5 was bounded away from it, so it stays a D-025 watch item with no
+  evidence either way. All existing drift flags and terrain risks remain open.
+- **Next:** **T-113**, build step 2. Expected incoming Implementer: **either** agent.
 
 ## What happened at CP-010
 
@@ -375,10 +423,12 @@ terrain edits. No production backend adapter or authoritative gameplay edit path
 
 ## Current task
 
-**Next: T-112.5 — engine/tooling upgrade under D-025**, not started.
+**Next: T-113 — build step 2**, not started. **T-112.5 is complete at CP-011**: the
+project builds and tests green on **UE 5.8.2** with VoxelFree 434, and Unreal MCP is
+available as an editor-only dev tool.
 
 **Incoming Implementer: either** Claude or Codex according to availability (D-028).
-Read `HANDOFF.md`; confirm T-112.5's bounded task/risk plan before implementation.
+Read `HANDOFF.md`; confirm T-113's bounded task/risk plan before implementation.
 **T-112 — build step 1** (`ARCHITECTURE.md` §9) is complete:
 
 | # | Scope | Status |
@@ -393,15 +443,13 @@ decrease, and each affected chunk bumps exactly once. Payload deletion/compactio
 coverage stays at build step 4. The reusable backend suite and position-sensitive hash
 checks are implemented; `Flatten` and `Smooth` remain unsupported under DEF-5.
 
+**T-112.5 is done at CP-011.** The engine is 5.8.2, VoxelFree is 434, the CP-006 set
+re-ran green including the Director's hand check, Unreal MCP is enabled editor-only and
+the guard is in AGENTS §9. Do not repeat its planning, installs or verification unless
+new changes or failures justify it.
+
 Queued:
 
-- **T-112.5** — UE 5.7 → 5.8 upgrade + Unreal MCP adoption (D-025). Bump engine, bump
-  `.uplugin` `EngineVersion`, repoint `Tools/Install-VoxelFreeLegacy.ps1` at the 5.8
-  binaries, re-run the CP-006 verification set green (headless boot, `Play-Solo.ps1`,
-  LMB/RMB dig, the `#include` boundary probe), then enable `ModelContextProtocol` +
-  `AllToolsets` and generate `.mcp.json`. **Adds to the AGENTS §9 drift guard:** Unreal
-  MCP is editor-only; `IModelContextProtocolModule::StartServer()` is never called from a
-  game target.
 - **T-113** — build step 2: `FVPLegacyBackend` and `UTerrainStreamingComponent`;
   **rewire the T-101A dig Blueprint through the service and delete the direct plugin
   calls.** Both flagged drift checks clear here, standalone only.
@@ -413,7 +461,7 @@ Server authority is not proven until build step 3.
 
 **Process:** R-012 in force. The next three tasks all end in something that runs.
 
-## Drift checks (VISION.md, run at CP-010)
+## Drift checks (VISION.md, run at CP-011)
 
 **Both flags REMAIN.** CP-010 added revision metadata and headless invariant tests.
 Gameplay still does not route through the service, so
@@ -483,7 +531,7 @@ None.
 | Role | Holder |
 |---|---|
 | Director | Harjas |
-| Implementer | Alternating Claude/Codex (D-028); outgoing Codex, either agent next for T-112.5 |
+| Implementer | Alternating Claude/Codex (D-028); outgoing Claude, either agent next for T-113 |
 | Architect | Opus in the Claude app; D-027's delegation was limited to the completed T-112.2 |
 | Independent reviewer | Whichever vendor did not author (R3 only) |
 
@@ -491,11 +539,13 @@ None.
 
 | Tool | Status |
 |---|---|
-| UE 5.7 | ✅ `C:\Program Files\Epic Games\UE_5.7` — installed, shaders compiled |
+| **UE 5.8** | ✅ **5.8.2** at `C:\Program Files\Epic Games\UE_5.8` — the build/test engine since T-112.5 (D-025). Editor and game targets both build; five TerrainCore tests green |
+| UE 5.7 | ✅ 5.7.4 at `C:\Program Files\Epic Games\UE_5.7` — **kept deliberately** as the T-112.5 rollback path (D-030). Not the build engine |
 | Git + LFS | ✅ git-lfs 3.7.1, push credentials verified |
 | Claude Code | ✅ Installed, verified in-repo |
 | Codex (Astra, D-018 / D-027) | ✅ Onboarded in-repo at CP-008: docs, source edits, UE 5.7 build and four headless tests exercised |
-| **Voxel Plugin Free Legacy** | ✅ **v432 / e9648b302 / 5.7 — mounts clean** (gitignored) |
+| **Voxel Plugin Free Legacy** | ✅ **v434 / 159fd19a0 / 5.8 — mounts clean** (gitignored). Bumped from v432 at T-112.5; the 5.7 build is kept at `Tools\downloads\VoxelFree.bak-*-engine5.7.0` |
+| **Unreal MCP** (`ModelContextProtocol` + `AllToolsets`) | ✅ Enabled **editor-only** at T-112.5 via `TargetAllowList` (D-025 guard, AGENTS §9). Epic-**Experimental**. `.mcp.json` at the repo root points at `http://127.0.0.1:8000/mcp`. **Auto-start is OFF** — start it with `ModelContextProtocol.StartServer`; it binds loopback with no authentication |
 | Voxel Plugin 2 | ❌ Paid, gated on owning Pro Legacy — upgrade candidate only (R-008) |
 | Python Editor Script Plugin | ✅ Enabled at CP-002 — the primary way work gets done here |
 | Editor Scripting Utilities | ✅ Enabled at CP-002 |

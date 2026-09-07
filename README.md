@@ -38,18 +38,24 @@ the environment was built.
 
 ## Status
 
-**CP-010 (2026-09-06) — Phase 1: Terrain Feasibility.** Milestone: *one hill is trustworthy.*
+**CP-011 (2026-09-06) — Phase 1: Terrain Feasibility.** Milestone: *one hill is trustworthy.*
 
 - Smooth digging and a through-tunnel were demonstrated in T-101A. The terrain backend
   remains provisional; multiplayer edits, persistence, join-in-progress and yield still
   need the T-101B gate.
-- UE **5.8** builds from C++. **T-112 is complete:** op codec, quantiser, backend
-  interfaces, memory backend, revision index, service skeleton and headless tests.
-- Last code validation, **CP-010**: build succeeded; **five TerrainCore tests passed,
-  zero failures, exit 0**. Service metadata is tested; live multiplayer authority
-  and persistent terrain remain unproven.
-- **Next: T-112.5**, the D-025 engine/tooling upgrade, then T-113 (production adapter
-  and Blueprint service rewire). Either agent can pick up from the handoff.
+- UE **5.8.2** builds from C++, with Voxel Plugin Free Legacy **434**. **T-112 is
+  complete:** op codec, quantiser, backend interfaces, memory backend, revision index,
+  service skeleton and headless tests.
+- **T-112.5 is complete (CP-011):** the D-025 engine bump, and Epic's **Unreal MCP**
+  enabled **editor-only** — the `TargetAllowList` is load-bearing, because the plugin
+  ships Runtime modules. The whole CP-006 verification set was re-run green on 5.8,
+  including the `#include` boundary probe that keeps D-011 a compile error rather than
+  a review comment. The engine upgrade required **no change to `Source/**` logic**.
+- Last code validation, **CP-011**: build succeeded; **five TerrainCore tests passed,
+  zero failures, exit 0**, both after the bump and again with MCP enabled. Service
+  metadata is tested; live multiplayer authority and persistent terrain remain unproven.
+- **Next: T-113** — production backend adapter, streaming component, and rewiring the
+  dig Blueprint through the service. Either agent can pick up from the handoff.
 
 ## Build and headless tests
 

@@ -104,8 +104,10 @@ Severity / probability scale: **High · Medium · Low**.
 
 - **Severity:** High — this is the backend the whole gate runs against.
 - **Probability:** High.
-  - Voxel Plugin **Free Legacy** is maintenance-mode. Installed build: **v432 /
-    `e9648b302` / EngineVersion 5.7.0**.
+  - Voxel Plugin **Free Legacy** is maintenance-mode. Installed build: **v434 /
+    `159fd19a0` / EngineVersion 5.8.0** (was v432 / `e9648b302` / 5.7.0 through
+    CP-010; repointed at T-112.5, CP-011). The 5.7 install is retained locally at
+    `Tools\downloads\VoxelFree.bak-*-engine5.7.0` as the rollback.
   - **Voxel Plugin 2 is paid** and engine-version-gated: distributed via the Fab "Voxel
     Plugin Installer," which requires owning Voxel Plugin Pro Legacy. Documented engine
     targets at last docs snapshot were 5.5/5.6 — re-verify before relying on it.
@@ -131,7 +133,27 @@ Severity / probability scale: **High · Medium · Low**.
   conformance candidate or it is nothing: if it can be driven through the eleven
   `ITerrainBackend` methods and passes `Backend.Conformance`, it is a second backend and this
   risk gets cheaper; if it cannot, it is irrelevant. **No fork opens until there is evidence.**
-  First look is T-112.5, when the engine is on 5.8 anyway.
+  First look was scheduled for T-112.5. **Not evaluated at CP-011:** T-112.5 was
+  bounded to the engine/plugin bump and MCP adoption, and the Director's split kept it
+  there. Mesh Terrain remains a watch item with **no evidence either way**; the engine
+  is now on 5.8, so the look is cheap whenever it is scheduled.
+- **Result — version bump survived, 2026-09-06 (T-112.5, CP-011):** the plugin moved
+  **432 -> 434** with the engine. The full CP-006 verification set was re-run green,
+  including the Director's by-hand `AddSphere`/`RemoveSphere` dig through the unchanged
+  `BP_ThirdPersonCharacter` wiring. No API break, no silent behaviour change observed at
+  this surface. This measures one bump at one call site; it does not make Free Legacy
+  maintained, and it says nothing about the Pro-gated surfaces already found.
+- **New exposure, 2026-09-06 (T-112.5, CP-011): Unreal MCP is Epic-Experimental.**
+  `ModelContextProtocol` and `AllToolsets` both carry `IsExperimentalVersion: true` and
+  `EnabledByDefault: false`, and Epic's own documentation warns the APIs and formats may
+  change. This is accepted deliberately: MCP is a **dev-time editor tool** on the D-025
+  guard, never shipped, never referenced from `VoxelWorld` or `TerrainCore`. The cost of
+  it breaking is a broken tool, not a broken game. What makes that true in practice is
+  the `TargetAllowList` of `["Editor"]` in `VoxelWorld.uproject` — **necessary, because
+  the plugin ships Runtime modules** (`ModelContextProtocol`,
+  `ModelContextProtocolEngine`) and is not inherently editor-only. Proven from the build
+  receipts at CP-011: the game target's `BuildPlugins` contains none of them and zero
+  matching build products. AGENTS §9 carries the guard.
 - **Decision:** *open* — resolved by the T-101B exit (PASS / CONDITIONAL / FAIL /
   VISION CHANGE). This finding does not by itself argue for VP2: the C++ generator is
   work we owed D-011 regardless.
@@ -172,6 +194,19 @@ Severity / probability scale: **High · Medium · Low**.
   requirement, not polish. The movement-base failure needs a deliberate test — a player
   standing on terrain while another player edits it — because that is the exact case the
   game is built around and the exact case this breaks in.
+- **Second observation, 2026-09-06 (T-112.5, CP-011): a slow frame is enough to lose the
+  player through the floor.** On the first UE 5.8 standalone launch, on a cold DDC, the
+  Director spawned and fell into an endless void. The log explains it: 150 PSO creation
+  hitches and six Path Tracing RTPSO compiles of **18-55 seconds each**, at spawn. The
+  character spawns at Z+150 above the generated plane, so any stall before the voxel
+  collision mesh exists is an unopposed fall with nothing underneath. A warm-cache
+  relaunch generated the world in **0.130s** instead of 2.804s and played correctly.
+- **What this changes:** the T-101A note that adding a sphere under yourself drops you
+  through the ground is now the *second* route into the same unrecoverable state, and
+  the first one needs no player action at all — a hitch will do. The two share one
+  mitigation. **A KillZ or respawn volume is a prerequisite for anyone playing, not
+  polish**, because today the only recovery from a fall is to quit the process. Not an
+  engine-upgrade defect: it reproduces from cold caches on any version.
 - **Owner / task:** T-101B; the invoker also blocks any multiplayer terrain test at all
 - **Result:** *open*
 - **Decision:** *open* — feeds D-017 (terrain architecture v1)

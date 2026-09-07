@@ -522,3 +522,78 @@ reconciled in ARCHITECTURE's CP-010 block.
 failures and exit 0. The revision test is worldless per §6.1; live client/server
 authority and persistence are not established. No gameplay, dependency or format
 change. DEF-7 and DEF-9 remain open. Director then requested checkpoint.
+
+## D-030 — T-112.5 execution rulings and one Implementer determination (2026-09-06)
+
+**Recorded:** CP-011 · **Authority:** Director (parts 1–2) · **Class:** R2 ·
+**Scope:** T-112.5 only.
+
+### 1. Director rulings
+
+Asked to begin T-112.5, the Director ruled two bounded points before implementation:
+
+- **UE 5.8 installs side-by-side, keeping UE 5.7.** 5.7.4 stays on disk as the rollback
+  path rather than being uninstalled after the upgrade. Both engines are registered in
+  `LauncherInstalled.dat`; the project's `EngineAssociation` is `5.8`.
+- **T-112.5 splits in two, with a commit each.** **T-112.5a** = engine and plugin bump
+  plus the CP-006 verification set re-run green. **T-112.5b** = Unreal MCP adoption.
+  This buys a clean bisect if 5.8 ever proves to have broken something, at the cost of
+  one extra commit — the Director accepted that trade explicitly.
+
+D-025's premise was re-verified against the live source before any change and **holds**:
+VoxelPluginFreeLegacy advertises 5.8 binaries, so the installer only repoints. The
+plugin version moves 432 → 434, which the register now tracks under R-008.
+
+### 2. Blocking prerequisite, recorded because it cost a session gap
+
+UE 5.8 was **not installed** when T-112.5 was called. Only 5.7.4 existed. The engine
+install is a human action in the Epic Games Launcher, so the increment stopped with
+nothing implemented until the Director completed it (5.8.2). Worth recording once:
+the next task with a launcher-level prerequisite should verify it at task selection,
+not at task start.
+
+### 3. An Implementer determination — a record and a routing, not a ruling
+
+**This follows the D-026 precedent.** The Implementer has no architectural authority
+(AGENTS §2), and R-011 forbids returning an increment unstarted, so the determination
+below was made the only way the increment could proceed and is written down here so the
+Architect can overrule it cheaply.
+
+**Both `Target.cs` files move from `BuildSettingsVersion.V6` / `Unreal5_7` to
+`BuildSettingsVersion.V7` / `EngineIncludeOrderVersion.Unreal5_8`.**
+
+UE 5.8 refuses the old pinning outright — not a warning, a hard build failure:
+
+> `VoxelWorldEditor modifies the values of properties: [ UnreachableCodeWarningLevel:`
+> `Off != Error, ReturnTypeWarningLevel: Off != Error, DanglingWarningLevel: Off != Error ].`
+> `This is not allowed, as VoxelWorldEditor has build products in common with UnrealEditor.`
+
+Three options existed. `bOverrideBuildEnvironment = true` forces the mismatch through
+and is a lie to the build system. `TargetBuildEnvironment.Unique` gives the target its
+own environment but requires compiling the engine from source, which this project does
+not do and should not start doing for a warning-level pin. Bumping to the 5.8 defaults
+is the engine's own suggested fix and the only option that leaves the shared environment
+honest, so that is what was done.
+
+**What it changes:** V7 turns on `FPSemantics = Precise` for editor/program targets and
+promotes return-type, dangling-reference and unreachable-code warnings to errors;
+`Unreal5_8` adopts the new include order. **Nothing in `Source/**` needed changing** —
+`TerrainCore` and `VoxelWorld` compiled unmodified under both, which is itself evidence
+for the §4.1 claim that `TerrainCore` is engine-agnostic. The stricter warnings are
+a net gain and are cheap to keep.
+
+**Cheap to overrule** while it is one line in each of two files.
+
+### 4. Guard strengthened, not merely restated
+
+D-025 required T-112.5 to add Unreal MCP to the AGENTS §9 drift guard. It does, and it
+says *why* rather than only *what*: `ModelContextProtocol.uplugin` declares **Runtime**
+modules beside its Editor ones, so the plugin is **not inherently editor-only** and the
+`"TargetAllowList": ["Editor"]` in `VoxelWorld.uproject` is the sole mechanism keeping
+it out of a shipped game. Proven from the build receipts, not asserted. A future agent
+tidying that allow-list away now has to read what it is for first.
+
+**Evidence:** the full CP-006 verification set re-run green under 5.8.2, plus the
+Director's by-hand dig; five TerrainCore tests green with MCP enabled, exit 0; a live
+MCP `initialize` handshake returning HTTP 200. Detail is in `HANDOFF.md` and the two
+commit messages. No gameplay, terrain architecture, dependency or save format changed.

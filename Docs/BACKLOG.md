@@ -32,12 +32,11 @@ challenge to two vendors, blind, then cross-reviewed. Produces **ARCHITECTURE.md
 **D-017** (terrain architecture) and **D-018** (primary implementer). Runs *after* T-101A
 so the proposals are written against the plugin's real API, not against a guess.
 
-### T-112.5 — Engine/tooling upgrade — next (D-025)
+### T-112.5 — Engine/tooling upgrade — ✅ **DONE (CP-011)**
 
-T-112 is complete at CP-010; all five TerrainCore tests pass. Its sub-increments
-are in the Done log. Next is UE 5.7 → 5.8 and Unreal MCP, per D-025, followed by
-**T-113**, the production backend adapter, streaming component and Blueprint
-service rewire. Neither has started. Confirm the bounded task/risk plan first.
+UE 5.8.2 and Unreal MCP are in, per D-025; both halves are in the Done log.
+**Next is T-113** — the production backend adapter, streaming component and Blueprint
+service rewire — which has not started. Confirm its bounded task/risk plan first.
 Either agent may resume using HANDOFF and OPERATIONS §5.1 (D-028).
 **T-110 onboarding was brought forward and completed with T-112.2** (D-027).
 
@@ -201,6 +200,24 @@ T-101B sub-step 1D, which requires the multiplayer-capable version instead.
 
 ## Done
 
+- **T-112.5b** *(CP-011)* Unreal MCP adopted, editor-only. `ModelContextProtocol` and
+  `AllToolsets` enabled with `"TargetAllowList": ["Editor"]`; `.mcp.json` generated
+  (loopback, no credential); the D-025 guard written into AGENTS §9. The guard is
+  necessary, not decorative: the plugin ships **Runtime** modules, and the game
+  target's build receipt proves they are absent (`BuildPlugins` 234, zero matching
+  build products, against 278 and 70 for the editor). Five TerrainCore tests still
+  green with MCP enabled, exit 0. Live check: JSON-RPC `initialize` → HTTP 200,
+  protocol 2025-06-18, 52 toolsets discoverable. Auto-start left OFF.
+- **T-112.5a** *(CP-011)* UE 5.7 → **5.8.2**, side-by-side with 5.7.4; VoxelFree
+  **432 → 434** / engine 5.8.0. Whole CP-006 verification set re-run green: build
+  exit 0, five TerrainCore tests zero failures, headless boot with PlayerStart
+  unchanged at (-8228.66, 0, 150), `#include` boundary probe still `C1083` (D-011
+  compiler-enforced), standalone invoker signature clean, and the Director's by-hand
+  LMB/RMB dig. Three defects found and fixed on the way, none of them in the plan:
+  the 5.8 archive has no wrapping folder; `-Force` parked the old plugin inside
+  `Plugins\` where UBT double-counted every `Build.cs`; and both `Target.cs` pinned
+  `BuildSettingsVersion.V6`/`Unreal5_7`, which 5.8 refuses. **No `Source/**` logic
+  change was required** — the targets were the only source-tree edit.
 - **T-112 / T-112.3** *(CP-010)* Build step 1 complete. Added FTerrainRevisionIndex
   and the UTerrainService revision skeleton under the approved R2 plan (D-029).
   Revision.Monotonic checks duplicate/overlapping updates, unaffected keys,

@@ -6,21 +6,43 @@
 
 ## Identity and status
 
-- Updated: 2026-09-06, CP-010 checkpoint; T-112.3 verified at 17:25 UTC.
-- Outgoing: Codex, Implementer. Incoming: either agent; one active Implementer.
-- Task: T-112.3 and T-112 complete at CP-010. All five TerrainCore tests pass.
-- Risk/authorization: R2. Director requested "Start 112.3", then approved the
-  concrete index/service API plan with "go" (D-029), then requested "checkpoint".
-  Approval is bounded to this increment and its checkpoint/commit/push.
-- Base: `98c2f02da4f0c8f1d59afb4cc06ca444bd0e6766`, branch `main`.
-  Clean on receipt; `git pull --ff-only` reported already up to date. CP-008
-  source commit `306348a` is an ancestor. This handoff belongs to the enclosing
-  CP-010 commit; verify its final commit/push and clean worktree from Git on receipt.
-- Checkpoint scope: five source files below plus STATE, BACKLOG, DECISIONS, RISKS,
-  ARCHITECTURE, README and this handoff. No active build/test process remains.
-  No unfinished implementation. Preserve any unexpected dirty work on pickup.
+- Updated: 2026-09-06, **CP-011** checkpoint; T-112.5 verified 2026-09-07 01:24 and
+  02:18 UTC. The CP-010 record below is retained as history.
+- Outgoing: **Claude**, Implementer. Incoming: either agent; one active Implementer.
+- Task: **T-112.5 complete at CP-011.** The project is on UE 5.8.2 with VoxelFree 434,
+  and Unreal MCP is enabled editor-only. **T-113 has not started.**
+- Risk/authorization: R2. Director typed "Begin T-112.5", approved the plan in plan
+  mode, ruled the side-by-side install and the a/b split, confirmed the hand dig with
+  "It worked perfectly", typed "go" for T-112.5b, then "checkpoint". Approval is
+  bounded to this increment and its two commits, this checkpoint and its push.
+- Base: `3aedeac` (CP-010), branch `main`. Clean on receipt; `git pull --ff-only`
+  reported already up to date. Work landed as `26c6eb4` (T-112.5a) and `2e2181a`
+  (T-112.5b), both pushed `main -> main`. This handoff belongs to the enclosing CP-011
+  commit; verify its final commit/push and a clean worktree from Git on receipt.
+- Checkpoint scope: STATE, BACKLOG, DECISIONS, RISKS and this handoff. **No active
+  build, test or editor process remains** — every UnrealEditor process this session
+  started has been stopped. No unfinished implementation. Preserve any unexpected
+  dirty work on pickup.
 
-## Completed files and decisions
+## Next safe actions (CP-011)
+
+1. Read the required docs and this handoff. Verify the CP-011 commit, main/origin
+   state and worktree; sync with `git pull --ff-only`.
+2. Recite CP-011 and T-113. **T-112.5 is complete — do not repeat its installs,
+   planning or verification** unless new changes or failures justify it.
+3. **T-113 is next**: `FVPLegacyBackend`, `UTerrainStreamingComponent`, and rewiring
+   the T-101A dig Blueprint through the service so the direct plugin calls are deleted.
+   Both flagged drift checks clear there, standalone only. Confirm its bounded
+   task/risk plan with the Director before implementation. Unreal MCP is now available
+   for the Blueprint rewiring — that was D-025's whole reason for sequencing it here.
+4. Build and test with **5.8** paths (`C:\Program Files\Epic Games\UE_5.8`); README
+   carries the exact two commands. Use `-ExecCmds=...; Quit` with a **semicolon** for
+   automation runs — see the console-command gotcha in the T-112.5b section below.
+5. **Two open items this session surfaced but did not fix**, both recorded in RISKS:
+   a KillZ or respawn volume (R-010) and the un-evaluated Mesh Terrain watch item
+   (R-008). Neither is T-113's job unless the Director says so.
+
+## Completed files and decisions — CP-010 (history)
 
 All source paths are relative to `C:/Dev/VoxelWorld/Source/TerrainCore/`.
 
@@ -51,7 +73,7 @@ All source paths are relative to `C:/Dev/VoxelWorld/Source/TerrainCore/`.
   A development-only friend seeds overflow and owned-index fixtures; there is no
   shipping setter, role switch or public mutation bypass.
 
-## Verification and limits
+## Verification and limits — CP-010 (history; 5.7 commands, superseded by 5.8)
 
 Executed from `C:/Dev/VoxelWorld`:
 
@@ -82,7 +104,7 @@ Executed from `C:/Dev/VoxelWorld`:
   persistence or compaction result is claimed. All existing terrain risks and
   drift flags remain open. T-112.5 engine upgrade has not started.
 
-## Next safe actions
+## Next safe actions as written at CP-010 — superseded, kept as history
 
 1. Read required docs and this handoff. Verify the enclosing CP-010 commit,
    main/origin state and worktree. Sync a clean tree with git pull --ff-only.
@@ -93,7 +115,7 @@ Executed from `C:/Dev/VoxelWorld`:
 
 ---
 
-## In progress — T-112.5 (breadcrumb, D-028)
+## T-112.5 working breadcrumb (D-028) — kept as the record of how it went
 
 - 2026-09-06, Claude, Implementer. Base `3aedeac` (CP-010), clean on receipt,
   `git pull --ff-only` already up to date. Risk class **R2**; plan approved by the
