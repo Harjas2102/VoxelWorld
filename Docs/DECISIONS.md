@@ -597,3 +597,84 @@ tidying that allow-list away now has to read what it is for first.
 Director's by-hand dig; five TerrainCore tests green with MCP enabled, exit 0; a live
 MCP `initialize` handshake returning HTTP 200. Detail is in `HANDOFF.md` and the two
 commit messages. No gameplay, terrain architecture, dependency or save format changed.
+
+---
+
+## D-031 — T-113 execution authority, one determination, and a tooling finding (2026-09-07)
+
+**Recorded:** CP-012 · **Authority:** Director (part 1) · **Class:** R2 within an approved
+R3 architecture · **Scope:** T-113 / build step 2 only.
+
+### 1. The authorisation
+
+Asked to begin T-113, the Director said: *"I trust you on all accounts to execute anything
+as needed for the implementation. Begin everything necessary."* That is in-session authority
+of the same shape as D-027, and it is what the whole increment was executed under, including
+its one architectural determination and the Blueprint asset edit.
+
+**No numbered decision was changed.** T-113 is build step 2 of the architecture adopted at
+D-017; §14 binds **no** defect to step 2 (DEF-10, the only one that was, is Resolved), so
+the step was clear to start under §14's own rule.
+
+### 2. AR-5 — an Implementer determination, routed for cheap overrule
+
+**This follows the D-026 and D-030 precedent.** The Implementer has no architectural
+authority (AGENTS §2), and R-011 forbids returning an increment unstarted, so the
+determination below is written down where the Architect can overrule it cheaply.
+
+**`FTerrainBackendInit` gains `UWorld* World` and `FTransform OriginTransform`.**
+
+§4.3 lists `Initialize`'s inputs and stops at "role". That is complete for a backend that
+owns only memory. `FVPLegacyBackend` has to find or spawn an `AVoxelWorld`, attach invoker
+components to it and destroy them at teardown, and every one of those needs a `UWorld`. The
+alternative was for the adapter to reach for `GWorld` and guess, which is worse in the
+specific way that matters: it would be invisible.
+
+`OriginTransform` is there for a different reason. §8.1 gives coordinate policy to the
+**game** and §4.3 requires the server to quantise exactly once, so the service has to state
+where the grid starts and the backend has to conform its actor to it. A backend that instead
+read the origin off its own actor would move every existing edit by however far someone had
+dragged that actor, and nothing would report it.
+
+**Why this is cheap to accept:** both are engine types, not plugin types, so it widens what
+the game tells a backend without widening what a backend may tell the game.
+`FMemoryTerrainBackend` ignores both, still runs with no engine world, and
+`Backend.Conformance` leaves both defaulted and still passes. Full reasoning is
+ARCHITECTURE.md's CP-012 block, item 9.
+
+### 3. What step 2 deliberately did not build
+
+Recorded because the gap between "digging works through the service" and "terrain is
+server-authoritative" is exactly the kind of thing that gets misremembered as done.
+
+`FVPLegacyBackend` refuses Flatten, Smooth, Paint and box ops rather than approximating
+them; `FTerrainEditResult::Removed` is empty because yield needs the K9 table and a separate
+material read, both step 6; region transfer moves density only and is **not** the snapshot
+format. **The production adapter therefore does not yet pass `Backend.Conformance`, which
+§10 makes the operational meaning of "replaceable".** New risk **R-013** tracks that.
+`RequestEdit` has no replication, journal, yield, reach or permission validation — all bound
+to steps 3+ behind DEF-4, DEF-5 and DEF-7, all open.
+
+### 4. A tooling finding that changes what the next agent should reach for
+
+**Unreal MCP was not used for the Blueprint rewire, and could not be.** The server binds
+loopback on demand and Auto Start Server is off — by D-025's own reasoning — so it was not
+listening when the session started and its tools were unavailable for the whole session.
+
+It turned out not to matter. **UE 5.8 exposes a full Blueprint graph API to plain Python**
+(`unreal.BlueprintGraphEditor`, `unreal.BlueprintGraphPinLibrary`,
+`unreal.BlueprintEditorLibrary`): enumerate nodes, delete them, create call-function nodes,
+connect pins, set pin defaults, remove member variables, attach components through
+`SubobjectDataSubsystem`, compile and save. That is AGENTS §11's **third** rung, and it beats
+the fourth. The rewire is committed as `Tools/Editor/rewire_dig_through_service.py`,
+idempotent and re-runnable.
+
+**This does not overturn D-025.** Unreal MCP stays adopted, editor-only, and its §9 guard
+stands untouched. It does mean an agent facing editor work should try scripted Python first
+and start the MCP server only when Python cannot do the job.
+
+### 5. Status
+
+**Implementation complete and verified automatically; the Director's by-hand LMB/RMB check
+is outstanding** and is the last item before step 2 is finished. Evidence is in `HANDOFF.md`
+and the commit message for `0eabf48`.

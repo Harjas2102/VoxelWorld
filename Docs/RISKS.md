@@ -207,8 +207,26 @@ Severity / probability scale: **High · Medium · Low**.
   mitigation. **A KillZ or respawn volume is a prerequisite for anyone playing, not
   polish**, because today the only recovery from a fall is to quit the process. Not an
   engine-upgrade defect: it reproduces from cold caches on any version.
+- **Third observation, 2026-09-07 (T-113, CP-012): the invoker requirement is now met in
+  code, and standalone runs two invokers at once.** `UTerrainStreamingComponent` registers
+  interest with `UTerrainService`, which forwards it to the backend, which creates a
+  `UVoxelSimpleInvokerComponent` on the voxel world actor — so the hard requirement above is
+  satisfied without any plugin type touching a character or an asset (§7.4, DEF-10). The log
+  confirms it: `Voxel Invoker enabled; Name: VoxelSimpleInvokerComponent_0`.
+  **But the plugin still logs `No Voxel Invoker found, using camera as invoker` a
+  millisecond earlier**, because subsystem `OnWorldBeginPlay` runs after actor `BeginPlay`,
+  so our first interest is acquired on the component's next tick. Both invokers then stay
+  live. Harmless in standalone and it does not affect digging — but it means the camera
+  invoker is still doing part of the LOD work, and the camera invoker is precisely what the
+  plugin **refuses** outside standalone. **On a dedicated server there is no camera to fall
+  back to**, so whatever the camera is currently covering will simply be missing. Look at
+  this at build step 3, when the multiplayer route is exercised for the first time.
+- **Unchanged and still open: the KillZ.** Nothing in T-113 addressed it, and T-113 did not
+  make it worse. It remains a prerequisite for anyone actually playing.
 - **Owner / task:** T-101B; the invoker also blocks any multiplayer terrain test at all
-- **Result:** *open*
+- **Result:** *open*. The invoker half is now implemented and behind the game-owned
+  boundary; the movement-base failure, the collision-readiness window and the KillZ are all
+  untouched. No multiplayer claim follows from a standalone run.
 - **Decision:** *open* — feeds D-017 (terrain architecture v1)
 
 ## R-011 — Implementation deferral
@@ -245,6 +263,18 @@ named ambiguity counts as a failed increment under R-009.
   all five headless tests completed. Future edit integration must reject revision
   exhaustion before terrain mutation; the metadata helper alone does not resolve
   DEF-7. No continuing architectural delegation or terrain-risk closure follows.
+- **Result — CP-012:** T-113 found a real gap and did not stop on it. §4.3's
+  `FTerrainBackendInit` never carried a world, which a backend owning an actor cannot do
+  without; the Director had already given blanket execution authority (D-031 part 1), so the
+  determination was made, recorded as **AR-5** in the file header *and* in ARCHITECTURE at
+  checkpoint, and routed for cheap overrule. This is the shape the rule wants: work shipped,
+  the question visible rather than absorbed.
+  **The CP-007 warning above still applies and is worth repeating**: AR-5 surfaced only
+  because it changed a struct that other code reads. The step-2 scope limits — Removed left
+  empty, density-only region transfer, unsupported ops refused — are determinations of the
+  same weight that live *inside* function bodies, and they were surfaced by deliberately
+  writing them into headers rather than by any mechanism. Assume the ones nobody wrote down
+  are the dangerous ones.
 - **Decision:** *open* — keep the rule. Re-evaluate after T-101B, alongside R-009.
 
 ## R-012 — Process weight
@@ -275,3 +305,50 @@ pickup of T-112.3. No terrain risks closed by this documentation-only update.
 plan approval preceded code, then T-112 completed with five green tests. No new
 process task was inserted. No playable change yet; T-113 remains next for gameplay,
 after the scheduled T-112.5 upgrade. No risks closed by this headless increment.
+
+**CP-012 check: PASS, and the first playable change since T-101A.** T-113 ended in
+something that runs: digging works through the service, and the two drift checks that have
+been flagged since T-101A are cleared for standalone. The run of headless-only steps that
+CP-008 and CP-010 both flagged as worth watching has ended, as those checks predicted it
+would. Cost: one authorisation sentence from the Director and no new process task, document
+or gate. Checkpoint text was held until "checkpoint" was typed.
+
+**One process cost is worth recording honestly:** the session hit the usage limit mid-task
+and had to be resumed. The handoff breadcrumb written before the risky editor work is what
+made the pickup cost roughly one message instead of a re-derivation, which is the outcome
+D-028 was written for. Keep writing the breadcrumb *before* the risky half, not after.
+
+## R-013 — The production adapter has not passed the conformance suite
+
+**Opened:** CP-012 (2026-09-07)
+
+- **Severity:** Medium — it does not threaten a pillar today, but it is the difference
+  between "replaceable" as a claim and "replaceable" as a fact, and D-010/D-011 rest on it.
+- **Probability:** Certain, by construction — this is a known gap, not a suspicion.
+- **What it is.** ARCHITECTURE §10 defines replaceability operationally: a backend passes the
+  `Backend.Conformance` suite "or the backend is not a candidate. This suite is the definition
+  of the contract; there is no other one." `FMemoryTerrainBackend` passes it.
+  **`FVPLegacyBackend` does not yet**, and T-113 makes no claim that it does. The gaps are
+  deliberate and each is bound to the step that decides it: materials are zero everywhere
+  because K9 (game-id ↔ plugin-index) lands at step 6; `Removed` is empty because DEF-6 and
+  the material read land at step 6; `ReadRegion`/`WriteRegion` move density only because the
+  snapshot format is K3/DEF-9 at step 4; Flatten, Smooth, Paint and box ops are refused
+  because DEF-5 leaves their semantics unruled.
+- **Why it is worth a register line rather than a comment.** The suite is also headless by
+  §6.1 — no engine world, no plugin — and `FVPLegacyBackend` needs both. So running it against
+  the adapter is **§6.2 in-engine work that does not exist yet**, and `Adapter.ApplyOp.Matches`
+  is listed in §6.2 with no owning step. Left unwritten, the most likely outcome is that the
+  suite is quietly never run against the only backend the game actually ships, and D-011 goes
+  from compiler-enforced to merely believed.
+- **Mitigation experiment:** stand up the §6.2 harness — an in-engine automation test that
+  creates a world, spawns the adapter and runs `RunTerrainBackendConformance` against it —
+  and close the material and region gaps as their steps land. `Terrain.SelfTest` is the
+  interim stand-in and is explicitly not a substitute: it proves the chain is connected, not
+  that the contract is met.
+- **Interim evidence, CP-012:** the adapter drives a real dig end to end — 438 voxels across
+  8 chunks, revision advanced, density inverted, OpSeq monotonic, three rejection paths
+  correct. The eleven methods are all implemented; four of them are honest partials.
+- **Owner / task:** build step 4 for regions, step 6 for materials; the §6.2 harness itself
+  is unassigned and should be given an owner at the next checkpoint.
+- **Result:** *open*
+- **Decision:** *open*

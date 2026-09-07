@@ -5,8 +5,75 @@
 
 ---
 
-**Checkpoint:** CP-011 · **Date:** 2026-09-06
+**Checkpoint:** CP-012 · **Date:** 2026-09-07
 **Phase:** 1 — Terrain Feasibility
+
+## What happened at CP-012
+
+**T-113 / build step 2: terrain edits now go through the service, and the two drift
+checks flagged since T-101A are cleared for standalone.** This is the first playable
+change since T-101A.
+
+- **Authorisation (D-031).** The Director gave blanket execution authority for the
+  increment: *"I trust you on all accounts to execute anything as needed for the
+  implementation. Begin everything necessary."* No numbered decision changed. §14 binds
+  **no** defect to step 2 — DEF-10, the only one that was, is Resolved — so the step was
+  clear to start.
+- **What the Blueprint used to do, and no longer does.** LMB/RMB ran a camera line trace
+  and then called `UVoxelSphereTools::RemoveSphere`/`AddSphere` directly, on the client,
+  against an `AVoxelWorld` held in a `TargetVoxelWorld` variable. All three of those are
+  gone. The graph went **38 nodes → 19**, the variable is deleted, and `grep` over the
+  `.uasset` finds **no `/Script/Voxel` reference at all** — only `/Script/VoxelWorld`,
+  our own module. §7.4 forbids a plugin reference in an *asset* separately from the code
+  rule, and that is the half no compiler could ever have caught.
+- **What replaced it.** New module **`TerrainBackendVPLegacy`** (`FVPLegacyBackend`) — the
+  only module permitted to include a plugin header. New in `TerrainCore`: `TerrainChunk`,
+  `TerrainSettings`, `FTerrainBackendRegistry`, `UTerrainStreamingComponent`, and
+  `UTerrainService::RequestEdit`. New in `VoxelWorld`: `UTerrainInteractionLibrary` —
+  trace, then request. The trace stays gameplay code, which §4.3 explicitly permits.
+- **Backend selection is a config line.** `BackendModule=TerrainBackendVPLegacy` in
+  `DefaultEngine.ini`; the adapter registers its own factory at `StartupModule`; the
+  service loads the module **by name**. `TerrainCore` links no backend, in either
+  direction — which is what makes §10's swap procedure true rather than aspirational.
+- **The streaming component is the DEF-10 answer working in practice.** Gameplay attaches
+  a `TerrainCore` class; the backend creates, moves and destroys the plugin invoker
+  internally. Confirmed in the log: `Voxel Invoker enabled; Name:
+  VoxelSimpleInvokerComponent_0`, owned by the voxel world actor, not the character.
+- **AR-5, one determination, routed for cheap overrule (D-031 §2).**
+  `FTerrainBackendInit` gains `UWorld* World` and `FTransform OriginTransform`. §4.3 never
+  gave a backend a world, which a backend that owns an actor cannot do without; and §8.1
+  gives coordinate policy to the *game*, so the service must state where the grid starts
+  rather than let the adapter read it off an actor someone may have dragged. Both are
+  **engine** types, not plugin types. The memory backend ignores both and conformance
+  still passes.
+- **Verification, all executed:** both targets `Result: Succeeded`; **seven** TerrainCore
+  tests `Result={Success}`, zero failures, exit 0 (the five from CP-010 plus new
+  `Chunk.Keys` and `Backend.Registry`); the `#include` boundary probe fails to compile in
+  **both** `TerrainCore` *and* `VoxelWorld`, both files restored byte-identical (md5); the
+  D-025 game-target guard unchanged (0 MCP plugins, 0 matching products); standalone boots
+  with the backend ready and **zero `LogVoxel: Error`**; and `Terrain.SelfTest` **PASS** on
+  13 checks — a real dig of **438 voxels across 8 chunks**, chunk revision advanced,
+  density inverted, OpSeq monotonic, and three rejection paths correct.
+- **The tooling finding (D-031 §4): Unreal MCP was not used, and did not need to be.** The
+  server binds loopback on demand and auto-start is off, so it was not listening. **UE 5.8
+  turns out to expose a full Blueprint graph API to plain Python** — enumerate, delete,
+  create call-function nodes, connect pins, set defaults, remove variables, attach
+  components, compile, save. That is AGENTS §11's *third* rung and beats the fourth. The
+  rewire is committed as `Tools/Editor/rewire_dig_through_service.py`, idempotent. D-025
+  is unchanged; MCP stays adopted, editor-only.
+- **Deliberately not built, so nobody reads more into this than is there:** no
+  replication, no journal, no yield, no reach/permission/rate-limit validation — steps 3+
+  behind DEF-4, DEF-5, DEF-7. `FTerrainEditResult::Removed` is left **empty** and region
+  transfer moves **density only** (K9 at step 6, K3/DEF-9 at step 4), so
+  **`FVPLegacyBackend` does not yet pass `Backend.Conformance`** — which §10 makes the
+  operational meaning of "replaceable". New risk **R-013** tracks exactly that, including
+  the fact that the §6.2 in-engine harness to run it does not exist and has no owner.
+- **Outstanding: the Director's by-hand LMB/RMB dig**, standalone via
+  `Tools\Play-Solo.ps1`. Everything else is verified automatically; until that is run,
+  "digging works as today" rests on `Terrain.SelfTest` rather than on the game as played.
+- **Next:** **T-101B / build step 3** — but it **cannot start yet**: DEF-4, DEF-5 and
+  DEF-7 are all open and bound to it. Closing them is R3 work. Expected incoming
+  Implementer: **either** agent.
 
 ## What happened at CP-011
 
@@ -418,101 +485,92 @@ Source/
 - Git + LFS, pushed to **https://github.com/Harjas2102/VoxelWorld** — **PUBLIC** (D-019).
 - Governance: `AGENTS.md` (constitution) + `CLAUDE.md` (adapter) + `Docs/` (truth).
 
-No gameplay systems yet. `UTerrainService` owns revision metadata but does not execute
-terrain edits. No production backend adapter or authoritative gameplay edit path yet.
+**One gameplay system now exists end to end: digging.** `UTerrainService::RequestEdit` is
+the sole entry point, `FVPLegacyBackend` executes it, and the rewired Blueprint is the only
+caller. Authoritative in **standalone only** — there is no replication, no journal and no
+yield, and server authority is not proven until build step 3.
 
 ## Current task
 
-**Next: T-113 — build step 2**, not started. **T-112.5 is complete at CP-011**: the
-project builds and tests green on **UE 5.8.2** with VoxelFree 434, and Unreal MCP is
-available as an editor-only dev tool.
+**T-113 / build step 2 is complete at CP-012**, with **one item outstanding: the
+Director's by-hand LMB/RMB dig**, standalone via `Tools\Play-Solo.ps1`. Everything else
+was verified automatically this session. Until that check is run and reported, "digging
+works as today" rests on `Terrain.SelfTest` rather than on the game as played.
 
-**Incoming Implementer: either** Claude or Codex according to availability (D-028).
-Read `HANDOFF.md`; confirm T-113's bounded task/risk plan before implementation.
-**T-112 — build step 1** (`ARCHITECTURE.md` §9) is complete:
+**Next: T-101B / build step 3 — and it may not start yet.** §9 binds step 3 to **DEF-4,
+DEF-5 and DEF-7**, all open, and §14's rule is that a step may not start while an
+unresolved defect is bound to it. So the real next task is closing those three, which is
+**R3 work**: proposal file, independent review by whichever vendor did not author, and a
+Director ruling — not implementation. Each is a substantial specification job:
 
-| # | Scope | Status |
-|---|---|---|
-| **T-112.1** | `FTerrainOp` + 58-byte codec, chunk keys, quantiser. Tests `Op.Codec.RoundTrip`, `Op.Quantisation.Stable` | ✅ **Done at CP-007** |
-| **T-112.2** | `ITerrainBackend` (eleven methods), `ITerrainDensityField` declaration, `FMemoryTerrainBackend`, `Backend.Conformance` + `Query.Point` | ✅ **Done at CP-008** |
-| **T-112.3** | `FTerrainRevisionIndex`, `UTerrainService` skeleton. Test `Revision.Monotonic` | ✅ **Done at CP-010** |
+- **DEF-4** — a thread-affinity and ownership table covering init, mutation, reads, render
+  invalidation, callbacks and destruction, plus the shutdown state machine and cancellation
+  on `EndPlay`, travel and PIE exit. K4 ruled the *thread*; it did not discharge the defect.
+- **DEF-5** — canonical per-operation semantics including read bounds and rounding, version
+  compatibility rules, and golden fixtures. Flatten and Smooth need plane, strength,
+  iteration and falloff semantics before they can be implemented at all.
+- **DEF-7** — trusted request inputs, full quantised-footprint validation, request identity
+  and retry dedup, resource reservation and revalidation, queue limits and fairness, the
+  no-change-or-committed-result invariant, and explicit split-operation semantics.
 
-All five TerrainCore tests pass headless at CP-010, completing T-112.
-T-112.3 is in-memory only per AR-4: revisions never
-decrease, and each affected chunk bumps exactly once. Payload deletion/compaction
-coverage stays at build step 4. The reusable backend suite and position-sensitive hash
-checks are implemented; `Flatten` and `Smooth` remain unsupported under DEF-5.
+**Incoming Implementer: either** Claude or Codex according to availability (D-028). Read
+`HANDOFF.md` first.
 
-**T-112.5 is done at CP-011.** The engine is 5.8.2, VoxelFree is 434, the CP-006 set
-re-ran green including the Director's hand check, Unreal MCP is enabled editor-only and
-the guard is in AGENTS §9. Do not repeat its planning, installs or verification unless
-new changes or failures justify it.
+**Also open, and unassigned:** **R-013** — the production adapter has not passed
+`Backend.Conformance`, and the §6.2 in-engine harness that would run it does not exist.
+**R-010's KillZ** remains a prerequisite for anyone actually playing. Neither is build
+step 3's job unless the Director says so.
 
-Queued:
+## Drift checks (VISION.md, run at CP-012)
 
-- **T-113** — build step 2: `FVPLegacyBackend` and `UTerrainStreamingComponent`;
-  **rewire the T-101A dig Blueprint through the service and delete the direct plugin
-  calls.** Both flagged drift checks clear here, standalone only.
-- **T-101B** — Terrain Feasibility Gate. Build steps 3–7.
-- **T-108** — C++ density field, strata and ore. Build step 8.
-
-**Drift checks:** both flags remain until T-113, and then only for standalone.
-Server authority is not proven until build step 3.
-
-**Process:** R-012 in force. The next three tasks all end in something that runs.
-
-## Drift checks (VISION.md, run at CP-011)
-
-**Both flags REMAIN.** CP-010 added revision metadata and headless invariant tests.
-Gameplay still does not route through the service, so
-`BP_ThirdPersonCharacter` still calls `UVoxelSphereTools::RemoveSphere` and `AddSphere`
-directly, on the client. **They clear at build step 2 (T-113)**, when the Blueprint is rewired
-through `RequestEdit` and the direct calls are deleted — and then for standalone only. Server
-authority is not proven until build step 3.
+**BOTH FLAGS CLEAR — for standalone only.** They were flagged from T-101A to CP-011 with a
+single cause: `BP_ThirdPersonCharacter` called `UVoxelSphereTools::RemoveSphere`/`AddSphere`
+directly, on the client, from gameplay. T-113 deleted that. The graph went 38 nodes to 19,
+the `TargetVoxelWorld` variable is gone, and the asset contains **no `/Script/Voxel`
+reference at all**. Every terrain change now enters through `UTerrainService::RequestEdit`.
 
 - [x] Terrain is smooth-voxel and player-deformable — proven at T-101A
-- [ ] **Every gameplay system is server-authoritative — FLAGGED**
+- [x] **Every gameplay system is server-authoritative — CLEARED for standalone at CP-012.**
+      `RequestEdit` refuses on a client with `NoAuthority` rather than editing a local copy.
+      **Server authority is NOT proven**: there is no `ServerRequestEdit` RPC and no
+      `ClientApplyOp` until build step 3, so "authoritative" today means "there is exactly
+      one authority and it is this process". Re-check at step 3 against a real client.
 - [x] The tech path still leads to electricity and machines
 - [x] Scope is still one planet, 16–32 players
 - [x] Development is still incremental, Minecraft-alpha style
-- [x] The five inspiration games are still the reference set
-- [ ] **The terrain backend remains replaceable (D-010, D-011) — FLAGGED**
+- [x] The five inspiration games above are still the reference set
+- [x] **The terrain backend remains replaceable (D-010, D-011) — CLEARED at CP-012**, with
+      a named limit. The D-011 violation is gone and the boundary is compiler-enforced on
+      **both** game modules (`#include` probe → `C1083` in each). Backend selection is a
+      config line through a name→factory registry, so `TerrainCore` links no backend.
+      **The limit:** §10 defines replaceability operationally as passing
+      `Backend.Conformance`, and `FVPLegacyBackend` does not yet — materials, region
+      transfer and three operations are bound to later steps. That is **R-013**, tracked as
+      a risk rather than as drift, because it is a known incompleteness on a planned path
+      and not a violation of the boundary.
 - [x] Voxels are still invisible to the player (D-015) — grid material is placeholder
 
-**Both flags have the same cause: the T-101A dig wiring.**
-`BP_ThirdPersonCharacter` calls `UVoxelSphereTools::RemoveSphere` / `AddSphere`
-**directly, on the client, from gameplay code.** That is simultaneously:
+**What would re-flag these.** Any gameplay code or asset that calls the plugin again; any
+edit path that bypasses `RequestEdit`; a `Build.cs` gaining a plugin dependency; or a client
+being allowed to apply an edit it was not told about by the server.
 
-- a violation of **D-011** and `AGENTS.md` section 4 — *gameplay never calls the terrain
-  plugin directly; all terrain access goes through the game-owned terrain service* — and
-  it is named explicitly in the section 9 drift guard as "direct plugin calls from
-  gameplay code"; and
-- client-authoritative, which `AGENTS.md` section 4 forbids outright.
+## R-012 check (process weight, run at CP-012)
 
-**This is accepted for T-101A only, and must not survive it.** A smoke test whose entire
-purpose is to find out whether the plugin can dig at all has nothing to route through
-yet — the adapter's shape is what the blind benchmark and D-017 exist to decide. Writing
-one first would have been inventing the architecture the gate is supposed to produce.
+**PASS — and the run of headless-only steps has ended, as CP-008 and CP-010 both said to
+watch for.** T-113 produced a playable change: digging works, through the service, and the
+two drift checks flagged since T-101A are cleared for standalone.
 
-The obligation this creates: **the first thing built after D-017 is the terrain adapter,
-and this Blueprint is rewired through it or deleted.** It is test scaffolding with a
-gameplay-shaped silhouette, which is exactly the kind of thing that quietly becomes
-permanent. Feature work does not start on top of it.
+Cost to the Director: **one sentence of authorisation**, and no new process task, document
+or gate was created. Checkpoint text was held until "checkpoint" was typed.
 
-**Boundary evidence at CP-010.** The dependency list remains byte-identical and no
-plugin type/header crosses it. Backend replacement now has an executable factory suite,
-including queries and position-sensitive hashes. The production adapter has not run
-that suite yet; replacement is not proved by the memory backend passing alone.
+**One process cost, recorded honestly:** the session hit the usage limit mid-task. The
+handoff breadcrumb written *before* the risky editor work is what made the pickup cost
+about one message instead of a re-derivation — which is exactly what D-028 was written for.
+The lesson worth keeping: write the breadcrumb before the risky half, not after it.
 
-## R-012 check (process weight, run at CP-010)
-
-**PASS for this bounded step; the lack of a playable change remains visible.**
-
-The shared handoff enabled pickup without reconstructing the previous chat. The
-bounded R2 plan required one approval, then T-112.3 built and all five tests passed
-in the same session. Breadcrumbs remained in HANDOFF; checkpoint docs waited for
-"checkpoint". **The next playable change is T-113**, after the scheduled T-112.5
-upgrade. No additional process task was inserted; no playable-change claim is made.
+**CP-010 check, kept as history:** PASS for that bounded step; the shared handoff enabled
+pickup without reconstructing the previous chat, one R2 plan approval preceded code, and
+T-112 completed with five green tests. No playable change was claimed there.
 
 ## Blockers
 
@@ -531,23 +589,23 @@ None.
 | Role | Holder |
 |---|---|
 | Director | Harjas |
-| Implementer | Alternating Claude/Codex (D-028); outgoing Claude, either agent next for T-113 |
-| Architect | Opus in the Claude app; D-027's delegation was limited to the completed T-112.2 |
+| Implementer | Alternating Claude/Codex (D-028); outgoing Claude, either agent next. **The next task is R3**, so whoever implements must not also review it |
+| Architect | Opus in the Claude app. D-027's delegation was limited to the completed T-112.2; D-031's authority was limited to T-113. **AR-5 is awaiting an Architect/Director confirmation** and is cheap to overrule |
 | Independent reviewer | Whichever vendor did not author (R3 only) |
 
 ## Toolchain status
 
 | Tool | Status |
 |---|---|
-| **UE 5.8** | ✅ **5.8.2** at `C:\Program Files\Epic Games\UE_5.8` — the build/test engine since T-112.5 (D-025). Editor and game targets both build; five TerrainCore tests green |
+| **UE 5.8** | ✅ **5.8.2** at `C:\Program Files\Epic Games\UE_5.8` — the build/test engine since T-112.5 (D-025). Editor and game targets both build; **seven** TerrainCore tests green |
 | UE 5.7 | ✅ 5.7.4 at `C:\Program Files\Epic Games\UE_5.7` — **kept deliberately** as the T-112.5 rollback path (D-030). Not the build engine |
 | Git + LFS | ✅ git-lfs 3.7.1, push credentials verified |
 | Claude Code | ✅ Installed, verified in-repo |
 | Codex (Astra, D-018 / D-027) | ✅ Onboarded in-repo at CP-008: docs, source edits, UE 5.7 build and four headless tests exercised |
 | **Voxel Plugin Free Legacy** | ✅ **v434 / 159fd19a0 / 5.8 — mounts clean** (gitignored). Bumped from v432 at T-112.5; the 5.7 build is kept at `Tools\downloads\VoxelFree.bak-*-engine5.7.0` |
-| **Unreal MCP** (`ModelContextProtocol` + `AllToolsets`) | ✅ Enabled **editor-only** at T-112.5 via `TargetAllowList` (D-025 guard, AGENTS §9). Epic-**Experimental**. `.mcp.json` at the repo root points at `http://127.0.0.1:8000/mcp`. **Auto-start is OFF** — start it with `ModelContextProtocol.StartServer`; it binds loopback with no authentication |
+| **Unreal MCP** (`ModelContextProtocol` + `AllToolsets`) | ✅ Enabled **editor-only** at T-112.5 via `TargetAllowList` (D-025 guard, AGENTS §9). Epic-**Experimental**. `.mcp.json` at the repo root points at `http://127.0.0.1:8000/mcp`. **Auto-start is OFF** — start it with `ModelContextProtocol.StartServer`; it binds loopback with no authentication. **CP-012: not used for the T-113 Blueprint rewire** — it was not listening, and scripted Python did the job (D-031 §4). Still adopted; the §9 guard stands |
 | Voxel Plugin 2 | ❌ Paid, gated on owning Pro Legacy — upgrade candidate only (R-008) |
-| Python Editor Script Plugin | ✅ Enabled at CP-002 — the primary way work gets done here |
+| Python Editor Script Plugin | ✅ Enabled at CP-002 — the primary way work gets done here. **CP-012: UE 5.8 exposes a full Blueprint graph API to it** (`unreal.BlueprintGraphEditor`, `BlueprintGraphPinLibrary`, `BlueprintEditorLibrary`, `SubobjectDataSubsystem`): enumerate/delete nodes, create call-function nodes, connect pins, set defaults, remove variables, attach components, compile, save. **Try this before starting the MCP server.** Run a script headlessly with `UnrealEditor-Cmd.exe <uproject> -unattended -nopause -nosplash -nullrhi -ExecutePythonScript="<path>"` |
 | Editor Scripting Utilities | ✅ Enabled at CP-002 |
 | Visual Studio 2022 (C++ workload) | ✅ 17.14.37614.0, MSVC 14.44.35207, Win SDK 10.0.26100 — **exercised and verified at CP-006.** `VoxelWorldEditor Win64 Development` → `Result: Succeeded` (63 actions, 85s cold). Toolchain reported by UBT: MSVC 14.44.35228 / Windows 10.0.26100.0 SDK |
 | Editor revision control | ⚠️ Enabled and failing checkout on every scripted save, popping a modal each time. Saves succeed anyway. Set Provider to None when it gets in the way. |

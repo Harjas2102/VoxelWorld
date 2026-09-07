@@ -133,6 +133,83 @@
 > automation/process exit 0 at 2026-09-06 17:25:08 UTC. T-112 complete. Build.cs and
 > existing value/backend interfaces unchanged; no save or wire format change.
 
+> **T-113 determinations, CP-012, 2026-09-07 — Director-authorised in session.**
+> Asked to begin T-113, the Director said "I trust you on all accounts to execute anything
+> as needed for the implementation. Begin everything necessary." That is the same shape of
+> in-session authority as D-027, and it is what the determinations below were made under.
+> They are recorded first in the headers of the files they govern; this block reconciles the
+> implementation spec at checkpoint. **None closes a defect and none changes a numbered
+> decision.**
+>
+> 9. **AR-5 §4.3 — `FTerrainBackendInit` gains `UWorld* World` and
+>    `FTransform OriginTransform`.** §4.3 lists `Initialize`'s inputs as "seed, gen version,
+>    voxel size, bounds, density field, role" and stops there. That is complete for a backend
+>    owning only memory. It is **not** complete for `FVPLegacyBackend`, which must find or
+>    spawn an `AVoxelWorld`, attach invoker components to it and destroy them at teardown —
+>    every one of which needs a `UWorld`. Without the field the adapter would have to reach
+>    for `GWorld` and guess, which is strictly worse than saying so in the contract.
+>    `OriginTransform` is carried for a separate reason: §8.1 assigns coordinate policy to the
+>    **game**, and §4.3 requires the server to quantise exactly once, so the service must state
+>    where the grid starts and the backend must conform its actor to it. A backend that read
+>    the origin off its own actor would silently move every existing edit by however far that
+>    actor had been dragged. **Both are engine types, not plugin types**, so this widens what
+>    the game tells a backend without widening what a backend may tell the game. Null `World`
+>    is legal and means headless. `FMemoryTerrainBackend` ignores both fields, still compiles
+>    and runs with no engine world (§6.1), and `Backend.Conformance` leaves both defaulted and
+>    still passes — which is the evidence that AR-5 costs the headless path nothing.
+>
+> 10. **Step-2 scope, stated as limits rather than left to be discovered.** `FVPLegacyBackend`
+>     implements Remove and Add spheres and refuses everything else: Flatten and Smooth have
+>     no ruled plane/strength/iteration/falloff semantics (DEF-5), Paint has no game-id to
+>     plugin-index table until K9 at step 6, and box ops have no producer. An unsupported
+>     operation is **refused, never approximated**. `FTerrainEditResult::Removed` is left
+>     **empty**: §2.3 records that `FModifiedVoxelValue` carries no material, so yield needs a
+>     separate bulk material read *and* the K9 table, both step 6 — and a plausible number
+>     derived from the current RGB config would be inventing the economy that §4.2 moved above
+>     the backend precisely to prevent. `ReadRegion`/`WriteRegion`/`HashRegion` move **density
+>     only**, materials zero, in the §4.7 dense layout: a working convergence oracle, **not**
+>     the snapshot format, which is step 4 under K3 and DEF-9. `FlushPendingWork` is a
+>     deliberate no-op, per §4.5's "rendering and collision updates remain the plugin's own
+>     async work and are explicitly not serialised by us".
+>
+>     **Consequence, stated plainly: `FVPLegacyBackend` does not yet pass the full §6.1
+>     `Backend.Conformance` suite, and T-113 makes no claim that it does.** §10 makes that
+>     pass the operational meaning of "replaceable", so replaceability is proven for the
+>     memory backend and *not* for the production adapter. Tracked as **R-013**.
+>
+> 11. **`UTerrainService::RequestEdit` implements part of the §4.4 sequence, and only part.**
+>     Present: admission on authority and well-formedness, the single quantisation, the §7.1
+>     work bound, world-bounds rejection, execution, OpSeq assignment **at commit**, and the
+>     per-chunk revision bump. Absent, because §9 binds them to later steps behind open
+>     defects: `ServerRequestEdit`/`ClientApplyOp` and the subscription set, commit-time
+>     revalidation, request dedup and split operations (step 3; DEF-4, DEF-5, DEF-7); the
+>     journal and any durability at all (step 4; DEF-1, DEF-2, K5); yield settlement (step 6;
+>     DEF-6); reach, permission, rate limit and self-clearance (step 3; DEF-7, DEF-8).
+>
+>     One ordering point is worth recording because it is narrower than it looks: **revision
+>     exhaustion is checked over the op's predicted footprint *before* the backend is called**,
+>     so "mutated terrain that no revision records" cannot arise from overflow. That is
+>     strictly narrower than DEF-7's no-change-or-committed-result invariant, which stays open:
+>     a backend failing halfway still reports one boolean, and nothing here can tell that from
+>     a clean refusal.
+>
+> 12. **Backend selection is a config string, and TerrainCore never links a backend.**
+>     `FTerrainBackendRegistry` maps a module name to a creator; the adapter registers itself
+>     from its own `StartupModule`; `UTerrainService` loads the module named by
+>     `UTerrainSettings::BackendModule` and looks the name up. This is what makes §10 step 4
+>     ("set `BackendModule=TerrainBackendX` in config") true rather than aspirational, and it
+>     keeps the §4.1 dependency direction one-way. `TerrainCore.Backend.Registry` asserts the
+>     mechanism against `FMemoryTerrainBackend`, deliberately: a test that loaded the adapter
+>     to prove TerrainCore does not need the adapter would prove nothing.
+>
+> **Evidence:** both targets `Result: Succeeded`; seven TerrainCore tests green, zero
+> failures, exit 0; the `#include` boundary probe fails to compile in **both** `TerrainCore`
+> and `VoxelWorld`, files restored byte-identical; standalone boots with the backend ready and
+> zero `LogVoxel: Error`; `Terrain.SelfTest` PASSes 13 checks, digging 438 voxels across 8
+> chunks and advancing the chunk revision. No save or wire format changed. `TerrainOp.h`,
+> `TerrainQuantise.h`, `TerrainRevisionIndex.h`, `MemoryTerrainBackend.*` and both
+> `Build.cs` dependency lists are unchanged against CP-011.
+
 ---
 
 ## 1. Requirement

@@ -6,41 +6,57 @@
 
 ## Identity and status
 
-- Updated: 2026-09-06, **CP-011** checkpoint; T-112.5 verified 2026-09-07 01:24 and
-  02:18 UTC. The CP-010 record below is retained as history.
+- Updated: **2026-09-07, CP-012 checkpoint.** T-113 verified this session. The CP-011 and
+  CP-010 records below are retained as history.
 - Outgoing: **Claude**, Implementer. Incoming: either agent; one active Implementer.
-- Task: **T-112.5 complete at CP-011.** The project is on UE 5.8.2 with VoxelFree 434,
-  and Unreal MCP is enabled editor-only. **T-113 has not started.**
-- Risk/authorization: R2. Director typed "Begin T-112.5", approved the plan in plan
-  mode, ruled the side-by-side install and the a/b split, confirmed the hand dig with
-  "It worked perfectly", typed "go" for T-112.5b, then "checkpoint". Approval is
-  bounded to this increment and its two commits, this checkpoint and its push.
-- Base: `3aedeac` (CP-010), branch `main`. Clean on receipt; `git pull --ff-only`
-  reported already up to date. Work landed as `26c6eb4` (T-112.5a) and `2e2181a`
-  (T-112.5b), both pushed `main -> main`. This handoff belongs to the enclosing CP-011
-  commit; verify its final commit/push and a clean worktree from Git on receipt.
-- Checkpoint scope: STATE, BACKLOG, DECISIONS, RISKS and this handoff. **No active
-  build, test or editor process remains** — every UnrealEditor process this session
-  started has been stopped. No unfinished implementation. Preserve any unexpected
-  dirty work on pickup.
+- Task: **T-113 / build step 2 complete at CP-012**, with one item outstanding — the
+  Director's by-hand LMB/RMB dig. Digging now routes through `UTerrainService::RequestEdit`;
+  both drift checks flagged since T-101A are cleared **for standalone only**.
+- Risk/authorization: R2 inside the approved R3 architecture. The Director said "I trust you
+  on all accounts to execute anything as needed for the implementation. Begin everything
+  necessary", then typed "checkpoint". Recorded as **D-031**. Authority is bounded to this
+  increment, its one commit, this checkpoint and its push.
+- Base: `cbcacf4` (CP-011), branch `main`. Clean on receipt; `git pull --ff-only` reported
+  already up to date. Implementation landed as **`0eabf48`**, pushed `main -> main`. This
+  handoff belongs to the enclosing CP-012 commit; verify its final commit/push and a clean
+  worktree from Git on receipt.
+- Checkpoint scope: STATE, BACKLOG, DECISIONS, RISKS, ARCHITECTURE's CP-012 determination
+  block, and this handoff. **No active build, test or editor process remains** — every
+  UnrealEditor process this session started has been stopped and that was verified. No
+  unfinished implementation. Preserve any unexpected dirty work on pickup.
+- **The session hit the usage limit mid-task and was resumed.** The breadcrumb below was
+  written before the risky editor work, which is what made the pickup cheap. Keep doing that.
 
-## Next safe actions (CP-011)
+## Next safe actions (CP-012)
 
-1. Read the required docs and this handoff. Verify the CP-011 commit, main/origin
-   state and worktree; sync with `git pull --ff-only`.
-2. Recite CP-011 and T-113. **T-112.5 is complete — do not repeat its installs,
-   planning or verification** unless new changes or failures justify it.
-3. **T-113 is next**: `FVPLegacyBackend`, `UTerrainStreamingComponent`, and rewiring
-   the T-101A dig Blueprint through the service so the direct plugin calls are deleted.
-   Both flagged drift checks clear there, standalone only. Confirm its bounded
-   task/risk plan with the Director before implementation. Unreal MCP is now available
-   for the Blueprint rewiring — that was D-025's whole reason for sequencing it here.
-4. Build and test with **5.8** paths (`C:\Program Files\Epic Games\UE_5.8`); README
-   carries the exact two commands. Use `-ExecCmds=...; Quit` with a **semicolon** for
-   automation runs — see the console-command gotcha in the T-112.5b section below.
-5. **Two open items this session surfaced but did not fix**, both recorded in RISKS:
-   a KillZ or respawn volume (R-010) and the un-evaluated Mesh Terrain watch item
-   (R-008). Neither is T-113's job unless the Director says so.
+1. Read the required docs and this handoff. Verify the CP-012 commit, main/origin state and
+   worktree; sync with `git pull --ff-only`.
+2. Recite CP-012. **T-113 is complete — do not rebuild the adapter, the service entry point
+   or the Blueprint rewire** unless new changes or failures justify it. The rewire script is
+   idempotent and reports "already rewired" if run again.
+3. **Ask the Director for the by-hand dig result** if it has not been reported:
+   `Tools\Play-Solo.ps1`, standalone not PIE, LMB digs and RMB places. `Terrain.SelfTest` in
+   the console gives the same answer without a mouse.
+4. **Build step 3 may not start.** §9 binds it to DEF-4, DEF-5 and DEF-7, all open, and §14
+   forbids starting a step while a defect is bound to it. The real next task is closing those
+   three, which is **R3**: proposal at `Docs/proposals/`, independent review by whichever
+   vendor did not author, then a Director ruling. STATE's "Current task" lists what each
+   defect actually requires.
+5. Build and test with **5.8** paths (`C:\Program Files\Epic Games\UE_5.8`); README carries
+   the exact two commands. Two console-command gotchas, both learned the hard way:
+   `-ExecCmds=Automation RunTests TerrainCore; Quit` works with a **semicolon**, but
+   `-ExecCmds` splits on **commas** and does not reliably deliver argument lists to a
+   deferred console command — so anything driven from a command line must be a **single
+   argument-free command**. That is why `Terrain.SelfTest` takes no arguments and self-delays
+   two seconds: the voxel world finishes generating *after* the first map-load commands fire.
+6. **Three open items this session surfaced but did not fix**, all in RISKS: **R-013** (the
+   production adapter has not passed `Backend.Conformance`, and the §6.2 harness that would
+   run it does not exist or have an owner); **R-010's KillZ**, still a prerequisite for
+   anyone actually playing, plus the new dual-invoker observation; and **R-008's**
+   un-evaluated Mesh Terrain watch item. None is build step 3's job unless the Director says
+   so.
+7. **AR-5 is awaiting confirmation.** It is one struct's two fields and is cheap to overrule
+   while it stays that way.
 
 ---
 

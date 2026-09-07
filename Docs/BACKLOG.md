@@ -35,10 +35,23 @@ so the proposals are written against the plugin's real API, not against a guess.
 ### T-112.5 — Engine/tooling upgrade — ✅ **DONE (CP-011)**
 
 UE 5.8.2 and Unreal MCP are in, per D-025; both halves are in the Done log.
-**Next is T-113** — the production backend adapter, streaming component and Blueprint
-service rewire — which has not started. Confirm its bounded task/risk plan first.
-Either agent may resume using HANDOFF and OPERATIONS §5.1 (D-028).
 **T-110 onboarding was brought forward and completed with T-112.2** (D-027).
+
+### T-113 — Build step 2 — ✅ **DONE (CP-012)**, one hand check outstanding
+
+`FVPLegacyBackend`, `UTerrainStreamingComponent` and the T-101A dig Blueprint rewired
+through `UTerrainService::RequestEdit`. See the Done log and D-031.
+
+**The one thing still open: the Director's by-hand LMB/RMB dig**, standalone, via
+`Tools\Play-Solo.ps1`. Everything else is verified automatically. Until that is run and
+reported, "digging works as today" is asserted from `Terrain.SelfTest` and not from the
+game as played.
+
+**Next is T-101B**, the gate proper, which begins at build step 3. **Do not start step 3
+yet**: §9 binds it to DEF-4, DEF-5 and DEF-7, all open, and §14's rule is that a step may
+not start while an unresolved defect is bound to it. Closing those three is therefore the
+real next task, and it is R3 work — proposal, independent review, Director ruling — not
+implementation.
 
 ### T-101B — Terrain Feasibility Gate *(tiered)*
 
@@ -200,6 +213,31 @@ T-101B sub-step 1D, which requires the multiplayer-capable version instead.
 
 ## Done
 
+- **T-113** *(CP-012)* **Build step 2: digging now goes through the service.** New module
+  `TerrainBackendVPLegacy` with `FVPLegacyBackend` — the only module allowed to include a
+  plugin header. New in `TerrainCore`: `TerrainChunk` (one definition of voxel→chunk keying,
+  floor division so it does not mirror around the origin), `TerrainSettings` (the
+  `[/Script/TerrainCore.TerrainSettings]` section §4.1 names), `FTerrainBackendRegistry`
+  (name→factory, so §10's "swap is a config line" is true rather than aspirational),
+  `UTerrainStreamingComponent` (§7.4, DEF-10) and `UTerrainService::RequestEdit`. New in
+  `VoxelWorld`: `UTerrainInteractionLibrary` — trace, then request; the trace stays gameplay
+  code, which §4.3 explicitly permits.
+  **The Blueprint went from 38 nodes to 19**: both `LineTraceByChannel` chains,
+  `RemoveSphere`, `AddSphere`, both `BreakHitResult`, both `Branch`, both camera chains and
+  the `BeginPlay → GetActorOfClass(VoxelWorld) → Set TargetVoxelWorld` chain are gone, along
+  with the `TargetVoxelWorld` variable — an `AVoxelWorld` reference **held in the asset**,
+  which §7.4 forbids separately and no compiler could catch. `grep` over the `.uasset` now
+  returns no `/Script/Voxel` reference at all. Done by
+  `Tools/Editor/rewire_dig_through_service.py`, committed and idempotent.
+  **Both drift checks flagged since T-101A are cleared — for standalone only.**
+  Verified: both targets build clean; **seven** TerrainCore tests green, exit 0; the
+  `#include` probe fails to compile in **both** game modules, files restored byte-identical;
+  the D-025 game-target guard unchanged; standalone boots with zero `LogVoxel: Error`;
+  `Terrain.SelfTest` PASS on 13 checks — 438 voxels across 8 chunks, revision advanced,
+  OpSeq monotonic, three rejection paths correct. **Deliberately not built:** replication,
+  journal, yield, reach/permission validation (steps 3+, DEF-4/5/7); `Removed` left empty and
+  region transfer density-only (K9/K3/DEF-9), so the adapter does **not** yet pass
+  `Backend.Conformance` — tracked as **R-013**. AR-5 and the scope limits are in D-031.
 - **T-112.5b** *(CP-011)* Unreal MCP adopted, editor-only. `ModelContextProtocol` and
   `AllToolsets` enabled with `"TargetAllowList": ["Editor"]`; `.mcp.json` generated
   (loopback, no credential); the D-025 guard written into AGENTS §9. The guard is
