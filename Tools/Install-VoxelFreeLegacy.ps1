@@ -1,6 +1,6 @@
 <#
 .SYNOPSIS
-    Installs Voxel Plugin Free Legacy (prebuilt UE 5.7 binaries) into Plugins\VoxelFree.
+    Installs Voxel Plugin Free Legacy (prebuilt binaries) into Plugins\VoxelFree.
 
 .DESCRIPTION
     The terrain backend is PROVISIONAL (D-010) and deliberately not committed to git:
@@ -11,13 +11,21 @@
     installed version and exits 0 without downloading anything. Use -Force to reinstall.
 
     The download URL is NOT hardcoded as the primary source: the script fetches the
-    project README from GitHub and extracts whatever 5.7 binaries link it currently
-    advertises, falling back to the URL known good at CP-002 only if that fails.
+    project README from GitHub and extracts whatever binaries link it currently
+    advertises for -EngineVersion, falling back to the URL known good at T-112.5 only if
+    that fails.
     The archive's internal layout is inspected rather than assumed.
 
 .PARAMETER Force
     Reinstall even if the plugin is already present. The existing folder is moved aside
-    to Plugins\VoxelFree.bak-<timestamp> rather than deleted.
+    to Tools\downloads\VoxelFree.bak-<timestamp> rather than deleted. It goes OUTSIDE
+    Plugins\ on purpose: UnrealBuildTool scans Plugins\ recursively, so a backup left
+    there makes every module's Build.cs appear twice and the build fails with CS0101
+    "already contains a definition for 'Voxel'" before a single file compiles.
+
+.PARAMETER EngineVersion
+    Which engine's prebuilt binaries to install, as it appears in the archive name.
+    Defaults to 5.8 (D-025, T-112.5). Pass 5.7 to reinstall the pre-upgrade build.
 
 .PARAMETER Url
     Skip README discovery and download this exact zip URL.
@@ -38,6 +46,8 @@
 [CmdletBinding()]
 param(
     [switch]$Force,
+    [ValidatePattern('^\d+\.\d+$')]
+    [string]$EngineVersion = '5.8',
     [string]$Url,
     [string]$ZipPath
 )
@@ -53,8 +63,15 @@ $DownloadDir = Join-Path $PSScriptRoot 'downloads'
 
 $RepoUrl      = 'https://github.com/VoxelPlugin/VoxelPluginFreeLegacy'
 $ReadmeRawUrl = 'https://raw.githubusercontent.com/VoxelPlugin/VoxelPluginFreeLegacy/master/README.md'
-# Known good at CP-002 (2026-09-05). Fallback only — README discovery is preferred.
-$FallbackUrl  = 'https://api.voxelplugin.com/external/7f2800eb480ae2e0289fecb6994aac5e/VoxelFree-432-e9648b302-5.7-Binaries.zip'
+# Known good per engine version. Fallback only — README discovery is preferred.
+# 5.7: CP-002 (2026-09-05).  5.8: T-112.5 (2026-09-06), the D-025 upgrade target.
+$FallbackUrls = @{
+    '5.7' = 'https://api.voxelplugin.com/external/7f2800eb480ae2e0289fecb6994aac5e/VoxelFree-432-e9648b302-5.7-Binaries.zip'
+    '5.8' = 'https://api.voxelplugin.com/external/7923261944ecf7909870de8b925e359b/VoxelFree-434-159fd19a0-5.8-Binaries.zip'
+}
+$FallbackUrl  = $FallbackUrls[$EngineVersion]
+# Regex-safe form of the version for the README link patterns below.
+$VerPattern   = [regex]::Escape($EngineVersion)
 
 function Write-Step { param([string]$m) Write-Host "==> $m" -ForegroundColor Cyan }
 function Write-Ok   { param([string]$m) Write-Host "    $m" -ForegroundColor Green }
@@ -93,7 +110,9 @@ if ($installed -and -not $Force) {
     exit 0
 }
 if ($installed -and $Force) {
-    $backup = "$PluginDir.bak-$(Get-Date -Format 'yyyyMMdd-HHmmss')"
+    # Outside Plugins\ deliberately - see .PARAMETER Force. Tools\downloads is gitignored.
+    if (-not (Test-Path $DownloadDir)) { New-Item -ItemType Directory -Path $DownloadDir | Out-Null }
+    $backup = Join-Path $DownloadDir "VoxelFree.bak-$(Get-Date -Format 'yyyyMMdd-HHmmss')-engine$($installed.EngineVersion)"
     Write-Warn "-Force given; moving the existing install to $backup"
     Move-Item -LiteralPath $PluginDir -Destination $backup
 }
@@ -101,35 +120,38 @@ if ($installed -and $Force) {
 # --- 2. Resolve the download URL --------------------------------------------
 if (-not $ZipPath) {
     if (-not $Url) {
-        Write-Step "Discovering the current 5.7 binaries link from the project README"
+        Write-Step "Discovering the current $EngineVersion binaries link from the project README"
         try {
             $readme = (Invoke-WebRequest -Uri $ReadmeRawUrl -UseBasicParsing -TimeoutSec 30).Content
-            # Any http(s) link to a .zip whose name mentions 5.7 and Binaries.
-            $m = [regex]::Matches($readme, 'https?://[^\s)"''<>]*5\.7[^\s)"''<>]*Binaries[^\s)"''<>]*\.zip')
+            # Any http(s) link to a .zip whose name mentions the engine version and Binaries.
+            $m = [regex]::Matches($readme, "https?://[^\s)`"'<>]*$VerPattern[^\s)`"'<>]*Binaries[^\s)`"'<>]*\.zip")
             if ($m.Count -eq 0) {
-                $m = [regex]::Matches($readme, 'https?://[^\s)"''<>]*VoxelFree[^\s)"''<>]*5\.7[^\s)"''<>]*\.zip')
+                $m = [regex]::Matches($readme, "https?://[^\s)`"'<>]*VoxelFree[^\s)`"'<>]*$VerPattern[^\s)`"'<>]*\.zip")
             }
             if ($m.Count -gt 0) {
                 $Url = $m[0].Value
                 Write-Ok "README advertises: $Url"
             } else {
-                Write-Warn "No 5.7 binaries link found in the README."
+                Write-Warn "No $EngineVersion binaries link found in the README."
             }
         } catch {
             Write-Warn "Could not fetch the README: $($_.Exception.Message)"
         }
     }
     if (-not $Url) {
+        if (-not $FallbackUrl) {
+            throw "No README link found for engine $EngineVersion and no known-good fallback for it. Open $RepoUrl, copy the current $EngineVersion binaries link, and re-run with -Url <link>."
+        }
         $Url = $FallbackUrl
-        Write-Warn "Falling back to the URL known good at CP-002:"
+        Write-Warn "Falling back to the URL known good for engine ${EngineVersion}:"
         Write-Warn "  $Url"
-        Write-Warn "If this 404s, open $RepoUrl and copy the current 5.7 binaries link."
+        Write-Warn "If this 404s, open $RepoUrl and copy the current $EngineVersion binaries link."
     }
 
     # --- 3. Download ---------------------------------------------------------
     if (-not (Test-Path $DownloadDir)) { New-Item -ItemType Directory -Path $DownloadDir | Out-Null }
     $ZipPath = Join-Path $DownloadDir ([System.IO.Path]::GetFileName(($Url -split '\?')[0]))
-    if (-not $ZipPath.EndsWith('.zip')) { $ZipPath = Join-Path $DownloadDir 'VoxelFree-5.7-Binaries.zip' }
+    if (-not $ZipPath.EndsWith('.zip')) { $ZipPath = Join-Path $DownloadDir "VoxelFree-$EngineVersion-Binaries.zip" }
 
     Write-Step "Downloading to $ZipPath"
     Write-Warn "This is a large archive (several hundred MB). Be patient."
@@ -141,7 +163,7 @@ if (-not $ZipPath) {
         Write-Host ''
         Write-Host 'DOWNLOAD FAILED.' -ForegroundColor Red
         Write-Host "  1. Open this in a browser: $Url"
-        Write-Host "     (or find the current 5.7 link at $RepoUrl)"
+        Write-Host "     (or find the current $EngineVersion link at $RepoUrl)"
         Write-Host "  2. Save the zip anywhere, then re-run:"
         Write-Host "     .\Tools\Install-VoxelFreeLegacy.ps1 -ZipPath <path-to-zip>"
         throw
@@ -172,7 +194,14 @@ if (-not $found) {
     throw 'Unexpected archive layout - inspect it manually and use -ZipPath after fixing.'
 }
 $SourceRoot = $found.Directory.FullName
-Write-Ok "Plugin root inside archive: $($SourceRoot.Substring($Staging.Length + 1))"
+# The 5.7 archive wraps the plugin in a folder; the 5.8 archive does not, so SourceRoot
+# can equal Staging exactly. Report that as the archive root rather than off the end.
+$RelSourceRoot = if ($SourceRoot.Length -gt $Staging.Length) {
+    $SourceRoot.Substring($Staging.Length + 1)
+} else {
+    '<archive root>'
+}
+Write-Ok "Plugin root inside archive: $RelSourceRoot"
 
 # --- 6. Normalize into Plugins\VoxelFree ------------------------------------
 Write-Step "Installing into $PluginDir"

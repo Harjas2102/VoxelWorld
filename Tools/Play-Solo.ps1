@@ -30,7 +30,7 @@
 [CmdletBinding()]
 param(
     [string]$Map        = "/Game/ThirdPerson/Lvl_ThirdPerson",
-    [string]$Engine     = "C:\Program Files\Epic Games\UE_5.7",
+    [string]$Engine     = "C:\Program Files\Epic Games\UE_5.8",
     [int]$Width         = 1600,
     [int]$Height        = 900,
     [switch]$Fullscreen,
@@ -45,7 +45,7 @@ $logDir  = Join-Path $PSScriptRoot "..\Saved\Logs" | Resolve-Path
 $log     = Join-Path $logDir "Standalone_T101A.log"
 
 if (-not (Test-Path $exe)) {
-    throw "Unreal Editor not found at '$exe'. Pass -Engine <path to UE_5.7>."
+    throw "Unreal Editor not found at '$exe'. Pass -Engine <path to UE_5.8>."
 }
 
 # A dedicated log file: the editor holds Saved/Logs/VoxelWorld.log open, and a

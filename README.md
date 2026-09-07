@@ -5,7 +5,7 @@
 > mention voxels (D-015). Naming is open as D-008.
 
 A realistic, persistent, multiplayer survival and industrial sandbox built in Unreal
-Engine 5.7 for a self-hosted server of 16–32 friends. The world is made of material
+Engine 5.8 for a self-hosted server of 16–32 friends. The world is made of material
 rather than being an immutable stage: players dig, tunnel, quarry, and terraform, and
 the server remembers all of it. Technology progression is framed as increasing scale of
 control over the environment — hand labour, then a workshop, then power, then logistics,
@@ -43,7 +43,7 @@ the environment was built.
 - Smooth digging and a through-tunnel were demonstrated in T-101A. The terrain backend
   remains provisional; multiplayer edits, persistence, join-in-progress and yield still
   need the T-101B gate.
-- UE **5.7** builds from C++. **T-112 is complete:** op codec, quantiser, backend
+- UE **5.8** builds from C++. **T-112 is complete:** op codec, quantiser, backend
   interfaces, memory backend, revision index, service skeleton and headless tests.
 - Last code validation, **CP-010**: build succeeded; **five TerrainCore tests passed,
   zero failures, exit 0**. Service metadata is tested; live multiplayer authority
@@ -53,11 +53,11 @@ the environment was built.
 
 ## Build and headless tests
 
-From `C:\Dev\VoxelWorld`, with the installed UE 5.7 and VS C++ toolchain:
+From `C:\Dev\VoxelWorld`, with the installed UE 5.8 and VS C++ toolchain:
 
 ```powershell
-& 'C:\Program Files\Epic Games\UE_5.7\Engine\Build\BatchFiles\Build.bat' VoxelWorldEditor Win64 Development '-Project=C:\Dev\VoxelWorld\VoxelWorld.uproject' -WaitMutex
-& 'C:\Program Files\Epic Games\UE_5.7\Engine\Binaries\Win64\UnrealEditor-Cmd.exe' 'C:\Dev\VoxelWorld\VoxelWorld.uproject' '-ExecCmds=Automation RunTests TerrainCore; Quit' -unattended -nopause -nosplash -nullrhi -log
+& 'C:\Program Files\Epic Games\UE_5.8\Engine\Build\BatchFiles\Build.bat' VoxelWorldEditor Win64 Development '-Project=C:\Dev\VoxelWorld\VoxelWorld.uproject' -WaitMutex
+& 'C:\Program Files\Epic Games\UE_5.8\Engine\Binaries\Win64\UnrealEditor-Cmd.exe' 'C:\Dev\VoxelWorld\VoxelWorld.uproject' '-ExecCmds=Automation RunTests TerrainCore; Quit' -unattended -nopause -nosplash -nullrhi -log
 ```
 
 Expected now: `Result: Succeeded`, five successful TerrainCore tests (including

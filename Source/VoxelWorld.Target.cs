@@ -8,8 +8,8 @@ public class VoxelWorldTarget : TargetRules
 	public VoxelWorldTarget(TargetInfo Target) : base(Target)
 	{
 		Type = TargetType.Game;
-		DefaultBuildSettings = BuildSettingsVersion.V6;
-		IncludeOrderVersion = EngineIncludeOrderVersion.Unreal5_7;
+		DefaultBuildSettings = BuildSettingsVersion.V7;
+		IncludeOrderVersion = EngineIncludeOrderVersion.Unreal5_8;
 
 		// ARCHITECTURE.md §4.1. TerrainCore is listed explicitly so the module exists in
 		// every target, including a dedicated server, independently of the game module.

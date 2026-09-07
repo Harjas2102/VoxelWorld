@@ -2,6 +2,13 @@
 
 > **Superseded for daily operation by `Docs/OPERATIONS.md`; kept as the environment build record.**
 
+> **Engine version — read before following Phase A.** This file records the environment
+> as originally built, on **UE 5.7**, and the 5.7 references below are left standing as
+> that record. The project moved to **UE 5.8** at **T-112.5** under **D-025**. On a new
+> machine, install the latest **5.8.x** in step A2 and launch 5.8 in Phase B; everything
+> else in this walkthrough is unchanged. `Tools/Install-VoxelFreeLegacy.ps1` now defaults
+> to the 5.8 plugin binaries — pass `-EngineVersion 5.7` only to reproduce the old build.
+
 > The complete, ordered setup. Follow top to bottom. Each step states the
 > goal, exact actions, and expected output. Report results between phases.
 > When finished, this file lives in `/Docs` as the record of how the
