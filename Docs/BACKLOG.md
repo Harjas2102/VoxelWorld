@@ -114,7 +114,13 @@ Everything else — materials, PCG graphs, Sequencer, the wider "first hour" lea
 (AGENTS.md section 11), so broad editor fluency is no longer on the project's critical
 path. Learn it when a task demands it.
 
-### T-108 — C++ voxel generator *(NEW at CP-003; blocks 1C)*
+### T-108 — C++ voxel generator — ✅ **DONE (CP-013)**
+
+Build step 8, taken out of order because §14 bound it only to a risk while steps 3–7 were
+blocked by defects. See the Done log and D-032. The original entry is kept below for the
+reasoning that produced it.
+
+#### Original entry
 
 Forced by the T-101A discovery that **Voxel Graphs are Pro-gated** (R-008): the only
 runnable generators on Free are `VoxelFlatGenerator` and `VoxelEmptyGenerator`, so the
@@ -213,6 +219,46 @@ T-101B sub-step 1D, which requires the multiplayer-capable version instead.
 
 ## Done
 
+- **T-114** *(CP-013)* **DEF-4, DEF-5 and DEF-7 closed; build step 3 unblocked.**
+  Specification and headless evidence only — no step-3 implementation.
+  **DEF-4 → §4.5.1**: affinity/ownership table, five rules, a four-state shutdown machine
+  with a fixed eight-step teardown. The whole `ITerrainBackend` surface is game-thread only;
+  `ITerrainDensityField` is the single any-thread exception. The lock hazard is answered by
+  holding **no** lock across the plugin boundary; cancellation is a queue operation because
+  the path is synchronous and cannot be pre-empted, so no op is ever partially applied.
+  **DEF-5 → §4.10**: the operation set is **closed at Remove/Add/Paint** and Flatten and
+  Smooth are **removed** rather than given invented semantics; canonical write set, read
+  bounds and rounding with no epsilon; monotonicity and idempotence required; determinism
+  split into three claims of which **cross-backend value identity is out of scope**, which
+  sharpens FM-9 into "a swap is a resample migration for every edited chunk".
+  **DEF-7 → §4.11**: trusted-input table, validation on the quantised footprint,
+  `(SourceId, RequestId)` dedup ring, two-phase reserve-then-revalidate, bounded fair queue,
+  the no-change-or-committed invariant — `bTruncated` removed as a success signal — and
+  **only box ops split**, an over-cap sphere being rejected rather than approximated.
+  Code: `Op.Semantics.Contract` and `Op.Semantics.Golden` (the DEF-5 golden fixtures, whose
+  hashes were recorded once and are never updated to make the test pass); four new rejection
+  reasons. Verified: both targets build; **thirteen** TerrainCore tests green, exit 0.
+  Rulings in **D-032**; new risk **R-014**.
+- **T-108** *(CP-013)* **Build step 8: the world is generated, not a flat plane.**
+  `FTerrainWorldField` in `TerrainCore` implements `ITerrainDensityField` — a 280 m hill
+  east of the origin with 65 m of relief, a **west-facing escarpment** exposing ~18 m of
+  rock at the player, topsoil/dirt/stone/deep-stone/bedrock by depth, an iron ore body under
+  the hill that **never breaks the surface**, and a lowland basin. No plugin, no `UObject`,
+  no `UWorld`: it unit-tests headless. Roughness is integer-hashed value noise — no RNG and
+  no float bit tricks. `UVPLegacyDensityGenerator` in the adapter forwards plugin value and
+  material queries to it and decides nothing; the strata palette there is **cosmetic and not
+  the K9 mapping**. `GeneratorVersion` **0 → 1**.
+  **This closes the T-101A hill problem at the root** (findings 2b and 2e, R-008 and R-003):
+  the hill was sculpted into a running editor session and never survived a map load, so
+  every standalone process showed a plane. The world is now a pure function of position and
+  seed and needs no save file — which is why it arrived at step 8 rather than waiting for
+  persistence at step 4. **AR-6** added `SampleRange`; **AR-5** confirmed.
+  Verified: both targets build; **eleven** TerrainCore tests green, exit 0 (four new);
+  the `#include` probe still `C1083` with the file restored byte-identical; standalone boots
+  installing the field over `VoxelFlatGenerator` with **zero `LogVoxel: Error`**;
+  `Terrain.SelfTest` PASS on 13 checks, the origin probe now reading `density -1.0000` and
+  895 voxels where CP-012 read `0.0010` and 438. **The Director's by-hand dig closed build
+  step 2** in the same session. Rulings in **D-032**.
 - **T-113** *(CP-012)* **Build step 2: digging now goes through the service.** New module
   `TerrainBackendVPLegacy` with `FVPLegacyBackend` — the only module allowed to include a
   plugin header. New in `TerrainCore`: `TerrainChunk` (one definition of voxel→chunk keying,

@@ -678,3 +678,152 @@ and start the MCP server only when Python cannot do the job.
 **Implementation complete and verified automatically; the Director's by-hand LMB/RMB check
 is outstanding** and is the last item before step 2 is finished. Evidence is in `HANDOFF.md`
 and the commit message for `0eabf48`.
+
+## D-032 — CP-013 rulings: the generated world, AR-6, and three defects closed (2026-09-07)
+
+**Recorded:** CP-013 · **Class:** technical (per **D-023**) · **Architect rulings, logged
+not asked** · **Scope:** T-108 and T-114.
+
+### 0. The instruction that shaped how this session was run
+
+Asked to resume, the increment opened by handing the Director AR-5 and a DEF-4/5/7 proposal
+to rule on. He refused it, sharply and correctly:
+
+> *"Remember I instructed you to stop handing me proposals that i have no idea what they
+> mean? Lets just continue working. And if you need me to decide something, it sure as hell
+> better not be nuanced programming you already know I don't have a clue about."*
+
+**This is already project law and the mistake was mine, not a new rule.** **D-023** splits
+decisions into GAME (the Director rules) and TECHNICAL (the Architect rules and logs, the
+Director is notified in one line and takes no action), and lists threading, data formats,
+wire protocols and defect sequencing among the technical ones. D-023's own rationale is the
+point: *"presenting the Director with technical options he cannot evaluate, and receiving
+the recommended option back, is not direction. It is ceremony."*
+
+**Every ruling below is therefore recorded, not requested.** A technical decision escalates
+only if it (a) changes something a player would notice, (b) changes scope, or (c) costs
+money. His subsequent instructions for both increments were *"Lets just continue working"*
+and *"Ok proceed."*
+
+**Consequence for AGENTS §3.** R3's "proposal file + independent review + Director ruling"
+is amended in practice by D-023: for a *technical* R3, the ruling is the Architect's and the
+independent review is the **cross-vendor** step (D-028), not a Director tutorial. Do not
+open a proposal file at `Docs/proposals/` expecting the Director to adjudicate its contents.
+
+### 1. T-108 was taken out of build order, and that was legal
+
+§9 lists steps 0–8 but §14's rule is about **defects**, not sequence: *"a step may not start
+while an unresolved defect or unruled fork is bound to it."* Step 8 was bound only to
+**R-008 — a risk**, which is neither. Steps 3–7 were blocked by DEF-4, DEF-5 and DEF-7.
+Step 8 was therefore the only remaining step that was both legal to start and able to move
+the Phase 1 milestone, which BACKLOG states as *"one hill is trustworthy."* §9 now records
+this explicitly so the next agent does not read the table as a queue.
+
+### 2. The world's shape is game-owned C++, and it exists
+
+`FTerrainWorldField` in `TerrainCore` implements `ITerrainDensityField`;
+`UVPLegacyDensityGenerator` in the adapter forwards to it and decides nothing. This is §4.6
+as written, built.
+
+**What it closes.** Voxel Graphs are Pro-gated and fail silently (T-101A finding 2b, R-008),
+so the T-101A hill was *sculpted by script into a running editor session* and did not
+survive a map load (finding 2e, R-003). Every standalone process regenerated a flat plane —
+which is why the Director had never seen a hill. The world is now a pure function of
+position and seed and needs no save file. **This landed at step 8 rather than waiting for
+persistence at step 4, and that ordering is deliberate: the world's SHAPE and the durability
+of a player's EDITS are different questions, and only the second one needs a journal.**
+
+`GeneratorVersion` **0 → 1**. Version 0 was the flat plane; §4.2/K3 put it in every snapshot
+header so a chunk saved under one world is never silently reinterpreted by another.
+
+**The strata colour palette in the adapter is COSMETIC and is not the K9 mapping.** It
+exists so the bands are visible in the cliff face. Nothing reads a colour back, nothing
+persists one, and no yield is computed from one. K9 and DEF-6 are untouched.
+
+### 3. AR-6 — `ITerrainDensityField::SampleRange`
+
+`Sample` alone is enough to FILL a chunk and not enough to SKIP one. A backend octree that
+cannot ask *"is this whole region certainly solid, or certainly empty?"* must sample every
+voxel of every region at every LOD, which across a 512 m world of 50 cm voxels is a
+measurable cost rather than a theoretical one.
+
+**The default implementation returns the full `[-1, 1]`**, which is always correct and
+merely forfeits the skip — so no existing implementer breaks and no method becomes required.
+That is what makes this cheap to overrule: deleting it costs performance and no correctness.
+
+**AR-5 is confirmed as written at T-113.** It has now carried two increments, and T-108
+depends on it: conforming the actor to the game's origin and voxel size is exactly what
+makes plugin voxel coordinates identical to game voxel coordinates, which is why the
+generator needs no coordinate conversion at all.
+
+### 4. DEF-4 resolved — §4.5.1
+
+Affinity and ownership table; five rules; a four-state shutdown machine with a fixed
+eight-step teardown; cancellation.
+
+The two rulings worth reading twice: **no lock of ours is ever held across a call into the
+plugin** — the defect's "an external bounds lock may conflict with one the wrapper takes
+internally" is answered by holding no lock at all, since one thread already establishes
+mutual exclusion and a second mechanism could only deadlock against the plugin's own. And
+**cancellation is a queue operation, not a plugin operation**: `ApplyOp` is synchronous on
+the game thread and cannot be pre-empted by `EndPlay`, travel or PIE exit, so no operation is
+ever partially applied at teardown. The pending queue is **discarded, not drained**.
+
+**Not closed by this, and said so in the section:** the plugin's own internal thread safety
+(E-2/E-5), collision readiness (DEF-8), durability ordering (DEF-1).
+
+### 5. DEF-5 resolved — §4.10
+
+- **The operation set is CLOSED at Remove, Add, Paint.** `Flatten` and `Smooth` are
+  **removed from it** and permanently refused until a numbered decision specifies plane,
+  strength, iteration and falloff. The defect's complaint was that they were named without
+  semantics; the answer is to stop naming them. Their wire enumerators stay, because the
+  58-byte encoding is permanent.
+- **Canonical geometry**: write set `{v : |v-C|² <= r²}` in double with `<=` and **no
+  epsilon**; read bounds `[C-floor(r), C+floor(r)+1)`; rounding unchanged from
+  `TerrainQuantise.h`. **Monotonicity and idempotence are required properties** — the second
+  is what makes DEF-3's duplicate JIP application survivable rather than corrupting.
+- **Determinism split into three claims, and only two are made.** Cross-**backend** value
+  identity is **explicitly out of scope**, because §8.1 gives "sphere/box edit kernels" to
+  the plugin while giving "what Remove/Add/Paint mean" to the game — consistent only if the
+  game specifies *properties* and the backend supplies *values*.
+
+**This has a consequence and it is recorded rather than hidden: a backend swap is a resample
+migration for every EDITED chunk, not a format-compatible reload.** FM-9 previously flagged
+only differing voxel size or grid alignment. Pristine chunks regenerate and are unaffected.
+It also fixes what `Backend.Conformance` means — the contract, never density equality
+between two backends — which is a **weaker** claim than §10 could be read as making, and the
+true one.
+
+**New risk R-014** carries the residual named in §4.10.4(b): the kernel's own floating-point
+arithmetic across builds and platforms.
+
+### 6. DEF-7 resolved — §4.11
+
+Trusted-input table; validation on the **quantised** footprint rather than the float request
+(one voxel of disagreement between "permitted" and "changed" is a permission bypass at the
+edge of every protected zone); `(SourceId, RequestId)` identity with a 64-entry
+per-connection dedup ring; two-phase reserve-then-revalidate; bounded queue, round-robin
+across sources, **no priority classes**.
+
+Two changes to what the document previously allowed:
+
+- **`bTruncated` is removed as a success signal.** A backend that would truncate must fail
+  the whole op and mutate nothing. The field stays for struct stability and is false on
+  every successful result.
+- **`ApplyOp` returning false means nothing changed** — not "something may have changed".
+  The adapter reaches that by pre-validating the entire footprint, which rests on an
+  assumption about the plugin kernel; that assumption is **stated in §4.11.6 rather than
+  buried**, and `Backend.Conformance` probes it.
+
+**Only `Box` ops split.** An over-cap `Sphere` is rejected `TooLarge`, never split: a sphere
+has no exact partition and the permanent 58-byte wire has nowhere to put a clip box, so an
+approximate split would make the same request produce different terrain depending on whether
+it crossed a cap. A transaction is **not atomic across sub-ops**, stated rather than assumed
+because the alternative needs a durability protocol DEF-1 has not defined.
+
+### 7. Status
+
+**Build step 3 is unblocked** and is the next task. T-114 wrote the specification and its
+headless evidence; it implemented none of step 3. Evidence for both increments is in
+`HANDOFF.md` and in the commit messages for `db4cb72` and `c6d9ad6`.

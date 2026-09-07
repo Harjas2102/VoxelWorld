@@ -5,8 +5,104 @@
 
 ---
 
-**Checkpoint:** CP-012 · **Date:** 2026-09-07
+**Checkpoint:** CP-013 · **Date:** 2026-09-07
 **Phase:** 1 — Terrain Feasibility
+
+## What happened at CP-013
+
+**The world is generated instead of flat, and the three defects blocking multiplayer
+terrain are closed.** Two increments: T-108 (build step 8) and T-114 (the DEF-4/5/7
+resolutions). Build step 3 is now the next task and it is no longer blocked.
+
+### T-108 — there is a hill, and it survives a restart
+
+- **The Director closed CP-012's last item first:** *"Play solo worked... I can place and
+  dig."* Build step 2 is finished. He then said *"Still dont see a hill"*, which is what
+  T-108 answers.
+- **Why there was never a hill.** T-101A finding 2b: Voxel Graphs are Pro-gated and fail
+  **silently**, so the only runnable generators on Free are `VoxelFlatGenerator` and
+  `VoxelEmptyGenerator` (R-008). The T-101A hill was therefore *sculpted by a Python
+  script into a running editor session*, and finding 2e / R-003 records that it did not
+  survive a map load. Every standalone process regenerated a plane. **That is now closed
+  at the root**, and closed earlier than the plan expected: it was scheduled for build
+  step 4.
+- **`FTerrainWorldField` (TerrainCore) is the world's shape.** A 280 m hill east of the
+  origin with 65 m of relief; a **west-facing escarpment** cutting it to a shelf, which
+  exposes ~18 m of rock at the player; topsoil / dirt / stone / deep stone / bedrock by
+  depth below the local surface; an iron ore body under the hill that **never breaks the
+  surface**; a lowland basin. No plugin, no `UObject`, no `UWorld` — it unit-tests
+  headless, which is the whole argument §4.6 makes for game-owned generation.
+- **It is a pure function of position and seed**, so the world comes back identically on
+  every load with no save file. Roughness is integer-hashed value noise: no RNG and no
+  float bit tricks, for the §4.10.4(b) reason.
+- `UVPLegacyDensityGenerator` in the adapter forwards the plugin's value and material
+  queries to the field and **decides nothing**. `GeneratorVersion` moved **0 → 1**.
+- **Step 8 was taken out of order, legitimately.** §14's rule is about *defects*, not
+  sequence. Step 8 was bound only to **R-008, a risk**, while steps 3–7 were blocked by
+  three open defects — and step 8 was the one that moved the Phase 1 milestone, which
+  BACKLOG states as *"one hill is trustworthy."* §9 now says this explicitly.
+- **AR-6** (new): `ITerrainDensityField` gains `SampleRange`, defaulting to the full
+  `[-1, 1]`. `Sample` alone can fill a chunk but cannot let the octree **skip** one.
+  **AR-5 confirmed** as written at T-113.
+- The most direct evidence the world changed is in `Terrain.SelfTest`: the probe at the
+  world origin read `density 0.0010` and `voxels=438` at CP-012 — the surface of a flat
+  plane — and now reads **`density -1.0000` and `voxels=895`**, buried in solid rock under
+  the shelf. Nothing else in the project could have done that.
+
+### T-114 — DEF-4, DEF-5 and DEF-7 resolved; build step 3 unblocked
+
+Technical rulings, made and logged by the Architect per **D-023**. The Director's
+instruction was one word.
+
+- **DEF-4 → §4.5.1.** Affinity and ownership table, five rules, a four-state shutdown
+  machine with a fixed eight-step teardown. The whole `ITerrainBackend` surface is
+  game-thread only; `ITerrainDensityField` is the single any-thread exception and is safe
+  by construction. **The defect's lock hazard is answered by holding no lock across the
+  plugin boundary at all** — not by a better lock order. Cancellation is a *queue*
+  operation: `ApplyOp` is synchronous on the game thread and cannot be pre-empted by
+  `EndPlay`, travel or PIE exit, so no op is ever partially applied at teardown.
+- **DEF-5 → §4.10.** The operation set is **closed at Remove, Add, Paint**; `Flatten` and
+  `Smooth` are **removed from it** and permanently refused rather than given invented
+  semantics. Canonical write set, read bounds and rounding, with no epsilon anywhere.
+  **Monotonicity and idempotence required.** Determinism split into three claims, of which
+  **cross-backend value identity is explicitly out of scope** — §8.1 gives the kernel to
+  the plugin and the meaning to the game, and those two are consistent only if the game
+  specifies properties and the backend supplies values.
+- **That has a consequence, and it is written down rather than hidden: a backend swap is a
+  resample migration for every EDITED chunk, not a format-compatible reload.** FM-9
+  previously flagged only voxel size and grid alignment. Pristine chunks regenerate and
+  are unaffected. It also fixes what `Backend.Conformance` means: the **contract**, never
+  density equality between two backends.
+- **DEF-7 → §4.11.** Trusted-input table; validation on the **quantised** footprint, not
+  the float request; `(SourceId, RequestId)` identity with a 64-entry per-connection dedup
+  ring; two-phase reserve-then-revalidate; bounded queue, round-robin across sources, no
+  priority classes. **`bTruncated` is removed as a success signal** and a false return from
+  `ApplyOp` now means *nothing changed*. **Only `Box` ops split** — an over-cap `Sphere` is
+  rejected, because a sphere has no exact partition and the permanent 58-byte wire has
+  nowhere to put a clip box.
+- **This is the specification and its headless evidence. It does not implement step 3.**
+
+### Verification, all executed
+
+| Check | Result |
+|---|---|
+| `VoxelWorldEditor` and `VoxelWorld` builds | Both `Result: Succeeded` at both increments |
+| TerrainCore automation | **Thirteen** tests, all `Result={Success}`, `EXIT CODE: 0`. The seven from CP-012 plus `Field.Shape`, `Field.Strata`, `Field.Range`, `Field.Determinism`, `Op.Semantics.Contract`, `Op.Semantics.Golden` |
+| D-011 `#include` boundary probe | `C1083` / `Result: Failed` in `TerrainCore`; file restored byte-identical, md5 verified. **No `.Build.cs` and no `.uproject` change in either increment**, so the D-025 guard is structurally untouched |
+| Standalone boot | `Installing the game density field as the voxel world generator (was 'VoxelFlatGenerator')`; `Material config: 0` (RGB); `generator version 1`; **zero `LogVoxel: Error`, zero fatals** |
+| `Terrain.SelfTest` | **PASS**, 13 checks |
+| The Director's by-hand check | **Play solo works; dig and place both confirmed.** CP-012's outstanding item |
+
+**`Op.Semantics.Golden` is worth one line of its own.** Its seven expected hashes were
+recorded once and the test's own error text says a failure is never fixed by updating the
+number. Two of them are load-bearing: a repeated op equals the one before it, and a refused
+op equals the state before it — so idempotence and no-change-on-failure are pinned by the
+fixture as well as by the contract test.
+
+**One test assertion was wrong and the backend was right.** A straddle check expected 8
+affected chunks and got 7, because an earlier op in the same fixture had already emptied
+that side and `AffectedChunks` reports chunks that actually **changed**. The test now runs
+on its own backend, so it measures the contract rather than test ordering.
 
 ## What happened at CP-012
 
@@ -444,23 +540,27 @@ Source/
 - UE 5.7 Third Person template project **VoxelWorld** (Blueprint, Desktop, Max quality,
   Starter Content OFF), shaders compiled, runs clean.
 - **`Content/ThirdPerson/Lvl_ThirdPerson` — the T-101A map of record (D-020).** Contains:
-  - `VoxelWorld_T101A` — 50 cm voxels, 1024 voxels (512 m), `VoxelFlatGenerator`,
-    collisions on, `WorldGridMaterial` (the engine checker grid — projected from world
-    position, so it reads correctly on UV-less procedural meshes and makes holes and
-    overhangs legible; plain `BasicShapeMaterial` rendered white-on-white).
-  - PlayerStart moved to **(-8228.66, 0, 150)**, ~82 m west of the hill centre, facing it.
+  - `VoxelWorld_T101A` — 50 cm voxels, 1024 voxels (512 m), collisions on,
+    `WorldGridMaterial` (the engine checker grid — projected from world position, so it
+    reads correctly on UV-less procedural meshes and makes holes and overhangs legible;
+    plain `BasicShapeMaterial` rendered white-on-white).
+    **Its authored generator no longer decides anything**: since T-108 the backend installs
+    the game's density field over whatever the actor carries, and logs that it did.
+  - PlayerStart at **(-8228.66, 0, 150)**, ~82 m west of the hill, facing it. **As of T-108
+    that offset is correct again** — there is a hill there, the generated plain is held
+    below world Z = 0 so the spawn is always in open air, and `Field.Shape` asserts both.
   - `BP_ThirdPersonCharacter` wired for digging: LMB → line trace → `RemoveSphere`,
     RMB → `AddSphere`, radius 200, 1000 uu reach, both behind a hit `Branch`.
-  - ⚠️ **The T-101A hill is not persistent** (finding 2e / **R-003**).
-    `Tools/Editor/place_voxel_world.py` sculpts it into the **running editor session
-    only**; any process that loads the level from disk regenerates a **flat plane** from
-    `VoxelFlatGenerator`. **Do not re-run the script expecting a hill in standalone** —
-    build the mound in-game with **RMB**, which is what the CP-004 tunnel test actually
-    did. Terrain first survives a restart at **build step 4**.
-  - ⚠️ **The PlayerStart offset assumes that hill.** (-8228.66, 0, 150) was placed relative
-    to terrain that does not exist at runtime, so standalone spawns on bare ground facing
-    nothing. **Second symptom of the same cause, not a separate issue.** Revisit at
-    **build step 4**.
+  - ✅ **Both of the warnings that stood here from T-101A to CP-012 are gone, closed by
+    T-108.** They were one cause with two symptoms: the hill was *sculpted* by
+    `Tools/Editor/place_voxel_world.py` into a running editor session only, so any process
+    loading the level from disk regenerated a flat plane, and the PlayerStart offset
+    therefore pointed at nothing. The world is now **generated** by `FTerrainWorldField`
+    from position and seed, so it is identical in every process with no save file — which
+    is why this arrived at step 8 rather than waiting for persistence at step 4.
+    **`place_voxel_world.py` must not be re-run to sculpt terrain**; it is kept only for
+    placing and configuring the actor. Player *edits* still do not survive a restart —
+    that is build step 4 and is a different question from the world's shape.
 - **Voxel Plugin Free Legacy** at `Plugins/VoxelFree/` — **v432 / `e9648b302` / 5.7.0**,
   prebuilt Win64 binaries. **Not committed** (gitignored); reinstall via
   `Tools/Install-VoxelFreeLegacy.ps1`.
@@ -492,34 +592,56 @@ yield, and server authority is not proven until build step 3.
 
 ## Current task
 
-**T-113 / build step 2 is complete at CP-012**, with **one item outstanding: the
-Director's by-hand LMB/RMB dig**, standalone via `Tools\Play-Solo.ps1`. Everything else
-was verified automatically this session. Until that check is run and reported, "digging
-works as today" rests on `Terrain.SelfTest` rather than on the game as played.
+**Nothing is outstanding from CP-013.** Build steps 0, 1, 2 and 8 are complete; the
+Director's by-hand dig closed step 2, and the by-eye look at the generated hill is the only
+thing left from T-108 and it is optional — `Field.Shape` asserts the shape headlessly.
 
-**Next: T-101B / build step 3 — and it may not start yet.** §9 binds step 3 to **DEF-4,
-DEF-5 and DEF-7**, all open, and §14's rule is that a step may not start while an
-unresolved defect is bound to it. So the real next task is closing those three, which is
-**R3 work**: proposal file, independent review by whichever vendor did not author, and a
-Director ruling — not implementation. Each is a substantial specification job:
+**Next: T-101B / build step 3 — and it MAY now start.** §9 bound it to K1, K4, DEF-4, DEF-5
+and DEF-7. K1 and K4 were ruled at CP-005 (D-024); the three defects were **resolved at
+T-114** (§4.5.1, §4.10, §4.11), so §14's rule no longer reaches this step. It is the largest
+single piece of work in the phase and should be its own increment:
 
-- **DEF-4** — a thread-affinity and ownership table covering init, mutation, reads, render
-  invalidation, callbacks and destruction, plus the shutdown state machine and cancellation
-  on `EndPlay`, travel and PIE exit. K4 ruled the *thread*; it did not discharge the defect.
-- **DEF-5** — canonical per-operation semantics including read bounds and rounding, version
-  compatibility rules, and golden fixtures. Flatten and Smooth need plane, strength,
-  iteration and falloff semantics before they can be implemented at all.
-- **DEF-7** — trusted request inputs, full quantised-footprint validation, request identity
-  and retry dedup, resource reservation and revalidation, queue limits and fairness, the
-  no-change-or-committed-result invariant, and explicit split-operation semantics.
+- **Server validation** to the §4.11 specification: trusted inputs, quantised-footprint
+  checks, `(SourceId, RequestId)` dedup ring, two-phase reserve-then-revalidate, bounded
+  fair queue, the four new rejection reasons.
+- **`ServerRequestEdit` / `ClientApplyOp`** and the subscription set (§4.4).
+- **The serialised execution path and the shutdown state machine** to §4.5.1.
+- **Split operations** for box ops only (§4.11.7), with `Split.Equivalence`.
+- **New `Backend.Conformance` clauses**: off-game-thread refusal, state-machine rejection
+  reasons, and a failed `ApplyOp` leaving the region hash unchanged.
+- **Ends with** 3-client PIE convergence (`MP.Convergence`), which is what turns the
+  server-authority drift check from "standalone only" into a real result.
 
 **Incoming Implementer: either** Claude or Codex according to availability (D-028). Read
 `HANDOFF.md` first.
 
 **Also open, and unassigned:** **R-013** — the production adapter has not passed
-`Backend.Conformance`, and the §6.2 in-engine harness that would run it does not exist.
-**R-010's KillZ** remains a prerequisite for anyone actually playing. Neither is build
-step 3's job unless the Director says so.
+`Backend.Conformance`, and the §6.2 in-engine harness that would run it does not exist;
+§4.10.4(c) now defines what that pass can and cannot mean. **R-010's KillZ** remains a
+prerequisite for anyone actually playing, and the plain now sits 3 m lower than the old flat
+plane so the spawn drop is longer. **R-014** is the new cross-platform kernel-determinism
+watch item. None is build step 3's job unless the Director says so.
+
+## Drift checks (VISION.md, run at CP-013)
+
+**BOTH FLAGS STILL CLEAR, and still for standalone only.** Nothing at CP-013 touched the
+edit path: T-108 changed what the world is made of, not who is allowed to change it, and
+T-114 wrote specification. The `#include` probe still fails to compile in `TerrainCore` and
+no `.Build.cs` or `.uproject` changed in either increment.
+
+- [x] **Every gameplay system is server-authoritative — CLEARED for standalone.** Unchanged
+      from CP-012 and it will stay unchanged until **build step 3** exercises a real client.
+- [x] **The terrain backend remains replaceable — CLEARED, and the limit is now defined.**
+      §4.10.4(c) rules that `Backend.Conformance` asserts the **contract** and never density
+      equality between backends, so R-013's "has not passed conformance" now has an exact
+      meaning. The D-011 boundary itself is untouched and compiler-enforced.
+- [x] **Voxels are still invisible to the player (D-015).** Worth re-checking deliberately
+      this checkpoint, because T-108 added a strata colour palette. It is **cosmetic and
+      explicitly not the K9 catalog** — it exists so the bands are visible in the cliff
+      face. Nothing reads a colour back and no yield is computed from one. The player sees
+      rock, soil and ore, which is D-015's intent, not voxels.
+
+The CP-012 record below is retained as the fuller statement of why the flags cleared.
 
 ## Drift checks (VISION.md, run at CP-012)
 

@@ -49,6 +49,14 @@ Severity / probability scale: **High · Medium · Low**.
 - **CP-010 evidence:** in-memory revision monotonicity and atomic overflow rejection
   pass in Revision.Monotonic. This does not cover payload deletion or revision
   recovery after restart; AR-4 defers those to build step 4/DEF-9.
+- **CP-013 evidence — one symptom of this risk is gone, and the risk itself is not.**
+  The T-101A *hill* was never persistent because it was sculpted by script into a running
+  editor session (finding 2e). T-108 replaced it with a generated world that is a pure
+  function of position and seed, so the world's SHAPE now costs zero bytes and survives
+  every restart with no save file at all. **Player EDITS still do not survive a restart**;
+  that is build step 4 and is what this risk is actually about. If anything the generated
+  world helps it: a pristine chunk regenerates and never needs a payload, so only edited
+  chunks can grow the save.
 - **Decision:** *open*
 
 ## R-004 — Material-yield accuracy
@@ -111,6 +119,13 @@ Severity / probability scale: **High · Medium · Low**.
   - **Voxel Plugin 2 is paid** and engine-version-gated: distributed via the Fab "Voxel
     Plugin Installer," which requires owning Voxel Plugin Pro Legacy. Documented engine
     targets at last docs snapshot were 5.5/5.6 — re-verify before relying on it.
+- **CP-013 — the Pro gate's worst consequence is now closed.** The gate meant the only
+  runnable generators were Flat and Empty, which is why the test world was a plane and why
+  the hill had to be sculpted by script. **T-108 makes the generator ours**: game-owned C++
+  in `TerrainCore` with a thin adapter forwarder, so the 106 Pro-gated graph assets are no
+  longer on any critical path. What remains of this risk is the plugin's maintenance status
+  and version gating, not its generator tier. The Mesh Terrain watch item is still
+  un-evaluated.
 - **Mitigation experiment:** The D-011 adapter keeps the backend replaceable, and the
   T-101B gate decides whether Free Legacy is adopted at all. No gameplay code takes a
   dependency on plugin types.
@@ -351,4 +366,31 @@ D-028 was written for. Keep writing the breadcrumb *before* the risky half, not 
 - **Owner / task:** build step 4 for regions, step 6 for materials; the §6.2 harness itself
   is unassigned and should be given an owner at the next checkpoint.
 - **Result:** *open*
+- **Decision:** *open*
+
+## R-014 — Cross-platform and cross-build kernel determinism
+
+- **Severity:** High if it bites — a client that computes a different density from the same
+  op sees a wall where the server sees air (FM-1), and the divergence is inside a chunk
+  whose revision matches, which is the case revision tracking cannot detect.
+- **Probability:** Low to Medium, and genuinely unmeasured.
+- **What it is.** §4.10.4(b) **requires** that one backend, given the same op sequence, seed
+  and generator version, produce identical output across builds and platforms — and states
+  plainly that this is a requirement with a residual risk, not a proof. The game side
+  contributes no float to the geometry: the op is integers, `r = RadiusVoxQ16/65536` is exact
+  on any IEEE platform, and the sphere test is an exact comparison. **The entire residual is
+  in the kernel's own floating-point arithmetic** — a compiler contracting a multiply-add, a
+  different vectorisation, a fast-math flag, a different CPU.
+- **Why it is only opened now.** It was inside DEF-5, which was open. Closing DEF-5 resolved
+  the *specification* and left this measurable question standing, so it belongs in RISKS
+  rather than in a closed defect where nobody would look for it.
+- **What already guards it.** `Op.Semantics.Golden` (§6.1) — committed hashes that fail
+  loudly if a toolchain change moves a value, with the test's own error text saying the fix
+  is never to update the number. `bMultiThreaded = false` on **both** server and client until
+  E-2 reports, because client results supply collision and are not cosmetic.
+- **Mitigation experiment:** `Adapter.Determinism` (§6.2) across 20 runs and both threading
+  modes; then the same fixtures on a second toolchain, and on Linux when R-012's
+  cross-platform work happens.
+- **Owner / task:** build step 3 (E-2), then §12.
+- **Result:** *open — specified, guarded by fixtures, not yet measured across platforms.*
 - **Decision:** *open*

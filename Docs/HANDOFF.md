@@ -6,28 +6,73 @@
 
 ## Identity and status
 
-- Updated: **2026-09-07, CP-012 checkpoint.** T-113 verified this session. The CP-011 and
-  CP-010 records below are retained as history.
-- Outgoing: **Claude**, Implementer. Incoming: either agent; one active Implementer.
-- Task: **T-113 / build step 2 complete at CP-012**, with one item outstanding — the
-  Director's by-hand LMB/RMB dig. Digging now routes through `UTerrainService::RequestEdit`;
-  both drift checks flagged since T-101A are cleared **for standalone only**.
-- Risk/authorization: R2 inside the approved R3 architecture. The Director said "I trust you
-  on all accounts to execute anything as needed for the implementation. Begin everything
-  necessary", then typed "checkpoint". Recorded as **D-031**. Authority is bounded to this
-  increment, its one commit, this checkpoint and its push.
-- Base: `cbcacf4` (CP-011), branch `main`. Clean on receipt; `git pull --ff-only` reported
-  already up to date. Implementation landed as **`0eabf48`**, pushed `main -> main`. This
-  handoff belongs to the enclosing CP-012 commit; verify its final commit/push and a clean
-  worktree from Git on receipt.
-- Checkpoint scope: STATE, BACKLOG, DECISIONS, RISKS, ARCHITECTURE's CP-012 determination
-  block, and this handoff. **No active build, test or editor process remains** — every
-  UnrealEditor process this session started has been stopped and that was verified. No
-  unfinished implementation. Preserve any unexpected dirty work on pickup.
-- **The session hit the usage limit mid-task and was resumed.** The breadcrumb below was
-  written before the risky editor work, which is what made the pickup cheap. Keep doing that.
+- Updated: **2026-09-07, CP-013 checkpoint.** T-108 and T-114 were both completed and
+  verified this session. The CP-012, CP-011 and CP-010 records below are retained as history.
+- Outgoing: **Claude**, Implementer and Architect. Incoming: **either** agent; one active
+  Implementer (D-028).
+- Task: **T-108 (build step 8) and T-114 (DEF-4/5/7) are both complete.** The world is
+  generated rather than flat, and **build step 3 is unblocked** for the first time.
+- Risk/authorization: T-108 is R2 inside the approved R3 architecture; T-114 is R3
+  specification, ruled by the Architect under **D-023** and recorded as **D-032**. The
+  Director's instructions were *"Lets just continue working"* and *"Ok proceed"*, plus the
+  standing correction that technical proposals must not be sent to him.
+- Base: `a83e5e2` (CP-012), branch `main`. Clean on receipt; `git pull --ff-only` reported
+  already up to date. Implementation landed as **`db4cb72`** (T-108) and **`c6d9ad6`**
+  (T-114), both pushed `main -> main`. This handoff belongs to the enclosing CP-013 commit;
+  verify its final commit/push and a clean worktree from Git on receipt.
+- Checkpoint scope: STATE, BACKLOG, DECISIONS (D-032), RISKS (R-003, R-008 amended; **R-014**
+  new), and this handoff. ARCHITECTURE.md was updated **inside** T-114 rather than at the
+  checkpoint, because §14 requires a defect's resolution to live in that document.
+- **No active build, test or editor process remains.** Every `UnrealEditor` process this
+  session started has exited; the one standalone run was launched with a PID and stopped
+  explicitly. No unfinished implementation. Preserve any unexpected dirty work on pickup.
 
-## Next safe actions (CP-012)
+## Next safe actions (CP-013)
+
+1. Read the required docs and this handoff. Verify the CP-013 commit, main/origin state and
+   worktree; sync with `git pull --ff-only`.
+2. Recite CP-013. **Do not rebuild** the density field, the adapter generator, the defect
+   resolutions or the Blueprint rewire unless new changes or failures justify it.
+3. **Build step 3 is the next task and it MAY now start.** §9 bound it to K1, K4, DEF-4,
+   DEF-5 and DEF-7; K1 and K4 were ruled at CP-005 (D-024) and the three defects were
+   resolved at T-114. **Build it to §4.5.1, §4.10 and §4.11 as written** — those sections are
+   the specification, not suggestions, and the rulings behind them are in D-032. It is the
+   largest single piece of work in the phase; STATE's "Current task" lists its parts.
+4. **Do not send the Director a technical proposal.** D-023 is explicit and he restated it
+   this session in the strongest terms. Rule it, log it in DECISIONS at checkpoint, and give
+   him one line. Ask him only about the game — what the player does, sees, feels, builds —
+   and for by-hand UE checks he alone can run. AGENTS §3's R3 "independent review" means the
+   **other vendor** (D-028), not him.
+5. Build and test with **5.8** paths (`C:\\Program Files\\Epic Games\\UE_5.8`); README carries
+   the exact two commands. Two console-command gotchas, both learned the hard way:
+   `-ExecCmds=Automation RunTests TerrainCore; Quit` works with a **semicolon**, but
+   `-ExecCmds` splits on **commas** and does not reliably deliver argument lists to a
+   deferred console command — so anything driven from a command line must be a **single
+   argument-free command**. That is why `Terrain.SelfTest` takes no arguments and self-delays
+   two seconds.
+6. **Editor automation: reach for scripted Python before Unreal MCP.** D-031 §4 found that
+   UE 5.8 exposes a full Blueprint graph API to plain Python, which is AGENTS §11's third
+   rung and beats the fourth. The MCP server binds loopback on demand with auto-start off, so
+   it is normally not listening — it was reported unavailable again this session, which is
+   expected and is not a fault.
+7. **Open items this session did not fix**, all in RISKS: **R-013** (the production adapter
+   has not passed `Backend.Conformance`, and the §6.2 harness that would run it does not
+   exist or have an owner — §4.10.4(c) now defines what that pass can mean); **R-014** (new —
+   cross-platform kernel determinism, specified and fixture-guarded but unmeasured);
+   **R-010's KillZ**, still a prerequisite for anyone actually playing, and now slightly more
+   pressing because the generated plain sits 3 m below the old flat plane so the spawn drop
+   is longer; the **dual-invoker** observation from CP-012; and **R-008's** un-evaluated Mesh
+   Terrain watch item.
+8. **One optional, pleasant thing:** the Director has not yet looked at the generated world.
+   `Tools\\Play-Solo.ps1`, standalone — the spawn faces east, and there should be a large hill
+   ahead with a bare rock face on its near side. Nothing depends on it; `Field.Shape` asserts
+   the shape headlessly.
+
+---
+
+### Retained: the CP-012 next actions, and what superseded them
+
+#### Next safe actions (CP-012)
 
 > **Largely superseded by the T-108 and T-114 breadcrumbs below, which are later. Read those
 > first.** Specifically:
