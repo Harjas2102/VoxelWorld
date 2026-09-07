@@ -5,11 +5,16 @@
 #include "CoreMinimal.h"
 #include "ITerrainBackend.h"
 #include "UObject/WeakObjectPtr.h"
+#include "UObject/StrongObjectPtr.h"
 
 // The scratch array below holds FModifiedVoxelValue by value, so this header needs the
 // complete type. That is legal HERE and nowhere else: this header lives in Private/, so no
 // other module can include it and pick the plugin up through it (§4.1).
 #include "VoxelTools/Gen/VoxelToolsBase.h"
+
+// TStrongObjectPtr requires a complete UObject type, so a forward declaration will not do.
+// Legal for the same reason as the include above: both headers are private to this module.
+#include "VPLegacyDensityGenerator.h"
 
 class AVoxelWorld;
 class UVoxelSimpleInvokerComponent;
@@ -110,6 +115,14 @@ private:
 
 	/** True only for an actor this backend spawned, which is the only one it may destroy. */
 	bool bSpawnedVoxelWorld = false;
+
+	/**
+	 * The plugin-side generator, forwarding to FTerrainBackendInit::DensityField (T-108, §4.6).
+	 * Strong, not weak: the actor's own FVoxelGeneratorPicker would keep it alive on a level
+	 * actor, but a transient spawned world and a failed create both leave windows where it
+	 * would not, and a collected generator mid-mesh is a crash rather than a wrong shape.
+	 */
+	TStrongObjectPtr<UVPLegacyDensityGenerator> Generator;
 
 	/** One invoker component per streaming interest, owned by the voxel world actor. */
 	TMap<uint32, TWeakObjectPtr<UVoxelSimpleInvokerComponent>> Invokers;

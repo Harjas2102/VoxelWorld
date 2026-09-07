@@ -6,6 +6,7 @@
 #include "TerrainCore.h"
 #include "TerrainQuantise.h"
 #include "TerrainSettings.h"
+#include "TerrainWorldField.h"
 #include "Engine/World.h"
 #include "Modules/ModuleManager.h"
 #include "TimerManager.h"
@@ -138,10 +139,18 @@ void UTerrainService::CreateBackend(UWorld& InWorld)
 	ActiveInit.GeneratorVersion = static_cast<uint32>(FMath::Max(0, Settings->GeneratorVersion));
 	ActiveInit.VoxelSizeCm = Settings->VoxelSizeCm;
 	ActiveInit.WorldBoundsVox = Settings->GetWorldBoundsVox();
-	// No ITerrainDensityField implementer exists until T-108 (build step 8). The backend
-	// falls back to whatever generator it was configured with, which is exactly the T-101A
-	// arrangement and is why the test world is still a flat plane.
-	ActiveInit.DensityField = nullptr;
+	// T-108 / build step 8: the game states the world's shape and the backend renders it.
+	// Until this existed the actor kept whatever generator it was authored with — a
+	// VoxelFlatGenerator — which is why the test world was a plane and why the T-101A hill
+	// had to be sculpted by script and did not survive a map load (finding 2e, R-003).
+	// The field is owned by this subsystem and only LENT to the backend (AR-2): it must
+	// outlive Shutdown, so DestroyBackend releases it strictly afterwards.
+	{
+		FTerrainWorldFieldParams FieldParams;
+		FieldParams.Seed = Settings->Seed;
+		DensityField = MakeUnique<FTerrainWorldField>(FieldParams);
+	}
+	ActiveInit.DensityField = DensityField.Get();
 	ActiveInit.Role = InWorld.GetNetMode() == NM_Client ? ETerrainRole::Client : ETerrainRole::Server;
 	ActiveInit.World = &InWorld;
 	ActiveInit.OriginTransform = Settings->GetTerrainOrigin();
@@ -151,6 +160,7 @@ void UTerrainService::CreateBackend(UWorld& InWorld)
 		UE_LOG(LogTerrainCore, Error, TEXT("Terrain backend '%s' failed to initialize. Terrain edits will be refused."),
 			*BackendName.ToString());
 		Backend.Reset();
+		DensityField.Reset();
 		return;
 	}
 
@@ -170,6 +180,7 @@ void UTerrainService::DestroyBackend()
 	if (!Backend)
 	{
 		Interests.Empty();
+		DensityField.Reset();
 		return;
 	}
 
@@ -184,6 +195,11 @@ void UTerrainService::DestroyBackend()
 
 	Backend->Shutdown();
 	Backend.Reset();
+
+	// STRICTLY AFTER Shutdown. The backend holds a borrowed pointer to this field and its
+	// teardown may still sample it; releasing it first would be a use-after-free that only
+	// shows up under a mesher thread still in flight, which is the hardest kind to see.
+	DensityField.Reset();
 }
 
 bool UTerrainService::HasAuthority() const
@@ -581,7 +597,8 @@ static void RunTerrainSelfTest(UWorld* World)
 	Check(Service->GetStreamingInterestCount() > 0,
 		TEXT("something registered streaming interest (UTerrainStreamingComponent)"));
 
-	// A point on the flat test plane, well inside the world and away from the player start.
+	// The world origin: inside the world, away from the player start, and — since T-108 put
+	// the hill east of here — still on the lowland plain, so this is ground rather than sky.
 	const FVector Target(0.0, 0.0, 0.0);
 	FIntVector Voxel;
 	if (!QuantiseEdit(Target, Service->GetTerrainOrigin(), Service->GetVoxelSizeCm(), Voxel))
@@ -622,10 +639,15 @@ static void RunTerrainSelfTest(UWorld* World)
 		Before.Density, After.Density, RevBefore, Service->GetRevision(Key));
 
 	// --- a placement, so Add is exercised too ---------------------------------------------
+	// Back into the hole the dig just made, at a smaller radius so it lands strictly inside
+	// the void. Before T-108 this added at a fixed offset on a flat plane; a generated world
+	// has no such guaranteed-empty address, and an Add into solid rock touches nothing and
+	// would read as a failure of Add rather than of the assumption. The freshly dug void is
+	// the one place that is empty whatever shape the world has.
 	FTerrainEditRequest Place;
 	Place.Kind = ETerrainEditKind::Add;
-	Place.WorldLocation = FVector(1000.0, 0.0, 0.0);
-	Place.RadiusCm = 200.0;
+	Place.WorldLocation = Target;
+	Place.RadiusCm = 100.0;
 	FTerrainEditReceipt PlaceReceipt;
 	Service->RequestEdit(Place, PlaceReceipt);
 	Check(PlaceReceipt.bApplied && PlaceReceipt.VoxelsTouched > 0, TEXT("Add placed material"));

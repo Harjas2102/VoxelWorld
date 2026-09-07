@@ -29,6 +29,11 @@
 
 ## Next safe actions (CP-012)
 
+> **Superseded in part by the T-108 breadcrumb below, which is later.** Item 3 is DONE — the
+> Director ran the by-hand dig and reported "Play solo worked... I can place and dig", so
+> build step 2 is closed. Do not ask him for it again. Item 4's reading still holds for step 3,
+> but step 8 (T-108) was clear to start and has been built; read that breadcrumb first.
+
 1. Read the required docs and this handoff. Verify the CP-012 commit, main/origin state and
    worktree; sync with `git pull --ff-only`.
 2. Recite CP-012. **T-113 is complete — do not rebuild the adapter, the service entry point
@@ -57,6 +62,146 @@
    so.
 7. **AR-5 is awaiting confirmation.** It is one struct's two fields and is cheap to overrule
    while it stays that way.
+
+---
+
+## T-108 working breadcrumb (D-028) — build step 8, IMPLEMENTATION COMPLETE
+
+- 2026-09-07, Claude, Implementer. Base `a83e5e2` (CP-012), clean on receipt;
+  `git pull --ff-only` reported already up to date. **Nothing in STATE / BACKLOG /
+  DECISIONS / RISKS is updated** — AGENTS §1 reserves that for the word "checkpoint",
+  which has not been typed for this increment.
+- **The Director reported the CP-012 hand check: "Play solo worked... I can place and dig."
+  That closes the last outstanding item of T-113 / build step 2.** He added "still don't
+  see a hill", which is what this increment is about.
+- **Why step 8 and not step 3.** §9 binds step 3 to DEF-4, DEF-5 and DEF-7, all open, and
+  §14 forbids starting a step while a defect is bound to it. Step 8 is bound only to
+  **R-008, a risk — not a defect and not an unruled fork** — so §14's rule does not reach
+  it and it was clear to start. It is also the one remaining step that moves the Phase 1
+  milestone, which BACKLOG states as **"one hill is trustworthy."**
+- **Director instruction recorded, and it is D-023.** He restated that technical proposals
+  and rulings must not come to him: *"if you need me to decide something, it sure as hell
+  better not be nuanced programming you already know I don't have a clue about."* D-023
+  already says exactly this — GAME decisions to the Director, TECHNICAL decisions ruled and
+  logged by the Architect, escalated only if a player would notice, scope changes, or it
+  costs money. AR-5 and AR-6 are therefore ruled, not asked. **Do not open a proposal file
+  for a technical decision expecting him to read it.**
+
+### Why the world was a plane, and what replaced it
+
+T-101A finding 2b: **Voxel Graphs are Pro-gated and fail silently**, so the only runnable
+generators on Free are `VoxelFlatGenerator` and `VoxelEmptyGenerator` (R-008). The T-101A
+hill was therefore **sculpted by a Python script**, and finding 2e / R-003 records that a
+sculpted hill does not survive a map load: every standalone process regenerated a flat plane.
+That is the whole reason the Director has never seen a hill in the game.
+
+**`FTerrainWorldField` (TerrainCore) is now the world's shape**, and it is a pure function of
+position and seed, so the hill comes back on every load in every process with no save file.
+
+### AR-5 and AR-6 — two Architect determinations
+
+- **AR-5 stands as written at T-113** (`FTerrainBackendInit` gains `UWorld* World` and
+  `FTransform OriginTransform`). It has now been in service through two increments and the
+  T-108 generator depends on it: `ConformVoxelWorld` forcing the actor onto the game's origin
+  and voxel size is what makes plugin voxel coordinates identical to game voxel coordinates,
+  which is why the generator needs no coordinate conversion at all. **Confirmed, not asked.**
+- **AR-6 (new, this increment): `ITerrainDensityField` gains
+  `FTerrainDensityRange SampleRange(const FTerrainBox&) const`, with a default implementation
+  returning the full [-1, 1].** §4.6 declared `Sample` alone, which is enough to FILL a chunk
+  and not enough to SKIP one. Without it the plugin's octree must sample every voxel of every
+  region at every LOD across a 512 m world of 50 cm voxels. The default is always correct and
+  merely forfeits the skip, so no existing implementer breaks and no method becomes required.
+  Both AR-5 and AR-6 want a DECISIONS entry at checkpoint.
+
+### What is written
+
+New in `TerrainCore`:
+
+| File | What it is |
+|---|---|
+| `Public/TerrainMaterials.h`, `Private/TerrainMaterials.cpp` | The GAME's material id catalog: Unknown/Air/Topsoil/Dirt/Stone/DeepStone/Bedrock/IronOre. Ids are permanent; **K9 (id to plugin index) and the yield economy are untouched** |
+| `Public/TerrainWorldField.h`, `Private/TerrainWorldField.cpp` | `FTerrainWorldField : ITerrainDensityField` — the hill, the escarpment, the basin, the strata and the ore body. No plugin, no UObject, no `UWorld` |
+| `Private/Tests/TerrainWorldFieldTest.cpp` | Four new automation tests |
+| `Public/ITerrainDensityField.h` | AR-6 `SampleRange` plus the threading rule |
+| `TerrainService.h/.cpp` | Owns the field, lends it to the backend, releases it **strictly after** `Shutdown` |
+
+New in `TerrainBackendVPLegacy`: `Private/VPLegacyDensityGenerator.h/.cpp` —
+`UVPLegacyDensityGenerator : UVoxelGenerator` plus its instance. It decides nothing; it
+converts a plugin query into a field query. **Private on purpose**, like `VPLegacyBackend.h`.
+`VPLegacyBackend` installs it before `CreateWorld` and forces a recreate if it changed.
+
+`Config/DefaultEngine.ini`: **`GeneratorVersion=0` to `1`.** Version 0 was the flat plane the
+project ran on from T-101A to CP-012; version 1 is this world. §4.2 / K3 put it in every
+snapshot header so a chunk saved under one world is never reinterpreted by another.
+
+### The world, in numbers (voxel space, 1 voxel = 50 cm)
+
+- **Plain at -6 voxels (-3 m), deliberately below world Z = 0.** PlayerStart is at world
+  Z = 150 cm; a plain that could bulge above zero would spawn the player inside the ground on
+  some seeds. `Field.Shape` asserts the invariant so a later tweak cannot quietly break it.
+- **Hill** centred at voxel (140, 0) — **east of the origin, not on it**, because the origin is
+  where eight chunks meet, where `Terrain.SelfTest` digs, and what PlayerStart faces from
+  -82 m. Radius 280 voxels, so a **280 m** hill (GDD asks 256-512 m), with **65 m** of relief.
+- **The cliff faces WEST, at the player.** An escarpment at X = 20 cuts the hill down to a
+  24-voxel shelf over a 2-voxel blend: about **18 m of vertical rock with the strata showing**,
+  which is the point — geology you can see without digging for it.
+- **Basin** at (-260, -260), radius 150, 12 m deep — the GDD's lowland.
+- **Strata by depth:** topsoil 2 m, dirt 10 m, stone 45 m, then deep stone; bedrock below
+  Z = -420 voxels.
+- **Ore body:** an ellipsoid at (140, 0, -30), radii (60, 40, 25) voxels, under the hill.
+  Gated so it **never breaks the surface** — free surface ore would make GDD "Mining IS
+  terraforming" optional, and `Field.Strata` asserts it across the whole world.
+- Roughness is 3-octave integer-hashed value noise, amplitude 6 voxels. **No RNG and no float
+  bit tricks**, because DEF-5's hazard is a generator that produces different bits elsewhere.
+
+### Verification — executed, not reasoned about
+
+Engine `C:\Program Files\Epic Games\UE_5.8`, run from `C:/Dev/VoxelWorld`.
+
+| Check | Result |
+|---|---|
+| `VoxelWorldEditor Win64 Development` | `Result: Succeeded`. Only the two pre-existing `C4305` in the plugin's own headers |
+| `VoxelWorld Win64 Development` (game target) | `Result: Succeeded` |
+| TerrainCore automation | **Eleven** tests, all `Result={Success}`, zero failures, `EXIT CODE: 0`. The seven from CP-012 plus `Field.Shape`, `Field.Strata`, `Field.Range`, `Field.Determinism` |
+| **D-011 `#include` boundary probe** | `VoxelTools/Gen/VoxelSphereTools.h` in `TerrainCore/Private/TerrainWorldField.cpp` gave `fatal error C1083` / `Result: Failed`. **File restored byte-identical, md5 `55344B436ADCE46E51F3CF53FD83DFB5` verified.** No `.Build.cs` and no `.uproject` change in this increment, so the D-025 guard is structurally untouched |
+| Standalone boot | `Installing the game density field as the voxel world generator (was 'VoxelFlatGenerator')`; `created=yes, role=Server`; `Material config: 0` (= **RGB**, so the strata colours can render); `generator version 1`. **Zero `LogVoxel: Error`, zero fatals** |
+| `Terrain.SelfTest` in standalone | **PASS**, 13 checks, zero failures |
+
+**The single most direct piece of evidence that the world changed** is in that self-test:
+
+```
+voxel (0,0,0) chunk (0,0,0) rev 0, density -1.0000, resident 1
+Remove r=200cm -> applied=1 reason=None opseq=1 chunks=8 voxels=895
+```
+
+At CP-012 the same line read `density 0.0010` and `voxels=438`. The origin used to be the
+surface of a flat plane; it is now **buried in solid rock** under the shelf west of the
+escarpment, so the same brush removes twice as much. Nothing else in the project changed that.
+
+`Terrain.SelfTest` itself needed one fix: its Add previously placed at a fixed offset that was
+only guaranteed to be empty on a flat plane. It now refills the hole it just dug, at a smaller
+radius — the one address that is empty whatever shape the world has.
+
+Evidence log `Saved/Logs/Standalone_T108.log` is local, gitignored, and overwritten by later runs.
+
+### What this does NOT do
+
+- **No K9 material mapping and no yield.** `TerrainMaterialDebugColor` in the adapter is a
+  **cosmetic** palette so strata are visible in the cliff face. Nothing reads a colour back,
+  nothing persists one, no yield is computed from one. `FTerrainEditResult::Removed` is still
+  empty (step 6, DEF-6).
+- **DEF-5 is not closed.** `Field.Determinism` pins same-build reproducibility only. Identical
+  output across builds and platforms is DEF-5's question and this does not answer it.
+- **R-013 unchanged** — the production adapter still has not passed `Backend.Conformance`.
+- **R-010's KillZ unchanged**, and it now matters slightly more: the plain sits 3 m lower than
+  the old flat plane, so the spawn drop is longer.
+- Steps 3-7 are untouched and still blocked by DEF-4, DEF-5, DEF-7.
+
+### Next safe action
+
+**The Director looks at it.** `Tools\Play-Solo.ps1`, standalone. The spawn faces east; there
+should be a large hill ahead with a bare rock face on its near side. Then `checkpoint`.
+Still **do not start build step 3.**
 
 ---
 

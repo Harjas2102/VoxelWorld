@@ -5,6 +5,7 @@
 #include "CoreMinimal.h"
 #include "Subsystems/WorldSubsystem.h"
 #include "ITerrainBackend.h"
+#include "ITerrainDensityField.h"
 #include "TerrainRevisionIndex.h"
 #include "TerrainService.generated.h"
 
@@ -209,6 +210,14 @@ private:
 
 	/** The one backend instance for this world. Owned here; released in Deinitialize. */
 	TUniquePtr<ITerrainBackend> Backend;
+
+	/**
+	 * The world's shape (T-108, §4.6). OWNED HERE and only LENT to the backend: AR-2 records
+	 * that FTerrainBackendInit borrows the field until Shutdown, so this must outlive the
+	 * backend and is destroyed only after Shutdown has returned. The plugin samples it from
+	 * mesher worker threads, which is why ITerrainDensityField forbids mutable state.
+	 */
+	TUniquePtr<ITerrainDensityField> DensityField;
 
 	/**
 	 * Copied from settings at backend creation, so a mid-session config edit cannot make the

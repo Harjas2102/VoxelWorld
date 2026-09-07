@@ -3,6 +3,7 @@
 #include "VPLegacyBackend.h"
 #include "TerrainBackendVPLegacy.h"
 #include "TerrainChunk.h"
+#include "VPLegacyDensityGenerator.h"
 
 // The plugin. These four includes are the entire reason this module exists as a module.
 #include "VoxelWorld.h"
@@ -123,11 +124,21 @@ bool FVPLegacyBackend::Initialize(const FTerrainBackendInit& InInit)
 	// keeps whatever generator it was authored with — VoxelFlatGenerator, per T-101A — which
 	// is why the test world is a plane and not the hill. Say so once, at startup, rather than
 	// letting someone rediscover it from an empty-looking world.
-	if (!Init.DensityField)
+	if (Init.DensityField)
 	{
+		// The material config is logged rather than forced: the strata colours below only
+		// become visible in an RGB config with a vertex-colour material, and which of those
+		// the level's actor carries is an authored asset choice, not the backend's call.
 		UE_LOG(LogTerrainBackendVPLegacy, Log,
-			TEXT("No ITerrainDensityField supplied; the actor's own generator decides the world's shape "
-				 "until T-108 (build step 8)."));
+			TEXT("World shape comes from the game density field (T-108). Material config: %d "
+				 "(strata colours are visible in RGB only)."),
+			static_cast<int32>(Actor->MaterialConfig));
+	}
+	else
+	{
+		UE_LOG(LogTerrainBackendVPLegacy, Warning,
+			TEXT("No ITerrainDensityField supplied; the actor's own generator decides the world's shape. "
+				 "Since T-108 the service always supplies one, so this means it failed to."));
 	}
 
 	return true;
@@ -228,6 +239,29 @@ bool FVPLegacyBackend::ConformVoxelWorld(AVoxelWorld& Actor)
 		bNeedsRecreate = true;
 	}
 
+	// THE GAME OWNS THE WORLD'S SHAPE TOO (T-108, §4.6). Installing the generator has to
+	// happen BEFORE CreateWorld, and a change to it has to force a recreate, because the
+	// generator is the baseline every unedited voxel is read from: swapping it under a live
+	// world would leave already-meshed chunks showing the old shape next to new ones showing
+	// the new, with no error anywhere.
+	if (Init.DensityField)
+	{
+		if (!Generator.IsValid())
+		{
+			Generator.Reset(NewObject<UVPLegacyDensityGenerator>(GetTransientPackage()));
+		}
+		Generator->SetField(Init.DensityField);
+
+		if (Actor.Generator.GetObject() != Generator.Get())
+		{
+			UE_LOG(LogTerrainBackendVPLegacy, Log,
+				TEXT("Installing the game density field as the voxel world generator (was '%s')."),
+				Actor.Generator.GetObject() ? *Actor.Generator.GetObject()->GetName() : TEXT("none"));
+			Actor.SetGeneratorObject(Generator.Get());
+			bNeedsRecreate = true;
+		}
+	}
+
 	if (!Actor.IsCreated())
 	{
 		Actor.CreateWorld();
@@ -278,6 +312,10 @@ void FVPLegacyBackend::Shutdown()
 	bSpawnedVoxelWorld = false;
 
 	ScratchModified.Empty();
+	// Released before the borrowed field goes away with the service. The generator holds a
+	// raw pointer to that field, so an instance still meshing after this point would be
+	// reading freed memory (AR-2: the field is borrowed until Shutdown).
+	Generator.Reset();
 	VoxelWorld.Reset();
 	World.Reset();
 	Init = FTerrainBackendInit();
