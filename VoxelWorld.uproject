@@ -10,6 +10,11 @@
 			"LoadingPhase": "Default"
 		},
 		{
+			"Name": "TerrainBackendVPLegacy",
+			"Type": "Runtime",
+			"LoadingPhase": "Default"
+		},
+		{
 			"Name": "VoxelWorld",
 			"Type": "Runtime",
 			"LoadingPhase": "Default",
