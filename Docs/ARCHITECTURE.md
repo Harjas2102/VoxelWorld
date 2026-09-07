@@ -671,6 +671,120 @@ Notes:
   completes before the collision cook does. The answer is validation plus §7.4, not an attempt
   to make the plugin atomic — and the current validation rule is insufficient (DEF-8).
 
+### 4.5.1 Thread affinity, ownership, shutdown and cancellation — DEF-4 resolution
+
+**Architect determination, T-114, 2026-09-07** (technical, per D-023). K4/D-024 ruled *which*
+thread; §4.5 records that the ruling "picks the thread, it does not discharge the defect." This
+subsection is the table, the state machine and the cancellation rule DEF-4 asked for.
+
+#### The affinity and ownership table
+
+"Owner" is who may create and destroy the thing. "Caller" is who may invoke it. A backend does
+not trust either — it checks and refuses, because a backend that trusted its callers would turn
+a governance rule into a crash.
+
+| Activity | Thread | Owner | Legal caller |
+|---|---|---|---|
+| `ITerrainBackend::Initialize` / `Shutdown` | Game thread only | `UTerrainService` | The service, once each |
+| `ApplyOp` | Game thread only | The service's queue | The service, from the serialised path |
+| `ReadRegion` / `WriteRegion` / `HashRegion` | Game thread only | — | The service |
+| `QueryPoint` / `IsRegionResident` | Game thread only | — | The service and gameplay through it |
+| `SetStreamingInterest` / `ClearStreamingInterest` | Game thread only | The service (ids) / the backend (whatever it creates for one) | The service |
+| `FlushPendingWork` | Game thread only | — | The service. **A no-op by design** (§4.5) |
+| `ITerrainDensityField::Sample` / `SampleRange` | **Any thread, concurrently** | `UTerrainService` | The backend, and through it the plugin's mesher workers |
+| Meshing, LOD selection, collision cooking, render invalidation | Plugin worker threads | Plugin | **Nobody on our side.** We never call in and never block on it |
+| The voxel world actor and its invoker components | Game thread | The backend that created them | The backend only |
+
+**Rule 1 — the whole `ITerrainBackend` surface is game-thread only.** All eleven methods. There
+is no read/write split and no "reads are safe from anywhere" concession, because the plugin
+documents no thread-safety guarantee for any of them and a read that races a mesher's internal
+write is the same defect as a write that does.
+
+**Rule 2 — `ITerrainDensityField` is the single any-thread exception, and it is const, immutable
+and free of memoisation.** It is safe by construction rather than by lock, which is what makes it
+callable from the plugin's mesher threads at all. This is stated on the interface in code.
+
+**Rule 3 — no lock of ours is ever held across a call into the plugin.** DEF-4 named the hazard
+exactly: "an external bounds lock may conflict with one the wrapper takes internally." The answer
+is not a better lock ordering, it is holding no lock: the serialised path is one thread, so
+mutual exclusion is already established by the thread itself and a second mechanism would only be
+able to deadlock against the plugin's own.
+
+**Rule 4 — no `UObject` outside the service owns an in-flight operation.** §4.4 already states
+this for player scoping; the affinity table extends it to machines and to admin tools. The
+service is the sole issuer and the sole owner.
+
+**Rule 5 — the density field outlives the backend.** `FTerrainBackendInit` *borrows* it (AR-2),
+so the service releases it strictly after `Shutdown` returns. Reversing that order is a
+use-after-free visible only when a mesher thread is still in flight, which is the hardest form of
+this bug to reproduce and therefore the one worth naming.
+
+#### The shutdown state machine
+
+Four states, in `UTerrainService`. Every transition is on the game thread.
+
+| State | Entered when | `RequestEdit` | Backend calls |
+|---|---|---|---|
+| **Uninitialised** | Subsystem constructed; also re-entered after teardown | Rejected `NotReady` | None permitted |
+| **Ready** | `Initialize` returned true at `OnWorldBeginPlay` | Normal | Normal |
+| **Draining** | First of: `EndPlay`, world teardown, `Deinitialize`, level travel, PIE exit | Rejected `ShuttingDown` | Only teardown calls |
+| **TornDown** | Teardown sequence complete | Rejected `NotReady` | None permitted |
+
+`ShuttingDown` is a new `ETerrainEditRejection` value. It is distinct from `NotReady` on purpose:
+`NotReady` means "not yet", `ShuttingDown` means "never again in this world", and a client that
+cannot tell them apart will retry forever into a world that is going away.
+
+**The teardown sequence is fixed and is the exact reverse of construction:**
+
+1. Enter `Draining`. Every later `RequestEdit` is refused from here on.
+2. **Discard the pending queue.** Not drain — discard. A queued op has no `OpSeq`, no journal
+   record and no broadcast, so discarding it is precisely the *no-change* half of the DEF-7
+   invariant (§4.11) and leaves nothing half-done. Draining instead would run arbitrary work
+   during teardown and could journal an op no client will ever hear about.
+3. Release every reservation held by a discarded request (§4.11).
+4. `ClearStreamingInterest` for every live interest, through the backend, so the backend destroys
+   what it created for each one.
+5. `Shutdown()` on the backend. The backend destroys only actors and components **it** spawned.
+6. Release the backend.
+7. Release the density field. **Strictly last** (Rule 5).
+8. Enter `TornDown`.
+
+#### Cancellation
+
+**There is nothing to cancel mid-operation, and that is a design property rather than an
+observation.** `ApplyOp` is synchronous on the game thread and cannot be pre-empted by `EndPlay`,
+travel or PIE exit, all of which are themselves game-thread events. So no operation is ever
+partially applied at teardown.
+
+What *is* cancelled is the pending queue, at step 2 above. Cancellation is therefore a queue
+operation, not a plugin operation.
+
+**We never register a completion callback that can outlive the service.** The plugin's async
+tool overloads anchor completion to the issuing `UObject`; the authoritative path uses the
+synchronous overloads only, so there is no callback to cancel and no lifetime to police. The
+plugin's own meshing and collision work is anchored to the voxel world actor and dies with it —
+we do not cancel it, and we must not wait for it, because waiting on the game thread for a worker
+that wants the game thread is the deadlock this rule exists to prevent.
+
+**Travel and PIE exit are not special cases.** They reach us as `Deinitialize` on the world
+subsystem, which is why the state machine keys off the first teardown signal rather than trying
+to enumerate causes. A world subsystem's lifetime is a world's lifetime, so a new world gets a
+new service, a new backend and a new field.
+
+#### What DEF-4 does not cover, and what it hands on
+
+- **The plugin's internal thread safety remains unaudited.** This resolution constrains what *we*
+  do; it makes no claim about what the plugin does behind `RemoveSphere`. E-2 (determinism across
+  threading modes) and E-5 are the experiments that probe it, and until E-2 reports, edits run
+  with `bMultiThreaded = false` on both server and client (§4.5, DEF-5).
+- **Collision readiness is DEF-8, not this.** Nothing here says when a cook has finished.
+- **Durability ordering is DEF-1, not this.** Nothing here says when a record is safe on disk.
+
+**Evidence.** `TerrainCore.Backend.Conformance` asserts that every method refuses when called off
+the game thread and that the state machine rejects with the right reason in each state.
+`Adapter.Determinism` (§6.2) covers the threading-mode claim. `MP.*` (§6.3) exercises teardown
+under load through repeated travel.
+
 ### 4.6 The generator
 
 Voxel Graphs are Pro-gated, so the generator must be C++ (T-108). That is usually a cost; here
@@ -684,13 +798,33 @@ struct FTerrainDensitySample
     FTerrainMatId MaterialId = 0;
 };
 
+struct FTerrainDensityRange          // AR-6
+{
+    float Min = -1.f;
+    float Max =  1.f;
+};
+
 class ITerrainDensityField
 {
 public:
     virtual ~ITerrainDensityField() = default;
     virtual FTerrainDensitySample Sample(FIntVector Position) const = 0;
+
+    // AR-6. Conservative bounds over a half-open voxel box. The default returns
+    // the full [-1, 1], which is always correct and merely forfeits the skip.
+    virtual FTerrainDensityRange SampleRange(const FTerrainBox& Box) const;
 };
 ```
+
+**AR-6 (Architect determination, T-108, 2026-09-07).** `Sample` alone is enough to FILL a chunk
+and not enough to SKIP one. A backend octree that cannot ask "is this whole region certainly
+solid, or certainly empty?" must sample every voxel of every region at every LOD, which across a
+512 m world of 50 cm voxels is a measurable cost rather than a theoretical one. The default
+implementation keeps every existing implementer valid and adds no required method.
+
+**Threading.** Implementations are safe for unsynchronised concurrent const calls and hold no
+mutable state, memoisation included — the plugin queries its generator from mesher worker
+threads. This is §4.5.1 Rule 2, and it is the single any-thread exception in the whole design.
 
 `UVPLegacyDensityGenerator : UVoxelGenerator` (adapter) implements the plugin's value and
 material queries by forwarding iteration to the field. The world's shape — strata, ore bodies,
@@ -700,11 +834,21 @@ input K3 requires, bumped on any change to the field. The CP-008 header determin
 supersedes the former three-method declaration; no field implementer exists at step 1.
 
 `FMemoryTerrainBackend` can sample the same field when supplied. Step-1 tests use
-explicit Dense fixtures and a null field; real world-shape testing starts at T-108.
+explicit Dense fixtures and a null field.
 
-**The T-101A hill was sculpted by script, not generated.** It is not reproducible from a seed and
-is not preserved by the map package. The deterministic base under D-012 must explicitly name its
-generation inputs and any authored stamps; it cannot inherit them from the saved test map.
+**BUILT AT T-108 (2026-09-07), build step 8.** `FTerrainWorldField` in `TerrainCore` is the
+implementer: a 280 m hill east of the origin with 65 m of relief, a west-facing escarpment
+exposing the strata, a lowland basin, topsoil/dirt/stone/deep-stone/bedrock by depth below the
+local surface, and an iron ore body that never breaks the surface. Roughness is integer-hashed
+value noise — no RNG and no float bit tricks, for the 4.10.4(b) reason.
+`UVPLegacyDensityGenerator` in the adapter forwards plugin value and material queries to it and
+decides nothing. `GeneratorVersion` moved 0 → 1 with it.
+
+**The T-101A hill was sculpted by script, not generated** — it was not reproducible from a seed
+and did not survive a map load (finding 2e, R-003), which is why every standalone process showed
+a flat plane until T-108. That is now closed: the world is a pure function of position and seed
+and needs no save file to come back. D-012's deterministic base names `GeneratorVersion` and the
+seed as its generation inputs; there are no authored stamps.
 
 ### 4.7 Persistence schema
 
@@ -859,13 +1003,363 @@ switching to a single-index config with a game-owned id↔index table in the ada
 game at 255 simultaneous terrain materials. This is a visible change — terrain rendering moves to
 a material collection rather than vertex colours — so it needs a Director ruling before step 6.
 
+### 4.10 Operation semantics and determinism — DEF-5 resolution
+
+**Architect determination, T-114, 2026-09-07** (technical, per D-023).
+
+DEF-5 asked for canonical semantics per operation including read bounds and rounding, version
+compatibility rules, and golden fixtures; it also required `HashRegion` to be position-sensitive
+and forbade the client keeping a nondeterministic mode the server drops.
+
+#### 4.10.1 The operation set is closed. Flatten and Smooth are not in it.
+
+DEF-5's complaint — "Flatten and Smooth are named without plane, strength, iteration or falloff
+semantics" — is answered by **removing them from the operation set rather than by inventing
+semantics for them.**
+
+`ETerrainOpKind` keeps all five enumerators, because the wire encoding is permanent (§4.2) and
+renumbering it is a save-format change. But:
+
+- **`Remove`, `Add` and `Paint` are the operation set.** They are specified below.
+- **`Flatten` and `Smooth` are RESERVED.** Every backend refuses them and every service admission
+  check refuses them, permanently, until a numbered decision specifies plane, strength, iteration
+  count and falloff. An unimplemented op that is refused is a closed question; an unspecified op
+  that is approximated is an open one, and DEF-5 exists because the document did the second.
+- A build that meets a reserved kind on the wire **rejects the op** rather than treating it as a
+  no-op, because a no-op is indistinguishable from success to a replaying client.
+
+#### 4.10.2 Canonical geometry — the write set and the read bounds
+
+All of this is in integer voxel space. The op is already integers by §4.3, and the quantisation
+and rounding rule for getting there is fixed in `TerrainQuantise.h`: **transform to terrain-local
+in double, then floor.** Not round — floor is what makes a voxel the half-open cell `[n, n+1)`
+that `FTerrainBox` assumes. `DequantiseVoxel` returns the voxel **centre** (AR-3), so
+`QuantiseEdit(DequantiseVoxel(Q)) == Q` for every `Q`.
+
+Let `C = Op.CentreVox` and `r = Op.RadiusVoxQ16 / 65536.0`, evaluated in `double`. The division
+is exact: a Q16 value is an integer and 65536 is a power of two, so `r` carries no rounding of
+its own, on any IEEE-754 platform.
+
+**Sphere write set** — the voxels an op may change:
+
+```
+W = { v : (v.x-C.x)² + (v.y-C.y)² + (v.z-C.z)² <= r² }
+```
+
+Squared distance, compared to `r²`, in `double`, with **`<=`**. Both sides are computed from
+integers and one exact `r`, so the comparison is exact for every radius the game can express;
+there is no epsilon and none may be added. `r` itself is never compared against a square root.
+
+**Sphere read bounds** — the axis-aligned box the kernel scans and the box that render and
+collision invalidation must cover:
+
+```
+B = [ C - floor(r) , C + floor(r) + 1 )        // Min inclusive, Max exclusive
+```
+
+`floor(r)` is exact rather than conservative: the largest integer offset `d` with `|d| <= r` is
+`floor(r)`, so `B` contains `W` with no slack on any axis. `VoxelsScanned` is the product of
+`B`'s three extents.
+
+**Box write set** is `[C - ExtentVox, C + ExtentVox)`; the read bounds are the same box. A box op
+with any non-positive extent is rejected.
+
+**Nothing outside `W` may change.** This is the property that makes the read bounds meaningful,
+and it is asserted rather than assumed.
+
+#### 4.10.3 Canonical per-operation meaning
+
+`occ(value)` is occupancy: `1` for fully solid, `0` for fully empty, monotone in between. The
+density convention is §4.2's: normalised, negative is solid.
+
+| Op | Density | Material | Required properties |
+|---|---|---|---|
+| `Remove` | Every voxel in `W` becomes **no more solid** than it was. Voxels whose whole cell is inside `W` become totally empty | **Preserved.** Removing rock does not repaint it | Monotone toward empty; idempotent |
+| `Add` | Every voxel in `W` becomes **no less solid** than it was. Voxels whose whole cell is inside `W` become totally solid | Set to `Op.MaterialId` wherever density increased | Monotone toward solid; idempotent |
+| `Paint` | **Unchanged, exactly.** Not "approximately" | Set to `Op.MaterialId` throughout `W` | Density-preserving; idempotent |
+
+**Idempotence is the load-bearing property.** Applying the same op twice must report
+`VoxelsTouched == 0` the second time. It is cheap to test, it is backend-neutral, and it is what
+makes replay safe: DEF-3's duplicate-application hazard during JIP is survivable for an
+idempotent op and is corruption for a non-idempotent one. An op kind that cannot be made
+idempotent does not belong in the set — which is a second, independent reason `Smooth` is not in
+it.
+
+**Monotonicity** is what lets validation reason about an op without simulating it. A `Remove`
+can never create solid rock, so a clearance check that passes before the op cannot be invalidated
+by the op.
+
+#### 4.10.4 What determinism means here, stated precisely
+
+DEF-5's core observation was right: integer inputs remove one hazard and prove nothing on their
+own. So the claim is split into three, and only two of them are made.
+
+**(a) Same backend, same build, same inputs → identical output. REQUIRED.**
+Same op sequence, same seed, same `GeneratorVersion`, same starting state ⇒ identical
+`HashRegion` for every chunk. This is what replay, journal compaction and the convergence test
+all depend on. Evidence: `Adapter.Determinism` (§6.2), 20 runs.
+
+**(b) Same backend, different build or platform → identical output. REQUIRED, and at risk.**
+The op is integers; `r` is exact; the sphere test is an exact integer comparison. The residual
+risk is entirely in the *kernel's* floating-point arithmetic — compiler contraction of a
+multiply-add, a different vectorisation, a fast-math flag. The mitigations are: the game side
+uses no float in the geometry (above); `bMultiThreaded = false` on **both** server and client
+until E-2 reports, because client results supply collision and are not cosmetic; and the golden
+fixtures in 4.10.6 fail loudly if a toolchain change moves a value. **This is stated as a
+requirement with a named residual risk, not as a proof.**
+
+**(c) Different backends → identical output. NOT REQUIRED. Explicitly out of scope.**
+§8.1 assigns "sphere/box/level edit kernels" to the **plugin** while assigning "edit semantics —
+what Remove, Add, Paint mean" to the **game**. Those two are consistent only if the game
+specifies *properties* and the backend supplies *values*. So two conforming backends may write
+different densities for the same op — `FMemoryTerrainBackend` writes a binary fill, the plugin
+writes its own signed-distance ramp — and both are correct.
+
+**The consequence is a real one and it sharpens FM-9 rather than solving it: a backend swap is a
+resample migration for every EDITED chunk, not a format-compatible reload.** Pristine chunks
+regenerate from the field and are unaffected. FM-9 previously flagged only differing voxel size
+or grid alignment; differing kernels belong on the same line. `backendVersion` in the snapshot
+header (§4.7) is what makes the mismatch detectable instead of silent.
+
+`Backend.Conformance` therefore asserts the **contract** — write set, read bounds, monotonicity,
+idempotence, material rules, result accounting, refusal behaviour — and never asserts equality of
+densities between two backends. That is what "replaceable" means operationally, and it is a
+weaker claim than the one §10 could be read as making.
+
+#### 4.10.5 `HashRegion`
+
+- **Position-sensitive.** The voxel's index within the chunk is folded in, so two chunks holding
+  the same multiset of values in different places hash differently. Without this, rearranged
+  terrain hashes identically and FM-1's convergence test proves nothing.
+- **Iteration-order-independent.** A backend that walks a chunk in a different order must produce
+  the same hash, so the hash is a sum of per-voxel mixes rather than a rolling chain.
+- **Covers values and materials**, and only resident data. A non-resident region hashes `0`, and
+  `0` is never a valid hash of resident data.
+- **Comparable only within one backend and build**, by 4.10.4(c).
+
+`FMemoryTerrainBackend::HashRegion` already satisfies all four and is the reference.
+
+#### 4.10.6 Version compatibility rules
+
+Three versions travel with saved data (§4.7): `generatorVersion`, `backendVersion`, and the
+journal/snapshot format version. They answer different questions and are not interchangeable.
+
+| Mismatch | Pristine chunk | Edited chunk (has a payload) |
+|---|---|---|
+| **`generatorVersion`** differs | Regenerate from the field. The new world is the world | **Payload is authoritative.** Never re-derive it from ops, because the ops were applied to a different baseline |
+| **`backendVersion`** differs | Regenerate | **Payload is authoritative; op replay is FORBIDDEN.** A different kernel applied to the same ops is a different world (4.10.4c) |
+| **Format version** differs | Migration, `.bak` first (FM-2) | Migration, `.bak` first |
+| **Unknown wire enum** on an op | — | Reject the op. Already enforced by `DeserializeTerrainOp` |
+
+The rule underneath all four rows: **ops are only ever replayed against the exact
+(generator, backend, format) triple they were recorded under.** Anything else uses the snapshot
+payload or regenerates. What remains open is *recovering* an edited chunk when its payload has
+been compacted away and the triple has changed — that is DEF-9, and it stays open.
+
+#### 4.10.7 Golden fixtures
+
+The fixtures are committed, not generated at test time, so a change in behaviour shows up as a
+failing test rather than as a quietly updated expectation.
+
+`TerrainCore.Op.Semantics.Golden` (§6.1) runs a fixed script of `Remove`/`Add`/`Paint` ops —
+including negative coordinates, chunk-boundary straddles, the exact-`r` boundary case, a
+zero-effect repeat of each op, and a rejected op — against `FMemoryTerrainBackend` from a fixed
+starting state, and compares every affected chunk's `HashRegion` against values recorded in the
+test itself.
+
+**A failure of this test is never fixed by updating the number.** It means either the kernel
+changed, which needs a `backendVersion` bump, or the toolchain moved under it, which is 4.10.4(b)
+reporting for duty. Either way the number is evidence, not a parameter.
+
+The plugin adapter has its own fixtures under `Adapter.Determinism` (§6.2) with its own expected
+hashes, for the same reason and with no cross-comparison to these.
+
+### 4.11 Admission, commit and split operations — DEF-7 resolution
+
+**Architect determination, T-114, 2026-09-07** (technical, per D-023).
+
+DEF-7 asked for trusted request inputs, full quantised-footprint validation, request identity and
+retry dedup, resource reservation and revalidation, queue limits and fairness, the
+no-change-or-committed-result invariant, and explicit split-operation semantics.
+
+#### 4.11.1 What the server takes from the client, and what it refuses to
+
+A request is **evidence of intent**, never a description of what will happen. The split below is
+the whole of it; anything not in the left column is not an input.
+
+| The client may supply | The server derives, and never reads from the request |
+|---|---|
+| `RequestId` — client-scoped, monotonic per connection | `SourceId` — from the connection, never from the payload |
+| `Kind` — one of the three live kinds (§4.10.1) | `Source` — `Player` for a connection, `Machine`/`Admin`/`Worldgen` are server-originated only |
+| An aim point in world space | `CentreVox` — the server quantises, once (§4.3) |
+| A requested radius in cm | The effective radius — `min(requested, tool max, MaxEditRadiusCm)` |
+| `ToolId` | `MaterialId` for `Add` — from the tool and the requester's inventory |
+| — | `OpSeq`, `TransactionId` — assigned at commit |
+| — | Reach — recomputed from the **server's** pawn transform, with a tolerance. The client's camera is not an input |
+
+`ToolId` is the interesting one: it is client-supplied *and* it affects yield (§4.9), so it is
+validated as owned, equipped, off cooldown and charged — never trusted. §4.4 already says this;
+DEF-7's addition is that the same checks run **again at commit** (4.11.4).
+
+#### 4.11.2 Validation runs on the quantised footprint, not the request
+
+Every admission check is evaluated over the **integer** write set `W` and read bounds `B` of
+§4.10.2, computed from the already-quantised op — not over the float sphere the client asked for.
+
+- world bounds: `B` entirely inside `WorldBoundsVox`
+- residency: every chunk `B` touches is resident
+- zone permission (D-004): evaluated for every chunk `W` touches, not just the centre's
+- clearance (DEF-8): evaluated against `W`
+- size: `|W| <= MaxVoxelsPerOp`, and `|B|` recorded as the read cost (§7.1)
+
+**Why this is a rule and not an implementation detail.** A check performed on the requested float
+sphere and an application performed on the integer op can disagree by exactly one voxel at a
+boundary. One voxel of disagreement between "permitted" and "changed" is a permission bypass at
+the edge of every protected zone in the game, and it is invisible until someone looks for it.
+
+#### 4.11.3 Request identity and retry dedup
+
+- `FTerrainEditRequest` carries a `RequestId`, unique and monotonic **within a connection**. The
+  identity of a request is the pair `(SourceId, RequestId)`; a client cannot forge another
+  client's identity because it does not supply `SourceId`.
+- The server keeps, per connection, a bounded ring of recently **resolved** request identities and
+  their receipts — 64 entries, which at the §7.1 rate limits is several seconds of history.
+- **A repeat of a resolved identity returns the stored receipt and mutates nothing.** It is not a
+  new op, does not consume an `OpSeq`, and does not settle yield a second time.
+- A repeat of an identity that is still *queued* is dropped, and the original resolves normally.
+- An identity older than the ring is rejected `StaleRequest` rather than executed. Executing it
+  would be the mining-twice bug the ring exists to prevent, and rejecting a very old retry is
+  always safe: the client can ask again with a new id.
+
+Reliable RPCs are re-sent across reconnects and seamless travel. Without this, a re-sent dig
+mines the same rock twice and credits the ore twice.
+
+#### 4.11.4 Reservation and revalidation — the two-phase rule
+
+DEF-7: "several admitted edits can pass the same remaining-resource check; a requester can move,
+lose permission or disconnect while queued."
+
+**Phase 1 — admission.** The checks in 4.11.2 run, and the request **reserves** what it will
+consume: a queue slot, a rate-limit token, and any tool charge or fuel the op will cost. A
+reservation is held against the requester and is visible to the next request's checks, so two
+admitted ops cannot both pass the same remaining-charge test.
+
+**Phase 2 — commit.** Immediately before `ApplyOp`, on the serialised path, **every check is run
+again** against current state: the requester still exists and is connected; the tool is still
+owned, equipped, off cooldown and charged; the zone still permits it; reach still holds against
+the requester's *current* server-side position; every chunk in `B` is still resident; clearance
+still holds.
+
+Revalidation failure releases the reservation and rejects the request. **Nothing has been mutated
+at that point**, so this is clean by construction rather than by rollback — the design has no
+rollback and does not need one.
+
+Reservations are released on exactly three events: commit, rejection, and Draining (§4.5.1 step
+3). A disconnect is not a fourth event; it is detected at revalidation.
+
+#### 4.11.5 Queue limits and fairness
+
+- **Bounded, twice.** A global depth cap and a per-source depth cap. Exceeding either rejects the
+  new request `QueueFull` at admission. An unbounded queue under FM-7's scripted client is a
+  memory-growth failure that looks like a leak.
+- **Round-robin across sources, FIFO within a source.** One player holding down the mine button
+  cannot starve another. Machines share the same queue at the same priority.
+- **No priority classes.** A priority class is a starvation bug that only appears under the load
+  you cannot reproduce, and nothing in the design needs one: `MaxVoxelsPerOp` already bounds the
+  worst single op, so head-of-line blocking is bounded by the §7.1 budget of 8 ms.
+- **Queue age is measured, not assumed** (§7.1), and is the direct input to whether K4's
+  game-thread ruling survives contact with 16–32 players.
+
+#### 4.11.6 The no-change-or-committed-result invariant
+
+**For every request, exactly one of two outcomes occurs. There is no third.**
+
+| Rejected | Committed |
+|---|---|
+| No voxel changed | Every voxel in `W` that the kernel decided to change, changed |
+| No `OpSeq` assigned | `OpSeq` assigned, monotonic |
+| No journal record | Journal record appended |
+| No client broadcast | Broadcast to every subscriber of every affected chunk |
+| No yield settled | Yield settled |
+| No chunk revision moved | Every affected chunk's revision bumped **exactly once** |
+| A receipt with a reason | A receipt with the result |
+
+Two consequences follow, and both are changes to what the document previously allowed:
+
+**`bTruncated` is removed from the contract as a success signal.** DEF-7 named it precisely:
+"`bTruncated` and a boolean failure both imply possible partial mutation, which would permit
+unjournalled terrain." A backend that would have truncated must instead **fail the whole op and
+mutate nothing**. The field stays in `FTerrainEditResult` for wire and struct stability but is
+`false` on every successful result; a backend setting it true on success is non-conforming.
+
+**`ApplyOp` returning false means nothing changed.** Not "something may have changed". The
+implementation rule that makes this true differs by backend and both are required to reach it:
+
+- `FMemoryTerrainBackend` **stages** every change and validates the entire write set before
+  writing a single voxel. It already does this.
+- `FVPLegacyBackend` cannot stage inside the plugin, so it **pre-validates the entire footprint**
+  — bounds, residency, and the write count against `MaxVoxelsPerOp` — before calling the kernel,
+  so the call has no remaining precondition to fail on. The plugin's sphere kernel writes a
+  bounded set synchronously and has no partial-failure return; **that is an assumption about the
+  plugin, it is stated here rather than buried, and `Backend.Conformance` probes it** by
+  attempting ops that fail each precondition and asserting the region hash is unchanged.
+
+#### 4.11.7 Split operations
+
+DEF-7 required "explicit split-operation semantics"; §4.4 previously said only that very large
+ops split into sub-ops sharing a `TransactionId` and that geometric equivalence "is
+operation-dependent".
+
+**Ruling: only `Box` ops split. A `Sphere` over the cap is rejected `TooLarge`, never split.**
+
+A sphere cannot be partitioned into smaller spheres whose union is the original, and the wire
+encoding is permanent at 58 bytes (§4.2), so there is nowhere to put the clip box a correct
+partition would need. Inventing an approximate split would make the same request produce
+different terrain depending on whether it happened to exceed a cap — which is a determinism bug
+wearing a performance feature's clothes. A box partitions exactly, using the `ExtentVox` field
+that already exists.
+
+Split rules:
+
+1. **Partition, do not re-shape.** The box is halved along its longest axis, recursively, until
+   every sub-box is within `MaxVoxelsPerOp`. Sub-boxes are disjoint and their union is exactly
+   the original write set.
+2. **One `TransactionId`, many `OpSeq`.** Sub-ops share the transaction id and each receives its
+   own `OpSeq`, increasing, contiguous within the transaction.
+3. **The transaction is NOT atomic.** Each sub-op commits independently and satisfies 4.11.6
+   independently. A snapshot taken between two sub-ops is legal, a client may observe a partly
+   excavated region, and a crash between sub-ops leaves the completed ones committed. This is
+   stated rather than assumed because the alternative — a cross-op transaction — would need a
+   durability protocol that DEF-1 has not yet defined and step 4 has not yet built.
+4. **Admission is all-or-nothing; commit is per sub-op.** The whole transaction is validated and
+   reserved at admission, so a split excavation cannot begin and then be refused halfway for
+   want of charge. Each sub-op still revalidates at commit (4.11.4), and a sub-op that fails
+   revalidation ends the transaction: later sub-ops are dropped, not retried.
+5. **Yield settles per sub-op.** Summation over a transaction is DEF-6's problem, not this one.
+
+Evidence: `TerrainCore.Split.Equivalence` (§6.1) — a box op applied whole and the same op applied
+as its split produce identical region hashes, including when the split boundary falls on a chunk
+boundary and when it does not.
+
+#### 4.11.8 New rejection reasons
+
+`ETerrainEditRejection` gains four values. Each exists because a client that cannot tell it from
+its neighbour will do the wrong thing:
+
+| Reason | Meaning | What a client should do |
+|---|---|---|
+| `ShuttingDown` | The world is going away (§4.5.1) | Stop. Do not retry |
+| `QueueFull` | Global or per-source depth cap hit | Back off, retry later |
+| `StaleRequest` | Identity older than the dedup ring | Retry with a **new** `RequestId` |
+| `Revalidation` | Passed admission, failed at commit | Re-check local state, then retry with a new id |
+
 ---
 
 ## 5. Failure modes
 
 | # | Failure | Mechanism | Response | Residual |
 |---|---|---|---|---|
-| FM-1 | **Silent client/server divergence.** Client sees a wall the server calls air | Float rounding; a dropped op; plugin nondeterminism | Integer-voxel ops; per-chunk rev gap detection; `HashRegion` in the convergence test; blunt resync | Divergence *inside* a chunk with matching revs. E-2 and the hash test exist for this. Hash must be position-sensitive (DEF-5) |
+| FM-1 | **Silent client/server divergence.** Client sees a wall the server calls air | Float rounding; a dropped op; plugin nondeterminism | Integer-voxel ops; per-chunk rev gap detection; `HashRegion` in the convergence test; blunt resync. §4.10.5 requires the hash to be position-sensitive and order-independent, and `FMemoryTerrainBackend` is the reference | Divergence *inside* a chunk with matching revs. The residual is the kernel's own floating point — 4.10.4(b) — and E-2 is what probes it |
 | FM-2 | **Save corruption or loss.** The world is gone. Per D-012 the unacceptable one | Torn write; bad migration; generator change invalidating sparse snapshots | CRC per record and snapshot; torn tail truncated; `.bak` before migration; `generatorVersion` in every header, load refuses on mismatch | Recovery from a compacted journal is not generally possible — DEF-9 |
 | FM-3 | **Yield/terrain divergence.** Ore in the bag, no hole, or the reverse | Crash between apply and credit; two stores, two orderings | **Unresolved — DEF-1.** A watermark alone does not make two disks atomic | Blocks build step 4 |
 | FM-4 | **JIP burst saturates the connection** | Snapshot stream competing with movement on the same reliable channel | Per-connection byte budget; pristine fast path; nearest-first ordering; outstanding-byte limit | A 100-chunk dense region is 12.8 MB ≈ **50 s** at 256 KiB/s, not sub-second. Compression or a smaller radius is required, and E-3/E-6 decide which |
@@ -873,7 +1367,7 @@ a material collection rather than vertex colours — so it needs a Director ruli
 | FM-6 | **Movement corrections discarded while standing on terrain** | The proc-mesh has no net GUID | §7.4 — attempt static mobility so the mesh is never a *relative* base | Genuinely unknown (E-9). If no configuration works, this is a backend-adoption argument for the T-101B verdict |
 | FM-7 | **One client DoSes the edit queue** | Scripted client spamming max-radius ops | Per-source rate limit and `MaxVoxelsPerOp` before the queue; queue depth cap; queue-age metric | Friends server, low priority, but D-002 says never trust the client |
 | FM-8 | **Plugin async work never completes / world not created** | `bCreateWorldAutomatically` defaults false; task starvation; the known shutdown `ensure` | Service refuses to leave `Initializing` until the backend reports ready; edits queued, not dropped; flush on shutdown before final compaction | Server startup ordering is a real integration risk on a dedicated build (R-007) |
-| FM-9 | **Backend swap invalidates saves** | Snapshot encoding was backend-native | Payload is `int16` normalised density + game material ids — portable by construction; `valueConfig` and `backendVersion` recorded | A backend with different voxel size or grid alignment needs a resample migration. Documented, not solved |
+| FM-9 | **Backend swap invalidates saves** | Snapshot encoding was backend-native; **and two conforming backends write different densities for the same op** | Payload is `int16` normalised density + game material ids — portable by construction; `valueConfig` and `backendVersion` recorded, and §4.10.6 forbids replaying ops across a `backendVersion` change | **Sharpened by DEF-5.** A swap is a resample migration for every EDITED chunk, not only for a differing voxel size or alignment. Pristine chunks regenerate and are unaffected. Documented, not solved |
 | FM-10 | **The adapter leaks.** A plugin header in gameplay | Convenience under deadline | `TerrainCore` has no plugin dependency in `Build.cs` — compile error | The streaming component was the pressure point; §7.4 removes it |
 
 ---
@@ -888,6 +1382,13 @@ Run against `FMemoryTerrainBackend`. Seconds, on every build.
 |---|---|
 | `Op.Codec.RoundTrip` | Every `FTerrainOp` serialises and deserialises byte-identically, including negative coordinates and max radius. **Defines the 58-byte encoding** |
 | `Op.Quantisation.Stable` | The same world-space request quantises to the same integers across 10,000 randomised transforms |
+| `Op.Semantics.Golden` | A fixed op script from a fixed starting state reproduces committed per-chunk hashes. **The DEF-5 golden fixtures** (§4.10.7). Never fixed by updating the number |
+| `Op.Semantics.Contract` | Write set, read bounds, monotonicity, idempotence, material rules and refusal of reserved kinds, per §4.10.2–4.10.3 |
+| `Split.Equivalence` | A box op applied whole and applied as its split produce identical region hashes, on and off chunk boundaries (§4.11.7) |
+| `Field.Shape` | The generated world has the GDD's hill, cliff and basin, and the open plain never rises above world Z = 0 |
+| `Field.Strata` | Strata are ordered by depth; the ore body exists, is finite, and never breaks the surface |
+| `Field.Range` | `SampleRange` never excludes a value `Sample` can produce (AR-6), and saturates for sky and deep rock |
+| `Field.Determinism` | Two fields with one seed agree bitwise; a field does not drift as it is used; a different seed changes the world |
 | `Journal.RoundTrip` | Write N records, reopen, read N identical |
 | `Journal.TornTail` | Truncate mid-record → loader recovers N−1 and reports the truncation |
 | `Journal.BadCrc` | A flipped byte is detected, not loaded |
@@ -903,7 +1404,7 @@ Run against `FMemoryTerrainBackend`. Seconds, on every build.
 | `Yield.MaxVolume` | A maximum-permitted single-material edit does not overflow the yield field |
 | `Migration.Fixtures` | Every fixture in `Tests/Saves/` loads and produces its expected region hash |
 | `Query.Point` | `QueryPoint` returns the material and density sign the region was written with, at chunk interiors and at all eight chunk corners; reports `bResident` false outside loaded regions; never returns a stale sample after `ApplyOp` or `WriteRegion` |
-| `Backend.Conformance` | A shared suite run against **both** `FMemoryTerrainBackend` and `FVPLegacyBackend`, covering all eleven methods, `QueryPoint` included. Any future backend must pass it. **This is the operational meaning of "replaceable"** |
+| `Backend.Conformance` | A shared suite run against **both** `FMemoryTerrainBackend` and `FVPLegacyBackend`, covering all eleven methods, `QueryPoint` included, plus: off-game-thread calls are refused (§4.5.1); the state machine rejects with the right reason per state; a failed `ApplyOp` leaves the region hash unchanged (§4.11.6). It asserts the **contract**, never equality of densities between two backends (§4.10.4c). Any future backend must pass it. **This is the operational meaning of "replaceable"** |
 
 **Test identifiers are prefixed `TerrainCore.` in code.** `Automation RunTests` does a
 substring match (`AutomationCommandline.cpp`), so the bare names in this table match
@@ -1052,15 +1553,20 @@ an unresolved defect or unruled fork is bound to it.**
 | 0 | Create the `VoxelWorld` and `TerrainCore` C++ modules with one empty subsystem | **The project builds from source for the first time.** Nothing else changes | K7, K8 |
 | 1 | `FTerrainOp`, chunk keys, `ITerrainBackend`, `FMemoryTerrainBackend`, `UTerrainService` skeleton | Codec, quantisation and revision tests pass, headless | — |
 | 2 | `FVPLegacyBackend` + `UTerrainStreamingComponent`; **rewire the T-101A Blueprint to `RequestEdit` and delete the direct plugin calls** | Digging works as today, through the service, server-authoritative in standalone | — |
-| 3 | Server validation, serialised execution, `ClientApplyOp`, subscription set | 3-client PIE convergence | K1, K4; DEF-4, DEF-5, DEF-7 |
+| 3 | Server validation, serialised execution, `ClientApplyOp`, subscription set | 3-client PIE convergence | K1, K4 (ruled D-024); **DEF-4, DEF-5, DEF-7 — all resolved at T-114. Step 3 is UNBLOCKED** |
 | 4 | Journal + snapshot + compaction + boot replay | Restart identity, crash matrix, save growth | K2, K3, K5, K10; DEF-1, DEF-2, DEF-9 |
 | 5 | JIP protocol, fragmentation, resync | Join-in-progress with measured bytes | DEF-3 |
 | 6 | Yield pipeline + material config + inventory settlement | Volume accuracy, mixed geology | K9; DEF-6 |
 | 7 | Collision-readiness policy, movement-base experiment | Standing-on-edit, spawn-into-excavation | DEF-8 |
-| 8 | C++ `ITerrainDensityField` with strata and ore bodies (T-108), forwarded through the adapter generator | The test hill generates instead of being sculpted by script | R-008 |
+| 8 | C++ `ITerrainDensityField` with strata and ore bodies (T-108), forwarded through the adapter generator | The test hill generates instead of being sculpted by script | R-008 (a risk, not a defect — §14's rule never bound this step) — **DONE 2026-09-07** |
 
 Steps 3–7 map one-to-one onto the T-101B sub-steps. The architecture is built by running the
 gate, not before it.
+
+**Steps are not required to run in order.** §14's rule is about *defects*, not about sequence:
+a step may start as soon as nothing unresolved is bound to it. Step 8 was taken out of order at
+T-108 for exactly that reason — steps 3–7 were blocked by DEF-4, DEF-5 and DEF-7 while step 8 was
+bound only to a risk, and step 8 was the one that moved the Phase 1 milestone.
 
 **Step 2 closes both flagged drift checks in standalone only.** Server-authority is not proven
 until the multiplayer route is exercised at step 3. Record the narrower result at each step.
@@ -1137,10 +1643,10 @@ it.** Closing a defect requires a written resolution in this document plus its n
 | **DEF-1** | **The commit protocol is not cross-store safe.** Crediting inventory before the journal record is durable leaves ore with no hole; the reverse leaves a hole with no ore, recoverable only while the record is retained. A watermark cannot reconstruct a missing record. Requires: the durable commit point, ack semantics, ordering of every terrain and entity effect, restart reconciliation, retention consumers, disk-error behaviour. Evidence: crash injection before and after every write, flush, entity transaction, ack and segment deletion, including transfer/spend after mining | 4 | **Open** — K5 |
 | **DEF-2** | **Snapshot data and revision metadata have no atomic publication point.** A capture can observe post-edit data before the metadata commit and label it with the preceding revision; replay then applies an op already baked in. Overwriting a snapshot leaves no previous recoverable generation. Requires: a consistent capture boundary, crash-safe publication, the source of truth for the next global sequence, behaviour when mutation succeeds but persistence fails | 4 | **Open** |
 | **DEF-3** | **Per-chunk JIP can replay an operation into a chunk that already contains it.** A multi-chunk op where one chunk's snapshot precedes it and another's includes it applies twice; arrival order changes the result. A global "already applied" flag is insufficient. Requires: application scope, read halos or a coordinated baseline set, duplicate handling, a finite sync cut, atomic sync/live handoff, stale-fragment discrimination, cancellation and backpressure | 5 | **Open** — partially mitigated by `SyncGeneration` (§4.8) |
-| **DEF-4** | **A serialised execution path does not establish plugin thread or lifetime safety.** Meshing, collision, world destruction and generator access remain concurrent. An external bounds lock may conflict with one the wrapper takes internally. Requires: a thread-affinity and ownership table covering init, mutation, reads, render invalidation, callbacks and destruction; the shutdown state machine; cancellation on `EndPlay`, travel and PIE exit | 3 | **Open** — K4, E-5 |
-| **DEF-5** | **Deterministic replay and operation semantics are underspecified.** Integer inputs remove one hazard but do not prove identical generator or kernel output across builds, platforms and backends. Flatten and Smooth are named without plane, strength, iteration or falloff semantics. `HashRegion` must be **position-sensitive**, or rearranged terrain hashes identically. Client results supply collision and are not cosmetic, so the client path cannot keep a nondeterministic mode the server drops. Requires: canonical semantics per operation including read bounds and rounding, version compatibility rules, golden fixtures | 3 | **Open** |
+| **DEF-4** | **A serialised execution path does not establish plugin thread or lifetime safety.** Meshing, collision, world destruction and generator access remain concurrent. An external bounds lock may conflict with one the wrapper takes internally. Requires: a thread-affinity and ownership table covering init, mutation, reads, render invalidation, callbacks and destruction; the shutdown state machine; cancellation on `EndPlay`, travel and PIE exit | 3 | **Resolved** (T-114, §4.5.1) — the affinity/ownership table, five rules, the four-state shutdown machine with its fixed eight-step teardown order, and the cancellation rule. The lock hazard is answered by holding **no** lock across the plugin boundary; cancellation is a queue operation because the path is synchronous and cannot be pre-empted. Evidence: `Backend.Conformance` (off-thread refusal, state-machine rejection reasons), `Adapter.Determinism`, `MP.*` under repeated travel. **The plugin's own internal thread safety stays unaudited — that is E-2/E-5, not this defect** |
+| **DEF-5** | **Deterministic replay and operation semantics are underspecified.** Integer inputs remove one hazard but do not prove identical generator or kernel output across builds, platforms and backends. Flatten and Smooth are named without plane, strength, iteration or falloff semantics. `HashRegion` must be **position-sensitive**, or rearranged terrain hashes identically. Client results supply collision and are not cosmetic, so the client path cannot keep a nondeterministic mode the server drops. Requires: canonical semantics per operation including read bounds and rounding, version compatibility rules, golden fixtures | 3 | **Resolved** (T-114, §4.10). Flatten and Smooth are **removed from the operation set** and permanently refused rather than given invented semantics. Write set, read bounds, rounding, per-op meaning, monotonicity and idempotence are canonical. Determinism is split into three claims and only two are made: cross-**backend** value identity is explicitly **out of scope**, because §8.1 gives the kernel to the plugin — which sharpens FM-9 rather than solving it. `HashRegion` rules fixed. Evidence: `Op.Semantics.Golden` (committed fixtures), `Op.Semantics.Contract`, `Adapter.Determinism` |
 | **DEF-6** | **Yield conservation and placement policy are unspecified.** Pre-edit material does not describe placed material; Smooth both removes and places; there is no material-debit rule for Add or Paint, so add-then-mine can mint resources. Requires: separate removal and placement accounting, placement cost, smoothing recovery, material conversion, capacity overflow, fractional residue. Evidence: mixed-material boundaries, Add/Paint/Remove cycles, repeated Smooth, split-vs-unsplit equivalence | 6 | **Open** — K9 |
-| **DEF-7** | **Admission validation has no commit-time revalidation, and partial failure is undefined.** Several admitted edits can pass the same remaining-resource check; a requester can move, lose permission or disconnect while queued. `bTruncated` and a boolean failure both imply possible partial mutation, which would permit unjournalled terrain. Requires: trusted request inputs, full quantised-footprint validation, request identity and retry dedup, resource reservation and revalidation, queue limits and fairness, the no-change-or-committed-result invariant, and explicit split-operation semantics | 3 | **Open** |
+| **DEF-7** | **Admission validation has no commit-time revalidation, and partial failure is undefined.** Several admitted edits can pass the same remaining-resource check; a requester can move, lose permission or disconnect while queued. `bTruncated` and a boolean failure both imply possible partial mutation, which would permit unjournalled terrain. Requires: trusted request inputs, full quantised-footprint validation, request identity and retry dedup, resource reservation and revalidation, queue limits and fairness, the no-change-or-committed-result invariant, and explicit split-operation semantics | 3 | **Resolved** (T-114, §4.11). Trusted-input split tabulated; validation runs on the **quantised** footprint; `(SourceId, RequestId)` identity with a 64-entry per-connection dedup ring; two-phase reserve-then-revalidate; bounded queue, round-robin across sources, no priority classes. `bTruncated` is **removed as a success signal** — a backend that would truncate must fail the whole op. **Only `Box` ops split**; an over-cap `Sphere` is rejected, because a sphere has no exact partition and the 58-byte wire has nowhere to put a clip box. Evidence: `Split.Equivalence`, `Backend.Conformance` |
 | **DEF-8** | **Collision safety protects only the requester.** Player B can edit beneath player A while satisfying clearance from B's own capsule — which is the design's own central multiplayer test. A machine has no capsule. `ChunkSyncComplete` establishes no collision-readiness revision, so a joining player can receive matching data while collision is absent. Requires: safety for every affected occupant, joining player and machine; distinct data, mesh and collision readiness states; movement gating into unsynchronised terrain | 7 | **Open** — E-4, E-9 |
 | **DEF-9** | **The save schema loses recovery information.** Pristine deletion would discard revision history; the naive retention minimum both over-retains for cold chunks and under-retains for economic consumers; `bIsGeneratorValue` reports provenance, not value or material equality; generator mismatch cannot generally recover from a compacted journal. Requires: dependency-aware reclamation, a recoverable migration protocol, and identification of authored stamps and catalog version sufficient to reproduce the ruled deterministic base | 4 | **Partially resolved** — yield field widened to signed `int64` µL; metadata preserved on payload deletion; framing and byte order made explicit (§4.2, §4.7). Retention and generator-mismatch recovery remain open |
 | **DEF-10** | **The streaming attachment was not backend-independent.** Gameplay attaching an adapter class re-creates the dependency the boundary forbids, in code or in the asset | 2 | **Resolved** — §4.3 and §7.4: `UTerrainStreamingComponent` lives in `TerrainCore`; the backend receives intent through `SetStreamingInterest`/`ClearStreamingInterest`. Ownership and teardown specified. The swap test in §10 exercises attachment, respawn and teardown |

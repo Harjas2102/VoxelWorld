@@ -39,6 +39,10 @@ namespace
 		case ETerrainEditRejection::TooLarge:          return TEXT("TooLarge");
 		case ETerrainEditRejection::RevisionExhausted: return TEXT("RevisionExhausted");
 		case ETerrainEditRejection::BackendFailed:     return TEXT("BackendFailed");
+		case ETerrainEditRejection::ShuttingDown:      return TEXT("ShuttingDown");
+		case ETerrainEditRejection::QueueFull:         return TEXT("QueueFull");
+		case ETerrainEditRejection::StaleRequest:      return TEXT("StaleRequest");
+		case ETerrainEditRejection::Revalidation:      return TEXT("Revalidation");
 		default:                                       return TEXT("Unknown");
 		}
 	}

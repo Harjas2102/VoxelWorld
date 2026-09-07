@@ -119,6 +119,16 @@ struct FTerrainEditResult
 	TArray<FTerrainMaterialVolume> Removed;        // physical material only
 	int64                          VoxelsTouched = 0;
 	int64                          VoxelsScanned = 0;  // read footprint, not write
+
+	/**
+	 * DEF-7 / ARCHITECTURE.md 4.11.6: NO LONGER A SUCCESS SIGNAL.
+	 *
+	 * The defect named it exactly - "bTruncated and a boolean failure both imply possible
+	 * partial mutation, which would permit unjournalled terrain". A backend that would have
+	 * truncated must instead FAIL THE WHOLE OP AND MUTATE NOTHING. The field stays here for
+	 * struct stability; it is false on every successful result, and a backend that sets it
+	 * true on success is non-conforming.
+	 */
 	bool                           bTruncated    = false;
 };
 

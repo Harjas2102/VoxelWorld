@@ -29,10 +29,18 @@
 
 ## Next safe actions (CP-012)
 
-> **Superseded in part by the T-108 breadcrumb below, which is later.** Item 3 is DONE — the
-> Director ran the by-hand dig and reported "Play solo worked... I can place and dig", so
-> build step 2 is closed. Do not ask him for it again. Item 4's reading still holds for step 3,
-> but step 8 (T-108) was clear to start and has been built; read that breadcrumb first.
+> **Largely superseded by the T-108 and T-114 breadcrumbs below, which are later. Read those
+> first.** Specifically:
+> - Item 3 is **DONE** — the Director ran the by-hand dig and reported "Play solo worked... I can
+>   place and dig", so build step 2 is closed. Do not ask him for it again.
+> - Item 4 is **OBSOLETE**. DEF-4, DEF-5 and DEF-7 were closed at T-114 and **build step 3 is
+>   unblocked.** Its instruction to open a proposal file for a Director ruling was also wrong
+>   under **D-023**: these are technical decisions, ruled and logged by the Architect. The
+>   Director restated that in the strongest terms on 2026-09-07 — do not send him a technical
+>   proposal.
+> - Item 7 is **DONE** — AR-5 confirmed at T-108, and AR-6 added there. Both want DECISIONS
+>   entries at the next checkpoint.
+> - Items 1, 2, 5 and 6 still hold.
 
 1. Read the required docs and this handoff. Verify the CP-012 commit, main/origin state and
    worktree; sync with `git pull --ff-only`.
@@ -62,6 +70,160 @@
    so.
 7. **AR-5 is awaiting confirmation.** It is one struct's two fields and is cheap to overrule
    while it stays that way.
+
+---
+
+## T-114 working breadcrumb (D-028) — DEF-4, DEF-5 and DEF-7 closed. Build step 3 is unblocked.
+
+- 2026-09-07, Claude, Implementer/Architect. Base `db4cb72` (T-108), clean on receipt.
+  **STATE / BACKLOG / DECISIONS / RISKS are still not updated** — AGENTS §1 reserves that for
+  the word "checkpoint". ARCHITECTURE.md *is* updated, because §14 says a defect closes with
+  "a written resolution **in this document**".
+- Director instruction for this increment was one word: **"Ok proceed."** Under D-023 these are
+  technical decisions, so they are ruled and logged here, not sent to him. He gets one line.
+- **This increment writes the SPECIFICATION and its headless evidence. It does not implement
+  build step 3.** Server validation, `ServerRequestEdit`/`ClientApplyOp`, the subscription set,
+  the queue, the dedup ring and split ops are the next increment and are a large one.
+
+### What was blocking, and what changed
+
+§9 bound step 3 to K1, K4, DEF-4, DEF-5 and DEF-7. K1 and K4 were ruled at CP-005 (D-024); the
+three defects were open, and §14 forbids starting a step while a defect is bound to it. All
+three now read **Resolved** in §14 with their resolution sections named.
+
+### DEF-4 → §4.5.1 Thread affinity, ownership, shutdown and cancellation
+
+- An affinity/ownership table over init, mutation, reads, invalidation, callbacks, destruction.
+- **Five rules.** The whole `ITerrainBackend` surface is game-thread only — no read/write split,
+  because a read that races a mesher's internal write is the same defect as a write that does.
+  `ITerrainDensityField` is the single any-thread exception and is safe by construction.
+  **No lock of ours is ever held across a call into the plugin** — that is the answer to the
+  defect's "an external bounds lock may conflict with one the wrapper takes internally": not a
+  better lock order, no lock at all. No `UObject` outside the service owns an in-flight op. The
+  density field outlives the backend.
+- **A four-state machine** — Uninitialised / Ready / Draining / TornDown — with a fixed
+  eight-step teardown order. The pending queue is **discarded, not drained**: a queued op has no
+  `OpSeq`, no journal record and no broadcast, so discarding it is exactly the *no-change* half
+  of the DEF-7 invariant.
+- **Cancellation is a queue operation, not a plugin operation.** `ApplyOp` is synchronous on the
+  game thread and cannot be pre-empted by `EndPlay`, travel or PIE exit — all of which are
+  themselves game-thread events — so no op is ever partially applied at teardown. We register no
+  completion callback that can outlive the service, and we never wait on plugin async work,
+  because waiting on the game thread for a worker that wants the game thread is the deadlock the
+  rule exists to prevent.
+- **Explicitly still open and handed on:** the plugin's own internal thread safety (E-2/E-5),
+  collision readiness (DEF-8), durability ordering (DEF-1).
+
+### DEF-5 → §4.10 Operation semantics and determinism
+
+- **The operation set is CLOSED at Remove, Add, Paint. `Flatten` and `Smooth` are removed from
+  it** and permanently refused, rather than being given invented semantics. The defect's
+  complaint was that they were "named without plane, strength, iteration or falloff semantics";
+  the answer is to stop naming them. The enumerators stay because the 58-byte wire is permanent.
+- **Canonical geometry.** Write set `W = { v : |v-C|² <= r² }` in double with `<=` and **no
+  epsilon**; `r = RadiusVoxQ16/65536` is exact on any IEEE platform. Read bounds
+  `B = [C-floor(r), C+floor(r)+1)`, which contains `W` with no slack. Nothing outside `W` may
+  change. Rounding is `TerrainQuantise.h`'s existing floor rule, unchanged.
+- **Per-op meaning** plus two required properties: **monotonicity** (a Remove can never create
+  solid rock, which is what lets a clearance check survive the op it validated) and
+  **idempotence** (which is what makes DEF-3's duplicate JIP application survivable rather than
+  corrupting — and the second, independent reason Smooth is not in the set).
+- **Determinism split into three claims, and only two are made.** (a) same backend/build:
+  required. (b) same backend, different build or platform: required, **with the kernel's own
+  floating point named as the residual risk** rather than papered over. (c) **cross-backend value
+  identity: explicitly OUT OF SCOPE**, because §8.1 gives "sphere/box edit kernels" to the plugin
+  while giving "what Remove/Add/Paint mean" to the game — those two are consistent only if the
+  game specifies properties and the backend supplies values.
+- **That has a real consequence and it is written down: a backend swap is a resample migration
+  for every EDITED chunk, not a format-compatible reload.** FM-9 previously flagged only voxel
+  size and grid alignment. Pristine chunks regenerate and are unaffected. `Backend.Conformance`
+  accordingly asserts the contract and **never** density equality between two backends — a
+  weaker claim than §10 could be read as making, and the honest one.
+- **`HashRegion` rules fixed** — position-sensitive, iteration-order-independent, values and
+  materials, zero for non-resident, comparable only within one backend and build.
+  `FMemoryTerrainBackend` already satisfied all four and is now named the reference.
+- **Version compatibility table**: ops are only ever replayed against the exact
+  (generator, backend, format) triple they were recorded under; anything else uses the payload
+  or regenerates. Recovering an edited chunk whose payload was compacted away stays **DEF-9**.
+
+### DEF-7 → §4.11 Admission, commit and split operations
+
+- **Trusted-input table.** What the client may supply, and what the server derives and never
+  reads from the request — `SourceId` from the connection, the quantised centre, the effective
+  radius, `MaterialId`, and reach recomputed from the **server's** pawn transform.
+- **Validation runs on the quantised footprint**, not on the float request. One voxel of
+  disagreement between "permitted" and "changed" is a permission bypass at the edge of every
+  protected zone in the game, and it is invisible until someone looks for it.
+- **Identity is `(SourceId, RequestId)`** with a 64-entry per-connection ring of resolved
+  receipts. A repeat returns the stored receipt and mutates nothing; an identity older than the
+  ring is rejected `StaleRequest` rather than executed. Reliable RPCs are re-sent across
+  reconnects, and without this a re-sent dig mines the same rock twice.
+- **Two-phase reserve-then-revalidate.** Admission reserves; commit re-runs every check
+  immediately before `ApplyOp`. Failure releases and rejects — **nothing has been mutated at that
+  point, so this is clean by construction and the design needs no rollback.**
+- **Bounded queue, twice** (global and per-source), round-robin across sources, FIFO within one,
+  **no priority classes** — a priority class is a starvation bug that only shows up under the
+  load you cannot reproduce.
+- **The no-change-or-committed invariant, tabulated.** Two consequences, both changes to what the
+  document previously allowed: **`bTruncated` is removed as a success signal** (a backend that
+  would truncate must fail the whole op), and **`ApplyOp` returning false means nothing changed**,
+  not "something may have changed". The adapter reaches that by pre-validating the whole
+  footprint; that rests on an assumption about the plugin kernel, which is **stated in §4.11.6
+  rather than buried**, and `Backend.Conformance` probes it.
+- **Only `Box` ops split. An over-cap `Sphere` is rejected `TooLarge`, never split.** A sphere
+  has no exact partition, and the 58-byte wire has nowhere to put the clip box a correct one
+  would need — so an approximate split would make the same request produce different terrain
+  depending on whether it crossed a cap, which is a determinism bug wearing a performance
+  feature's clothes. A transaction is **not atomic across sub-ops**, and that is stated rather
+  than assumed because the alternative needs a durability protocol DEF-1 has not defined.
+- Four new `ETerrainEditRejection` values — `ShuttingDown`, `QueueFull`, `StaleRequest`,
+  `Revalidation` — each present because a client that cannot tell it from its neighbour will do
+  the wrong thing with it.
+
+### Code written this increment
+
+| File | What |
+|---|---|
+| `Private/Tests/TerrainOpSemanticsTest.cpp` (new) | `Op.Semantics.Contract` and `Op.Semantics.Golden` — the DEF-5 evidence |
+| `Public/TerrainService.h` | The four DEF-7 rejection reasons; `ETerrainEditKind` doc corrected now that DEF-5 is closed |
+| `Private/TerrainService.cpp` | Their names in the log switch |
+| `Public/TerrainTypes.h` | `bTruncated` marked as no longer a success signal (§4.11.6) |
+
+**`Op.Semantics.Golden` deserves one note.** Its seven expected hashes were recorded once, from
+the run that first produced them, and the test says in its own error text that a failure is never
+fixed by updating the number. Two of the seven are load-bearing on their own: step 2 (a repeated
+op) equals step 1, and step 6 (a refused op) equals step 5 — so idempotence and the
+no-change-on-failure rule are pinned by the fixture as well as by the contract test.
+
+### Verification
+
+| Check | Result |
+|---|---|
+| `VoxelWorldEditor` / `VoxelWorld` builds | Both `Result: Succeeded` |
+| TerrainCore automation | **Thirteen** tests, all `Result={Success}`, `EXIT CODE: 0`. The eleven from T-108 plus `Op.Semantics.Contract` and `Op.Semantics.Golden` |
+
+One assertion had to be corrected while writing, and the correction is the interesting part: the
+straddle test asserted 8 affected chunks and got 7, because an earlier op in the same fixture had
+already emptied the chunk-0 side of that sphere and `AffectedChunks` reports chunks that actually
+**changed**. The backend was right. The test now runs that block on its own backend so it
+measures the contract rather than test ordering.
+
+### What is NOT done
+
+- **Build step 3 itself.** Nothing here implements validation, replication, the queue, dedup,
+  reservations or splitting. §4.11 and §4.5.1 are the specification those will be built to, and
+  the §6.1 tests they name (`Split.Equivalence`, the new `Backend.Conformance` clauses) do not
+  exist yet.
+- **DEF-1, DEF-2, DEF-3, DEF-6, DEF-8 remain open**; DEF-9 partially resolved. Steps 4–7 stay
+  blocked by them.
+- **R-013 unchanged** — the production adapter still has not passed `Backend.Conformance`, and
+  §4.10.4(c) now explains why that suite can never mean "writes the same densities as the
+  reference": it means "obeys the contract".
+
+### Next safe action
+
+`checkpoint`, then build step 3 as its own increment. It is the largest single piece of work in
+the phase and should not be started at the tail of another one.
 
 ---
 
