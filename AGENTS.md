@@ -1,7 +1,8 @@
 # AGENTS.md — Project Constitution
 
 **Project:** realistic smooth-terrain open-world multiplayer survival/industrial game,
-UE 5.7. Codename `VoxelWorld` (D-015: the codename is not the identity).
+UE 5.8 (5.7 through T-112; upgraded at T-112.5 under D-025). Codename `VoxelWorld`
+(D-015: the codename is not the identity).
 
 This file is vendor-neutral and authoritative. Any model, from any vendor, in any tool,
 obeys it. Tool-specific adapters (`CLAUDE.md`, a Codex instruction file, etc.) add
@@ -155,6 +156,13 @@ Flag and request a decision entry before proceeding if requested work contradict
 - 100+ player features
 - commercial features
 - **direct plugin calls from gameplay code** (violates D-011)
+- **Unreal MCP reaching a game target** (violates D-025). Unreal MCP is a dev-time
+  editor tool. It is never referenced from `VoxelWorld` or `TerrainCore`, and
+  `IModelContextProtocolModule::StartServer()` is never called from any game target.
+  This is not a style rule: the `ModelContextProtocol` plugin ships **Runtime** modules,
+  so the only thing keeping them out of a shipped game is the `TargetAllowList` of
+  `["Editor"]` on both `ModelContextProtocol` and `AllToolsets` in `VoxelWorld.uproject`.
+  Do not remove it, and do not add either plugin to a `Build.cs` dependency list.
 
 ## 10. Escalation rule
 

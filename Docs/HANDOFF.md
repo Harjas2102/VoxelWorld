@@ -191,3 +191,45 @@ on a warm cache generated the world in 0.130s instead of 2.804s, with no hitch s
 and played correctly. Not a terrain defect and not caused by the upgrade, but it
 compounds the R-010/T-101B "no KillZ, no respawn volume" gap already on record: today
 the only recovery from a fall is to quit. Worth a KillZ before anyone plays for real.
+
+## T-112.5b — Unreal MCP adopted, editor-only
+
+Both plugins are engine plugins shipped with 5.8 at
+`Engine/Plugins/Experimental/ModelContextProtocol` and
+`Engine/Plugins/Experimental/Toolsets/AllToolsets`. Both are marked
+`IsExperimentalVersion: true` and `EnabledByDefault: false` by Epic.
+
+**The D-025 guard is load-bearing, not decorative.** `ModelContextProtocol.uplugin`
+declares **Runtime** modules (`ModelContextProtocol`, `ModelContextProtocolEngine`)
+alongside its Editor ones. Nothing about the plugin is inherently editor-only, so the
+`"TargetAllowList": ["Editor"]` on both entries in `VoxelWorld.uproject` is the only
+thing keeping them out of a game target. AGENTS §9 now says so explicitly.
+
+| Check | Result |
+|---|---|
+| `VoxelWorldEditor Win64 Development` with plugins enabled | `Result: Succeeded`, exit 0 |
+| `VoxelWorld Win64 Development` (game target) | `Result: Succeeded`, exit 0, 73.1s |
+| Guard proven from the build receipts | `VoxelWorldEditor.target` `BuildPlugins` (278) contains `ModelContextProtocol`, `AllToolsets`, `ToolsetRegistry` and 22 toolsets, with 70 matching build products. `VoxelWorld.target` `BuildPlugins` (234) contains **none of them** and **0** matching build products |
+| Five TerrainCore tests with MCP enabled | All `Result={Success}`, zero failures, `**** TEST COMPLETE. EXIT CODE: 0 ****` at 2026-09-07 02:18:39 UTC, process exit 0 |
+| `grep -ri "ModelContextProtocol\|StartServer\|AllToolsets" Source/` | **no hits** |
+| `.mcp.json` generated | `LogModelContextProtocol: Display: MCP client configuration written to: .../Dev/VoxelWorld/.mcp.json`. 114 bytes: one `unreal-mcp` http entry at `http://127.0.0.1:8000/mcp`. No token, no credential — safe to commit under AGENTS §8 |
+| MCP server live | Started with `ModelContextProtocol.StartServer`; port 8000 listening; a JSON-RPC `initialize` POST returned **HTTP 200** with `protocolVersion 2025-06-18` and a `tools.listChanged` capability. 52 toolsets registered as discoverable |
+
+**Auto Start Server is left OFF.** The server is started deliberately with
+`ModelContextProtocol.StartServer`. It binds loopback with **no authentication**, so an
+always-on server in an editor that is often merely open is not a default worth having.
+The Director can overrule this in Editor Preferences > General > Model Context Protocol.
+
+**Console-command gotcha for whoever automates this next.** `-ExecCmds` splits on
+commas, not semicolons, for this command: `-ExecCmds=... ClaudeCode; Quit` passes the
+client name as `ClaudeCode;` and the plugin answers
+`Unknown client "ClaudeCode;". Supported: ClaudeCode, Cursor, VSCode, Gemini, Codex, All`.
+With a comma the config generates, but the editor then never processes `Quit` and idles
+until killed. `Automation RunTests TerrainCore; Quit` still exits cleanly with the
+semicolon. Use the semicolon for automation runs and the comma for the config
+generation, and expect to kill the process after the latter.
+
+**Limits.** Unreal MCP is Epic-Experimental; its APIs and formats may change, which is a
+RISKS line against R-008 rather than a blocker for a dev-time tool. No gameplay, terrain,
+architecture or numbered decision changed. UE 5.8's Mesh Terrain was not evaluated; it
+stays a D-025 watch item with no evidence either way.
