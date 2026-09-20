@@ -5,8 +5,87 @@
 
 ---
 
-**Checkpoint:** CP-014 · **Date:** 2026-09-20
+**Checkpoint:** CP-015 · **Date:** 2026-09-20
 **Phase:** 1 — Terrain Feasibility
+
+## What happened at CP-015
+
+**The persistence format was independently verified, and the storage device it writes through
+exists.** Two increments, both following directly from what CP-014 said to do next.
+
+### T-118 — the R-016 review, and what it found
+
+CP-014 opened **R-016** because T-117 was written and reviewed by the same agent, and named
+the one experiment that would settle its byte-level half: reimplement the format from the
+document alone and compare against the pinned hashes. That was done first.
+
+An independent encoder was written in Python **from P-004's byte tables alone** — not
+translated from the C++ — in a disposable scratchpad venv with real BLAKE3 and XXH3, both
+checked against their published test vectors first. Nothing was installed into the machine's
+Python. It reproduced **16 of 16 pinned golden vectors exactly**.
+
+**The document and the code agree at the byte level.** That is the specific thing R-016 said
+was unproved, and it is now proved.
+
+The reimplementation only covered *encodings*, so the other direction was checked by reading,
+and that is where the real finding was:
+
+- **F-1 — P-004 understated its own format.** The decoders enforce reference-validity rules
+  the document never stated: nonzero `SegmentId` and `FirstOpSeq`, nonzero anchor segment
+  IDs, `PredecessorLastOpSeq == 0` when there is no predecessor, nonzero root-slot descriptor
+  references with an upper bound, an upper bound on `RootPageLength`, and nonzero index child
+  digests and lengths. **A decoder written from P-004 alone would have accepted objects this
+  one rejects**, and the more permissive implementation is the one that accepts a corrupt
+  world. Now stated in §§6.2, 7, 8, 9.1 and 9.5, with a new §1 rule 11 making it a standing
+  convention: a field rule a conforming decoder enforces belongs in the section that defines
+  the field, and anything not stated there is not a requirement a decoder may invent.
+- **F-2 — one condition, two error codes.** An over-cap SparseDiff sample count was
+  `FieldOutOfRange` on encode and `CapExceeded` on decode.
+
+Both fixed, both tested, neither moving a byte — the golden vectors are unchanged.
+
+### T-119 — the storage device seam
+
+P-003 §8 item 3's first half. `ITerrainStorageDevice` is the whole durable-write surface of
+the terrain store: **six mutating operations**, deliberately, because every one is a place a
+crash can happen and a smaller surface is a smaller crash matrix. With it come a real
+platform device, an in-memory one, a fault-injecting decorator that can **fail or tear** any
+chosen operation, the content-addressed `FTerrainFileObjectStore`, and `FTerrainSlotPair` —
+the publication primitive the whole store rests on.
+
+**Two findings came from reading the engine rather than assuming it, and the second would
+have shipped a bug that no testing here could have caught.**
+
+1. **`OverwriteInPlace` must not truncate.** `OpenWrite(bAppend=false)` truncates, which
+   would make a slot briefly zero-length — and a slot that can be *absent* breaks the one
+   property the two-slot protocol rests on. The device opens in append mode and seeks to zero.
+2. **`Flush()`'s default argument is wrong for this project.** Windows ignores `bFullFlush`
+   and always calls `FlushFileBuffers`. **Unix does not**: `Flush(false)` is `fdatasync`,
+   `Flush(true)` is `fsync`, and `fdatasync` makes no promise about **metadata** — including a
+   file's length. Every object write and every journal append extends a file, and D-002 makes
+   a Linux dedicated server the shipping target. A defaulted `Flush()` would have been correct
+   on this machine and silently wrong on the shipping one.
+
+Both are normative in P-004 §12 now, with the platform sources cited. The second broadened
+**R-007**, which had been about whether a Linux server *builds*; it is also about behaviour
+that is correct here and wrong there.
+
+Design properties worth knowing without reading the code: the object store verifies content
+addressing **on the way in and on the way out**, so a damaged file fails to load rather than
+returning bad bytes; and the slot pair publishes to the slot that is **not** current, so a
+torn publication can never damage the state the store would otherwise fall back to, and it
+refuses to publish at all before a read rather than guessing which slot is live.
+
+**Verified:** both targets build; **28 of 28** TerrainCore tests pass, exit 0. Four new cases,
+one of them against the real file system, because no-truncate and append-at-end are
+properties of `IPlatformFile` that a fake device would agree with itself about and never test.
+
+**One test-quality finding, recorded because it nearly passed for the wrong reason.** The
+first torn-slot fixture tore at byte 1000. A root slot body is 64 bytes of fields and 3,936
+zeroes, so both images are identical past byte 160 and the "tear" reproduced a perfectly valid
+slot — the test asserted nothing. It now tears at 104, leaving a slot whose **generation field
+says new while its content is old**, which is exactly the state that would fool a reader that
+trusted the generation without validating the checksum.
 
 ## What happened at CP-014
 
@@ -699,37 +778,59 @@ yield, and server authority is not proven until build step 3.
 
 ## Current task
 
-**Nothing is outstanding from CP-014.** Build steps 0, 1, 2, 3 and 8 are complete. Build
-step 4 has its architecture (P-003), its byte format (P-004) and its codecs; it does not have
-a storage owner, and therefore nothing is saved to disk yet.
+**Nothing is outstanding from CP-015.** Build steps 0, 1, 2, 3 and 8 are complete. Build
+step 4 now has its architecture (P-003), its byte format (P-004, independently verified), its
+codecs, and the storage device they write through. **Nothing is saved to disk yet**, because
+nothing above the device knows how to compose a world.
 
-**Next: build step 4 continued — the storage owner**, P-003 §8 item 3. It is R3 work.
+**Next: the journal writer and segment rotation**, on top of `ITerrainStorageDevice`. In order:
 
-- **Before writing it, get the independent review this checkpoint did not have.** T-117 was
-  written and reviewed by the same agent on the Director's instruction (D-033 §5), and R-016
-  tracks that as a real weakening of the evidence for an R3 subsystem. The cheapest strong
-  check is a cross-vendor pass over P-004 and `893a029` that **reimplements two or three
-  objects from the document alone** and compares them against the 16 pinned golden hashes:
-  that is the only thing that proves the document and the code agree, since one author wrote
-  both.
-- **Then the storage owner itself**: pre-created root and anchor slots, segment files, the
-  content-addressed object store behind `ITerrainObjectStore`, and the publication ordering
-  in P-004 §9.5 and §12. Fault injection at every write, flush and rename before it carries a
-  single real edit.
-- **Then the commit path** with a `NoEconomy` consumer, then the crash matrix. Do not start
-  settlement or SQLite before the storage owner has its own fault-injection coverage.
+1. **The journal writer** — create a segment (header object written and flushed before any
+   record is appended), append framed commit records, seal, and rotate in P-004 §9.5's exact
+   order: new segment header and namespace → publish and flush the **inactive** anchor →
+   append. The scanner that reads all of this already exists and is tested; this is its writer.
+2. **The world store** — create (base descriptor, both root slots, both anchor slots, the
+   empty G=0 checkpoint, the first segment) and open (validate, select the highest valid
+   generation, refuse on identity mismatch).
+3. **Then, and only then, the commit path** with a `NoEconomy` consumer, and the crash matrix
+   built on `FTerrainFaultDevice`. Do not start settlement or SQLite before the storage owner
+   has its own fault-injection coverage across every write, flush and rotation.
 
 **Incoming Implementer: either** Claude or Codex by availability (D-028). Read `HANDOFF.md`
-first. If the next agent is Claude, the review above must be Codex's.
+first.
 
 **Also open, and unassigned:** **R-013** — the production adapter still has not passed
 `Backend.Conformance`, and the §6.2 in-engine harness that would run it does not exist.
-**R-010's KillZ** remains a prerequisite for anyone actually playing. **R-014** is the
-cross-platform kernel-determinism watch item; note that P-004 removed floating point from the
-save format, which shrinks R-014's blast radius but does not close it. **R-015** is the
-unproved Windows durable-publication question, and it gates step 4 integration specifically.
-**R-016** is the single-agent-review exposure above. None is step 4's job unless the Director
-says so.
+**R-010's KillZ** remains a prerequisite for anyone actually playing. **R-014** is
+cross-platform kernel determinism. **R-015** is the unproved Windows durable-publication
+question and gates step-4 integration. **R-007 is now broader than it was** and is the one
+worth reading before the next increment: the Flush finding proves that correct-here,
+wrong-there behaviour is real, undetectable from this machine, and was caught by reading
+rather than by any test. **R-016** is reduced to a design read.
+
+## Drift checks (VISION.md, run at CP-015)
+
+**NO FLAG MOVED, and one is worth restating rather than ticking.**
+
+- [x] **Every gameplay system is server-authoritative — CLEARED at CP-014 and untouched.**
+      Nothing at CP-015 is on the edit path at all.
+- [x] **The terrain backend remains replaceable — CLEARED, limit unchanged.** T-119 added a
+      file-handle dependency to `TerrainCore`, and it is behind `ITerrainStorageDevice`:
+      `IPlatformFile` is an **engine** interface, not a plugin one, `Build.cs` is unchanged,
+      and the codec headers do not include the device. R-013's limit is untouched.
+- [x] **The world is malleable and persistent — STILL HALF TRUE, and this is the checkpoint
+      to say so plainly.** CP-015 built the thing that will write to disk and wrote nothing to
+      disk. Pillar 1 says *"The server remembers everything at next login"*; it still does not.
+      Two checkpoints have now passed with that sentence false, which is fine while the work
+      is real and would not be fine if it became the normal state of the project.
+- [x] **Voxels are still invisible to the player (D-015).** Nothing at CP-015 is player facing.
+- [x] Terrain is smooth-voxel and player-deformable · tech path still leads to electricity ·
+      one planet, 16–32 players · incremental, Minecraft-alpha style · the same five
+      inspiration games.
+
+**What would re-flag these.** Any gameplay code or asset that calls the plugin again; any edit
+path that bypasses `RequestEdit`; a `Build.cs` gaining a plugin dependency; a client applying
+an edit it was not told about; or persistence storing an engine or plugin type.
 
 ## Drift checks (VISION.md, run at CP-014)
 
@@ -818,6 +919,21 @@ reference at all**. Every terrain change now enters through `UTerrainService::Re
 edit path that bypasses `RequestEdit`; a `Build.cs` gaining a plugin dependency; or a client
 being allowed to apply an edit it was not told about by the server.
 
+## R-012 check (process weight, run at CP-015)
+
+**PASS.** Cost to the Director across CP-015: the single word *"Begin"*, and then
+*"checkpoint"*. No process task, gate or document was created that he has to maintain, and no
+decision was escalated.
+
+**What the merged-role arrangement bought and cost, measured this time.** It bought two
+increments from one word. The cost is visible in T-118: the review that CP-014 said was owed
+was run by the same agent that wrote the work, and although it produced a real finding — the
+document understating its own format — a second vendor reading the *design* would still be
+a different kind of check. R-016 is reduced rather than closed for exactly that reason.
+
+**One thing this checkpoint did better than CP-014:** the window was two increments rather
+than three, and nothing in the records had gone stale between them.
+
 ## R-012 check (process weight, run at CP-014)
 
 **PASS, and the shape of the process changed.** Cost to the Director across the whole CP-014
@@ -874,13 +990,13 @@ None.
 | Director | Harjas |
 | Implementer | Alternating Claude/Codex (D-028); outgoing Claude, either agent next |
 | Architect | The acting Implementer, per D-033 §5: the Director merged the roles and rules technical decisions by D-023. Record each ruling; escalate only what a player would notice |
-| Independent reviewer | **Owed.** D-033 §5 lifted the separation for T-117 only. The next agent should be the vendor that did not write T-117, and P-004 plus `893a029` is the first thing to review (R-016) |
+| Independent reviewer | **Partly discharged at T-118.** The byte-level half was settled objectively by an independent reimplementation (16/16 vectors). What remains owed is a **design** read of P-004 by the vendor that did not write it — a judgement no reimplementation can make (R-016) |
 
 ## Toolchain status
 
 | Tool | Status |
 |---|---|
-| **UE 5.8** | ✅ **5.8.2** at `C:\Program Files\Epic Games\UE_5.8` — the build/test engine since T-112.5 (D-025). Editor and game targets both build; **24** TerrainCore tests green at CP-014 |
+| **UE 5.8** | ✅ **5.8.2** at `C:\Program Files\Epic Games\UE_5.8` — the build/test engine since T-112.5 (D-025). Editor and game targets both build; **28** TerrainCore tests green at CP-015 |
 | UE 5.7 | ✅ 5.7.4 at `C:\Program Files\Epic Games\UE_5.7` — **kept deliberately** as the T-112.5 rollback path (D-030). Not the build engine |
 | Git + LFS | ✅ git-lfs 3.7.1, push credentials verified |
 | Claude Code | ✅ Installed, verified in-repo |

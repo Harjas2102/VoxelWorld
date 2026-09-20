@@ -88,9 +88,10 @@ deliberately removing arbitrary terrain manipulation from Pillar 1).
   same-region test. — ✅ **DONE (CP-014, T-115)**
 - **1C** — Material field; soil/stone/ore query; **resource yield from removed material**.
 - **1D** — Persistence journal, snapshot + compaction prototype, restart test.
-  *(CP-014: architecture adopted (T-116), byte format fixed and codecs built (T-117). The
-  storage owner, commit path, capture pump, settlement and recovery are NOT built, and no
-  edit survives a restart yet. DEF-1/2/9 stay open.)*
+  *(CP-015: architecture adopted (T-116), byte format fixed and independently verified
+  (T-117, T-118), codecs and the storage device built (T-117, T-119). The journal writer,
+  world store, commit path, capture pump, settlement and recovery are NOT built, nothing is
+  written to disk, and no edit survives a restart. DEF-1/2/9 stay open.)*
 - **1E** — Join-in-progress, chunk relevancy, compression/batching only as needed.
 - **1F** — Stress profile, collision, foliage, nav, streaming → **decide the backend**.
 
@@ -219,6 +220,44 @@ T-101B sub-step 1D, which requires the multiplayer-capable version instead.
 
 ## Done
 
+- **T-119** *(CP-015)* **The storage device seam, the object store and the slot pair.**
+  `ITerrainStorageDevice` — six mutating operations, because every one is a place a crash can
+  happen and a smaller surface is a smaller crash matrix — with a real platform device, an
+  in-memory one, a fault-injecting decorator that can **fail or tear** any chosen operation,
+  the content-addressed `FTerrainFileObjectStore` and `FTerrainSlotPair`.
+  **Two findings from reading the engine rather than assuming it.** `OverwriteInPlace` must
+  not truncate, because a slot that can be briefly *absent* breaks the two-slot protocol. And
+  `Flush()`'s default argument is wrong here: Windows ignores `bFullFlush`, Unix does not —
+  `fdatasync` versus `fsync` — and `fdatasync` makes no promise about metadata including a
+  file's length, which every object write and journal append changes. Correct on this machine,
+  silently wrong on the Linux shipping target (D-002). Both normative in P-004 §12; rulings in
+  **D-034**; **R-007 broadened**.
+  Design: content addressing is verified on the way **in and out**, so a damaged file fails to
+  load rather than returning bad bytes; the slot pair publishes to the slot that is **not**
+  current, so a torn publication cannot damage the fallback state, and refuses to publish
+  before a read rather than guessing which slot is live.
+  Verified: both targets build; **28 of 28** tests pass, exit 0. Four new cases —
+  `Storage.Paths`, `Storage.ObjectStore`, `Storage.SlotPair`, `Storage.PlatformDevice` — the
+  last against the real file system, because no-truncate and append-at-end are properties of
+  `IPlatformFile` that a fake device would agree with itself about.
+  **Nothing is written to disk by the game yet**: no journal writer, no world store, no commit
+  path, no recovery, no retention.
+- **T-118** *(CP-015)* **The R-016 review: P-004 understated its own format.**
+  CP-014's owed review, run first. An independent encoder written in Python **from P-004's
+  byte tables alone** — in a disposable venv with real BLAKE3 and XXH3, both checked against
+  published test vectors, nothing installed into the machine's Python — reproduced **16 of 16
+  pinned golden vectors exactly**. The document and the code agree at the byte level, which
+  is what R-016 said was unproved.
+  **F-1:** the decoders enforced reference-validity rules the document never stated — nonzero
+  segment and anchor IDs, `PredecessorLastOpSeq == 0` without a predecessor, nonzero root-slot
+  descriptor references with bounds, an upper bound on `RootPageLength`, nonzero index child
+  digests and lengths. **A decoder written from P-004 alone would have accepted objects this
+  one rejects**, and the more permissive implementation is the one that accepts a corrupt
+  world. Now stated in §§6.2, 7, 8, 9.1, 9.5, with **P-004 §1 rule 11** as the standing
+  convention (D-034 §3). **F-2:** one condition reported under two error codes.
+  Both fixed and tested; the golden vectors are unchanged because neither moved a byte.
+  **R-016 reduced, not closed:** the reimplementation covered encoders, not a decoder, the
+  path-copy index algorithm or the scanner — and no reimplementation reviews a *design*.
 - **T-117** *(CP-014)* **P-004: schema 2 is fixed, and its codecs exist.**
   The exact-format packet P-003 §8 required before any codec. Every byte offset, width, cap,
   ordering rule, checksum and digest; the canonical intent and record digests; journal

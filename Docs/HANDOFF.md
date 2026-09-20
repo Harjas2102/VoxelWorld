@@ -1,6 +1,6 @@
 → No action. For your reading only.
 
-# HANDOFF.md — CP-014 taken, R-016 review run, storage device seam built
+# HANDOFF.md — CP-015 taken; next is the journal writer
 
 ## Identity, authority and Git state
 
@@ -15,11 +15,13 @@
   of it is recorded under "Limits" below.
 - Received at **`b9104c0`**, branch `main`, clean tree; `git pull --ff-only` already up to
   date. Runtime base for T-117 was `893a029`.
-- **CP-014 was then taken on the Director's word.** It covers three increments that had run
-  without one: **T-115** (build step 3, `21e3a2c`), **T-116** (P-003 adopted, `b9104c0`) and
-  **T-117** (P-004 and its codecs, `893a029`). STATE, BACKLOG, DECISIONS and RISKS are all
-  current as of CP-014; rulings are in **D-033**; new risks are **R-015** and **R-016**.
-  `STATE.md`'s inventory had been wrong since CP-012 and was rewritten.
+- **CP-014** covered three increments that had run without a checkpoint: **T-115** (build
+  step 3, `21e3a2c`), **T-116** (P-003 adopted, `b9104c0`) and **T-117** (P-004 and its
+  codecs, `893a029`). Rulings in **D-033**; risks **R-015** and **R-016** opened.
+- **CP-015 is this one**, at `30105b5`, covering **T-118** (the R-016 review, `af67b6f`) and
+  **T-119** (the storage device seam, `30105b5`). Rulings in **D-034**; **R-007 broadened**
+  by a confirmed platform-divergence instance; **R-015** gains its containment evidence;
+  **R-016** reduced to a design read. STATE, BACKLOG, DECISIONS and RISKS are current.
 - Changed by T-117: P-004 (new), ARCHITECTURE §4.7 and §6.1, seven new TerrainCore source
   files, three new test files and one test fixture header, plus two one-line renames in
   existing files (see "Two pre-existing defects", below). Changed by the checkpoint: STATE,
@@ -281,10 +283,10 @@ that mattered.
 
 1. Read P-004, then this handoff's "Decisions" and "Limits". Verify the enclosing commit,
    branch and worktree; `git pull --ff-only` on a clean tree.
-2. **The highest-value next step is the independent review that Limit 4 and 5 name**, now
-   tracked as **R-016** — an outside pass over P-004 and `893a029`, ideally including a
-   from-the-document reimplementation of two or three objects checked against the pinned
-   hashes. If the next agent is Claude, this review is Codex's.
+2. **The byte-level review is done** (T-118, 16/16 vectors reproduced from the document
+   alone). What remains owed under R-016 is a **design** read of P-004 by the vendor that did
+   not write it — a judgement no reimplementation can make. It is not a blocker for the work
+   below; it is a thing the Director may want before this format carries a real world.
 3. Then P-003 §8 item 3, in this order: the **storage owner** (pre-created slots, segment
    files, content-addressed object store behind `ITerrainObjectStore`, and the ordering
    rules in P-004 §9.5 and §12), then the commit path with a `NoEconomy` consumer, then the
@@ -292,5 +294,5 @@ that mattered.
    fault-injection coverage.
 4. Keep DEF-1/2/9 open until their named evidence exists. Materials, real economy (DEF-6),
    client JIP (step 5) and collision readiness (step 7) remain separately gated.
-5. **CP-014 is done.** Do not re-record T-115/T-116/T-117; they are in the Done log. The
-   next checkpoint is CP-015 and it should cover the storage owner.
+5. **CP-015 is done.** Do not re-record T-115 through T-119; they are in the Done log. The
+   next checkpoint is CP-016 and it should cover the journal writer and the world store.

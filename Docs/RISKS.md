@@ -108,15 +108,33 @@ Severity / probability scale: **High · Medium · Low**.
 - **Result:** *open*
 - **Decision:** *open*
 
-## R-007 — Dedicated-server / plugin compatibility
+## R-007 — Dedicated-server / plugin compatibility, and platform divergence generally
 
 - **Severity:** High — D-002 makes a Linux dedicated server the shipping target.
 - **Probability:** Medium — the plugin declares Win64/Linux/Mac module support, but a
   server build has never been attempted and the shipped binaries are editor DLLs.
-- **Mitigation experiment:** Confirm the architecture never requires client-only plugin
-  behaviour; attempt a server target build at Phase 4 (T-302 successor).
+- **CP-015 — this risk is broader than "will it build", and there is now a confirmed
+  instance.** T-119 found that `IFileHandle::Flush(bool bFullFlush = false)` means different
+  things on the two target platforms: Windows ignores the parameter and always calls
+  `FlushFileBuffers`, while Unix maps `false` to `fdatasync` and `true` to `fsync`.
+  `fdatasync` makes no promise about **metadata**, and a file's length is metadata — which
+  every object write and every journal append changes. The defaulted call would have been
+  **correct on the development machine and silently wrong on the shipping one**, and because
+  the two calls are literally the same instruction on Windows, **no test runnable on this
+  machine could have found it**. It was caught by reading both platform implementations.
+  Fixed by D-034 §1 and normative in P-004 §12.
+  **What that changes about this risk:** the exposure is not only "the server build has never
+  been attempted". It is that an entire class of defect — correct here, wrong there — is
+  invisible from the only platform this project has ever run on, and the project has no
+  mechanism that would surface the next one.
+- **Mitigation experiment:** confirm the architecture never requires client-only plugin
+  behaviour; attempt a server target build at Phase 4 (T-302 successor). **Add:** run the
+  headless `TerrainCore` suite on Linux as soon as a server target builds at all. It needs no
+  renderer, no plugin and no editor, so it is the cheapest possible cross-platform signal and
+  it would have caught nothing this time — the Flush bug is a durability bug, not a
+  correctness one — which is itself worth knowing when deciding what evidence to trust.
 - **Owner / task:** T-101B (architecture check) → Phase 4 (build proof)
-- **Result:** *open*
+- **Result:** *open, and broadened at CP-015 by a confirmed instance.*
 - **Decision:** *open*
 
 ## R-008 — Plugin licensing and version risk
@@ -432,10 +450,17 @@ D-028 was written for. Keep writing the breadcrumb *before* the risky half, not 
 - **Why it costs little to be wrong about the mode.** No schema-2 field contains a path, so
   adopting P-003's preallocated-container fallback changes the object addressing map and not
   one stored byte.
+- **CP-015 — the mechanism that will test this now exists.** `FTerrainFaultDevice` can fail
+  **or tear** any single storage operation, and `FTerrainSlotPair` is already tested against a
+  torn publication: the damaged slot is rejected with `BodyChecksumMismatch`, the other slot
+  still holds the last acknowledged generation, and the retry repairs the damaged slot rather
+  than touching the good one. That is the *containment* half of P-004 §12's argument,
+  demonstrated rather than asserted. It is **not** the durability half: a fault injected in
+  process is not a power loss, and nothing here tests whether a directory entry survives one.
 - **Mitigation experiment:** the `Restart.CrashMatrix` fault injection of §6.2 extended to
   power-loss-class testing, or an explicit decision to adopt the container mode instead.
 - **Owner / task:** build step 4, before the storage owner carries a real edit.
-- **Result:** *open — argued and contained, not proved.*
+- **Result:** *open — containment now demonstrated, durability still unproved.*
 - **Decision:** *open*
 
 ## R-016 — R3 work reviewed by its own author

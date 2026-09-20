@@ -961,3 +961,73 @@ owner, commit path, capture pump, settlement, recovery and retention do not. **D
 and DEF-9 remain open** and none of P-003 §8's named evidence tests exists. Evidence for all
 three increments is in `HANDOFF.md` and in the commit messages for `21e3a2c`, `b9104c0` and
 `893a029`.
+
+---
+
+## D-034 — CP-015 rulings: durable-write protocol and a specification convention (2026-09-20)
+
+**Recorded:** CP-015 · **Class:** technical (per **D-023**) · **Architect rulings, logged
+not asked** · **Scope:** T-118, T-119 · **Status:** ACCEPTED
+
+### 1. Every durable write ends with `Flush(true)`
+
+**Context:** `IFileHandle::Flush(bool bFullFlush = false)` documents `false` as giving the
+operating system "more leeway about when the data actually gets written to disk". Reading both
+platform implementations shows they do not treat the parameter the same way:
+
+| Platform | `Flush(false)` | `Flush(true)` |
+|---|---|---|
+| Windows (`WindowsPlatformFile.cpp:933`) | `FlushFileBuffers` — the parameter is **ignored** | `FlushFileBuffers` |
+| Unix (`UnixPlatformFile.cpp:323`) | `fdatasync` | `fsync` |
+
+`fdatasync` synchronises data and makes no promise about **metadata**. A file's length is
+metadata, and **every object write and every journal append extends a file**.
+
+**Decision:** every durable write in the terrain store ends with `Flush(true)`, and a failed
+flush is an I/O error and never a success. `ITerrainStorageDevice` is the only place in the
+project that calls it.
+
+**Consequences:** the defaulted call would have been correct on the development machine and
+silently wrong on the Linux dedicated server that D-002 makes the shipping target — and no
+amount of testing on Windows would have found it, because on Windows the two calls are the
+same instruction. This is recorded as a decision rather than a code comment because the
+tempting simplification (`Flush()`, which reads fine and compiles fine) is wrong, and the next
+person to touch this file deserves to find out why before they make it.
+
+**It broadens R-007.** That risk was about whether a Linux server *builds*. It is also about
+behaviour that is correct here and wrong there, and this is the first confirmed instance.
+
+### 2. A slot is published by in-place overwrite that never truncates
+
+**Context:** `OpenWrite(bAppend = false)` truncates the file it opens.
+
+**Decision:** `OverwriteInPlace` opens in append mode and seeks to zero, and refuses a length
+mismatch rather than truncating to fit.
+
+**Consequences:** truncating would make a slot briefly zero-length, and the two-slot
+publication protocol rests on a slot being either old or new and **never absent**. A
+zero-length window converts a survivable torn write into a lost root.
+
+### 3. A field rule a decoder enforces is written down where the field is defined
+
+**Context:** T-118's independent reimplementation reproduced all sixteen golden vectors, which
+proved the byte tables were right and said nothing about validity. Reading the decoders against
+the document then showed they enforced a set of reference-validity rules P-004 never stated.
+
+**Decision:** P-004 §1 gains rule 11 — a field rule a conforming decoder enforces is written
+down in the section that defines the field, and anything not stated there is **not** a
+requirement a decoder may invent. The missing rules are now stated in §§6.2, 7, 8, 9.1 and 9.5.
+
+**Consequences:** a byte table alone is not a specification. Two implementations can agree on
+every offset and still disagree about which files are valid, and **the more permissive one is
+the one that accepts a corrupt world**. This is the concrete reason the format packet exists
+at all, and it was found by the review rather than by a test, because no test of a single
+implementation can find it.
+
+### 4. Status
+
+**Build step 4 remains incomplete.** The architecture, the byte format, the codecs and the
+storage device exist; the journal writer, segment rotation, anchor and checkpoint publication,
+world create/open, recovery and retention do not, and **nothing is written to disk**. DEF-1,
+DEF-2 and DEF-9 remain open. Evidence for both increments is in `HANDOFF.md` and in the commit
+messages for `af67b6f` and `30105b5`.
