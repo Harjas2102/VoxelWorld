@@ -1,75 +1,90 @@
 → No action. For your reading only.
 
-# HANDOFF.md - T-101B build step 3
+# HANDOFF.md - T-101B step 4 persistence proposal and review
 
-## Active continuation — 2026-09-19
+## Identity, authority and Git state
 
-- Director requested **"Commit and move to the next step"**. Committed and pushed
-  `52ccee9` (P-002/specification) and `21e3a2c` (step-3 implementation), `main -> main`.
-  Prior step-3 evidence below remains valid; the only code cleanup was a blank EOF line.
-- `9a8dd7b` reconciles the older lifecycle/fairness paragraphs with those already adopted
-  step-3 determinations; it is also pushed. No runtime behavior changed in that commit.
-- New runtime base: **`21e3a2c`**; incoming Git base is this enclosing draft-document commit.
-  Next task is the **R3 prerequisite design for build step 4**:
-  DEF-1/2/9 remain open. No save implementation has started and no checkpoint was requested.
-- Drafted `Docs/proposals/P-003-persistence-commit-and-recovery.md`: journal commit authority,
-  idempotent settlement, complete checkpoint manifests, fallback/retention and migration.
-  Exact byte-layout packet and platform durability verification remain required.
-  It is saved as a documentation-only draft with this handoff, not a completed or approved
-  persistence implementation. Checkpoint documents remain CP-013.
-- Cross-vendor review was attempted through the installed Claude CLI, Opus as OPERATIONS
-  specifies, restricted to Read/Glob/Grep with MCP disabled. It returned **401: API key
-  is invalid**; no review was produced and no approval is inferred. The process has exited.
-  The wrapper also hit a console-encoding error after saving the authentication result;
-  neither event changed source files. Evidence: `Saved/P003-review-output.txt`.
-- **Authentication correction:** the Director asked what action was needed. A read-only
-  check found an existing Claude subscription login and an inherited `ANTHROPIC_API_KEY`
-  overriding it. Removing that variable only from the reviewer child-process environment
-  produced `AUTH_OK`, exit 0. No machine/user setting or credential was changed; no
-  Director action is needed. The P-003 review completed with that environment, exit 0.
-- Independent findings are saved verbatim in `Docs/reviews/P-003-review-claude.md`.
-  **Verdict: not ready for adoption, B1-B6.** Findings concern durable request identity,
-  separate terrain/settlement recovery cursors, coherent entity-store restore and retention,
-  bounded checkpoint cost, explicit schema replacement, and broadcast/durability ordering.
-  These are reviewer findings to reconcile, not silently adopted new requirements.
-- **Next safe action:** revise P-003 against B1-B6 and its additional ambiguities, then
-  obtain independent re-review before adopting a format/storage implementation packet.
-  DEF-1/2/9 remain open; no save code or new dependency has been introduced. Authentication
-  is no longer a blocker, and no technical ruling is being requested from the Director.
-- Author audit added an explicit ban on snapshotting a provisional mutation during
-  storage-fault teardown. Ordinary shutdown compaction would otherwise risk publishing
-  data ahead of the durable journal. This addition still requires independent review.
-- Platform read evidence: installed UE 5.8 `WindowsPlatformFile.cpp:933` implements
-  `FFileHandleWindows::Flush` with `FlushFileBuffers`; `OpenWrite` at line 1638 returns
-  that handle. This verifies the file-content primitive, not the whole checkpoint
-  namespace/publication protocol. No fault-injection or power-loss test has run.
+- Updated **2026-09-20**. Outgoing **Codex**, implementation author and P-003 proposal
+  author; independent P-003 reviewer **Claude Opus**. Incoming **either**.
+  One active Implementer per workspace (D-028).
+- Director's latest request: **"commit, push, write the handoff"**. This wrap-up is
+  **R0 documentation/Git work**, limited to this handoff. No checkpoint was requested;
+  STATE, BACKLOG, DECISIONS and RISKS remain checkpoint records at **CP-013**.
+- Verified base: **`4c8c4269d30a026856735e90dfd7908f3be310f9`**, branch `main`.
+  Incoming worktree was clean; `git pull --ff-only` reported already up to date.
+  This handoff belongs to its enclosing documentation commit. Verify that commit and
+  worktree on receipt; no other uncommitted work was present during preparation.
+- Active continuation: **T-101B build step 4 prerequisite design, P-003**, **R3**.
+  The proposal is **not adopted**; DEF-1/2/9 remain open. No persistence implementation
+  or new dependency has been introduced. Step 3 implementation/data-convergence work
+  is committed; the full T-101B adoption gate is still open.
+- No implementation, test or reviewer process remains running. Authentication is resolved;
+  there is no pending Director action for sign-in. No technical ruling is requested by
+  this handoff. Follow the existing D-023/D-032 authority and review boundaries.
 
-## Identity, authority and worktree
+## Saved work and current blocker
 
-- Updated **2026-09-17**. Outgoing **Codex**, Implementer with explicit technical
-  delegation for P-002. Incoming **either**; one active Implementer (D-028).
-- Checkpoint remains **CP-013**. Base and current HEAD:
-  `e94767a152c9a17f9d569035aaad899bb49d16e0`, branch `main`.
-- Director confirmed the proposed next task with **"Start"**, then instructed
-  **"Make the best decision for P-002 yourself, and incorporate the proposed correction
-  and complete T-101B"**. Latest instruction: continue after usage ran out.
-- The active scope is **T-101B / architecture build step 3**, R2 implementation inside
-  the adopted R3 architecture, plus the explicitly delegated P-002 technical correction.
-  **Its implementation and data-convergence acceptance are complete in the worktree.**
-  The full multi-step T-101B adoption gate is NOT complete; see limitations below.
-- Director authorized **commit and move to the next step** on 2026-09-19. This handoff
-  belongs to the step-3 implementation commit. STATE, BACKLOG, DECISIONS and RISKS
-  remain checkpoint records; no checkpoint was requested.
-  On initial receipt the tree was clean and `git pull --ff-only` was already up to date.
-- No independent cross-vendor review is claimed. Author review found and corrected
-  issues below; the independent review/Director acceptance remains a merge boundary.
+| Commit | Saved result |
+|---|---|
+| `52ccee9` | P-002 representable box partitions and step-3 contracts |
+| `21e3a2c` | Step-3 authoritative edit replication and validation evidence |
+| `9a8dd7b` | Reconciled older lifetime/fairness text with adopted step-3 contracts |
+| `b1b93e4` | P-003 persistence commit/recovery proposal draft |
+| `4c8c426` | Independent P-003 review and authentication resolution |
 
-## Goal and completed implementation
+All five commits were pushed to `origin/main`. The runtime base remains `21e3a2c`.
+The evidence and file map below describe that runtime increment, not new work in this wrap-up.
+
+Read [P-003](proposals/P-003-persistence-commit-and-recovery.md) and its
+[independent review](reviews/P-003-review-claude.md) before continuing.
+
+- Proposal: durable journal commit authority, idempotent SQLite settlement, complete global
+  checkpoint manifests with reusable chunk payloads, two roots, retained recovery tails,
+  exact base identity and coherent offline migration. The existing 58-byte operation stays
+  unchanged; the persistence envelope's exact byte layout and storage packet are still needed.
+- Author audit forbids snapshotting provisional mutations during storage-fault teardown;
+  otherwise shutdown could publish RAM ahead of the durable journal. The completed review
+  considered this safeguard and agreed with it.
+- **Independent verdict: not ready for adoption, B1-B6.** Reconcile the actual counterexamples
+  before revising the proposal; reviewer findings are not automatically adopted requirements:
+  1. Durable request/retry identity across reconnect or restart, beyond connection-local IDs.
+  2. Separate terrain recovery and settlement cursors, avoiding replay over baked terrain.
+  3. Coherent entity-store restore and retention rules for older database backups.
+  4. Bounded manifest size and checkpoint capture cost as edited history grows.
+  5. Explicit replacement/amendment of ARCHITECTURE section 4.7's schema and world identity.
+  6. Broadcast ordering and the cost of two durability barriers against the 8 ms target.
+- Additional review ambiguities: game-thread capture versus I/O/flush work; generation of
+  pristine chunks from the recorded base during replay; failed settlement capacity or deleted
+  inventory handling (DEF-6). Review polish includes fixed-size root files, validating both
+  roots before deletion, and manifest count/byte limits. Read the review for exact severity.
+- This is an independent **P-003 proposal review**. It does not supply an independent review
+  of P-002 or the step-3 code. No such code review or Director interactive acceptance is claimed.
+
+## Review execution and platform evidence
+
+- The initial installed Claude CLI attempt failed with HTTP 401 because an inherited
+  `ANTHROPIC_API_KEY` overrode the valid Claude subscription login. A wrapper console-encoding
+  failure followed; neither changed source. Initial evidence: `Saved/P003-review-output.txt`.
+- Removing `ANTHROPIC_API_KEY` **only from the reviewer child-process environment** produced
+  `AUTH_OK`, exit 0, using the existing subscription. No machine/user setting or credential
+  changed. Do not ask the Director to sign in again for this resolved failure.
+- Independent review then completed, exit 0, using installed
+  `C:/Users/harja/.local/bin/claude.exe`, `-p --model opus --tools Read,Glob,Grep
+  --allowedTools Read,Glob,Grep --strict-mcp-config --no-session-persistence --output-format text`.
+  The prompt required read-only independent review; the reviewer ran no tests and wrote no
+  files. Its response was saved verbatim to the tracked review file. Raw local output:
+  `Saved/P003-review-output-authenticated.txt`. Review base: `b1b93e4`.
+- Installed UE 5.8 `WindowsPlatformFile.cpp:933` implements `FFileHandleWindows::Flush`
+  with `FlushFileBuffers`; `OpenWrite` at line 1638 returns that handle. This verifies the
+  file-content primitive only. Namespace publication, crash recovery and power-loss behavior
+  still need verification; no fault-injection test has run.
+
+## Completed runtime increment - step 3
 
 Make multiplayer terrain edits flow from an owning connection through server validation
 and a serialized queue, then replay consistently on relevant clients.
 
-All placements are beneath **`C:/Dev/VoxelWorld/`**. Complete files are in the worktree.
+All placements are beneath **`C:/Dev/VoxelWorld/`**. Complete files are committed in `21e3a2c`.
 
 | Files | Behavior |
 |---|---|
@@ -181,7 +196,8 @@ it launches. Reruns overwrite the named standalone/automation logs; MP logs are 
    age was 47.582 / 49.337 / 47.867 ms; maximum backend apply 7.828 / 5.599 / **8.317 ms**.
    One small-brush call exceeded the 8 ms target. This was several processes on one machine
    with concurrent validation/build load, not proof of the at-cap or 16-32-player budget.
-   Carry this evidence into the next checkpoint/R-014; do not claim the performance gate passed.
+   Carry this evidence into the next checkpoint performance assessment; do not claim the
+   performance gate passed. R-014 concerns cross-platform determinism, not performance.
 5. Modified unknown chunks are not falsely subscribed; revision gaps quarantine replay
    and request the future resync path. Clients joining after terrain edits cannot reconstruct
    those modified chunks yet. This limitation is explicit, not a working JIP claim.
@@ -198,12 +214,19 @@ it launches. Reruns overwrite the named standalone/automation logs; MP logs are 
 
 ## Next safe actions
 
-1. Verify this base/worktree and read STATE/VISION/ARCHITECTURE/RISKS before edits. Preserve
-   the implementation. No implementation/test process from this task remains.
-2. Review the bounded diff and evidence for acceptance; no independent reviewer result has
-   been fabricated. Do not reopen P-002 as an unanswered Director question.
-3. On **`checkpoint`**, reconcile STATE/BACKLOG/DECISIONS/RISKS with this narrower step-3
-   result and its open limits, finalize the handoff, make scoped commits and push normally.
-   On **`push`**, commit/push current work without checkpoint-document updates.
-4. The next implementation increment is step 4, after resolving its bound persistence
-   defects. Do not start it merely because step 3's network hashes pass.
+1. Read AGENTS and STATE/VISION/ARCHITECTURE/RISKS plus this handoff under OPERATIONS
+   section 5.1. Verify the enclosing commit, branch, status and recent history. Sync only
+   a clean tree with `git pull --ff-only`; preserve any later work.
+2. Continue the **P-003 revision**, not save implementation. Read the actual review and
+   validate each counterexample against the contracts/code, especially reconnect/retry
+   semantics. Preserve already adopted P-002 and step-3 behavior.
+3. Revise P-003 to resolve B1-B6 and the additional ambiguities, then obtain independent
+   re-review under the existing R3 process. Update this rolling handoff after meaningful
+   findings. Do not treat the first review as approval or silently adopt new requirements.
+4. Only after the applicable R3 ruling and architecture update, plus a bounded exact-format
+   and storage packet, begin step 4 implementation. Follow D-023/D-032 for delegated
+   technical choices; escalate decisions outside that authority. DEF-1/2/9 remain open
+   until actually resolved. Later JIP/material/collision increments remain separate.
+5. On explicit `checkpoint`, reconcile checkpoint documents with the saved step-3 result,
+   proposal/review status and outstanding limits. This commit/push/handoff request does
+   not authorize claiming a new checkpoint or completing the full T-101B gate.
