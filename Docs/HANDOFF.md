@@ -22,9 +22,20 @@
   is invalid**; no review was produced and no approval is inferred. The process has exited.
   The wrapper also hit a console-encoding error after saving the authentication result;
   neither event changed source files. Evidence: `Saved/P003-review-output.txt`.
-- **Next safe action:** an authenticated independent review of P-003, then reconciliation
-  of its findings and the exact format/storage packet. DEF-1/2/9 remain open; no save code
-  or new dependency has been introduced. This is a concrete draft, not an adopted design.
+- **Authentication correction:** the Director asked what action was needed. A read-only
+  check found an existing Claude subscription login and an inherited `ANTHROPIC_API_KEY`
+  overriding it. Removing that variable only from the reviewer child-process environment
+  produced `AUTH_OK`, exit 0. No machine/user setting or credential was changed; no
+  Director action is needed. The P-003 review completed with that environment, exit 0.
+- Independent findings are saved verbatim in `Docs/reviews/P-003-review-claude.md`.
+  **Verdict: not ready for adoption, B1-B6.** Findings concern durable request identity,
+  separate terrain/settlement recovery cursors, coherent entity-store restore and retention,
+  bounded checkpoint cost, explicit schema replacement, and broadcast/durability ordering.
+  These are reviewer findings to reconcile, not silently adopted new requirements.
+- **Next safe action:** revise P-003 against B1-B6 and its additional ambiguities, then
+  obtain independent re-review before adopting a format/storage implementation packet.
+  DEF-1/2/9 remain open; no save code or new dependency has been introduced. Authentication
+  is no longer a blocker, and no technical ruling is being requested from the Director.
 - Author audit added an explicit ban on snapshotting a provisional mutation during
   storage-fault teardown. Ordinary shutdown compaction would otherwise risk publishing
   data ahead of the durable journal. This addition still requires independent review.

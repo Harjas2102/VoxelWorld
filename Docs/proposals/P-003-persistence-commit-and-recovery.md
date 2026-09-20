@@ -262,6 +262,14 @@ No runtime implementation may start on an unresolved review blocker.
 On 2026-09-19 the installed Claude CLI was invoked with Opus and only Read/Glob/Grep
 available, with MCP disabled, for the required independent review. It returned
 **401: API key is invalid**. No review was produced and no approval is inferred.
-The proposal remains unadopted; DEF-1/2/9 remain open. The next safe action is to run
-the independent review through an authenticated reviewer, then resolve its findings
-and fix the exact format/storage packet before implementing persistence.
+The subsequent authentication check found a valid existing Claude subscription login
+being overridden by the inherited `ANTHROPIC_API_KEY`. Omitting that variable only
+from the child-process environment returned `AUTH_OK`; no Director login or settings
+change was necessary. The independent review subsequently completed, exit 0, and is
+saved verbatim in [P-003-review-claude.md](../reviews/P-003-review-claude.md).
+
+**Review disposition: not ready for adoption, B1-B6.** The findings cover durable request
+identity, independent recovery cursors, coherent entity-store restore and retention,
+checkpoint bounds, explicit schema amendment, and broadcast/durability ordering.
+The proposal remains unadopted; reconcile those findings and the listed ambiguities,
+then obtain independent re-review before implementing persistence. DEF-1/2/9 remain open.
