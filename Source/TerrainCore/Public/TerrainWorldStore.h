@@ -99,6 +99,16 @@ public:
 	FTerrainStoreResult PublishCheckpoint(const FTerrainCheckpointDescriptor& Checkpoint, int64 UtcMillis);
 
 	bool IsOpen() const { return bOpen; }
+
+	/**
+	 * The device this world lives on.
+	 *
+	 * Exposed for replay, which has to enumerate the journal's segment chain. It is a
+	 * deliberate widening of what the store shares and it is read-only in practice: anything
+	 * that MUTATES this world goes through the store or the journal writer, so that the
+	 * ordering rules stay in one place.
+	 */
+	ITerrainStorageDevice& GetDevice() const { return Device; }
 	const FTerrainWorldStoreState& GetState() const { return State; }
 	FTerrainFileObjectStore&       GetObjects() { return Objects; }
 	const FTerrainFileObjectStore& GetObjects() const { return Objects; }

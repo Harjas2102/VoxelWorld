@@ -932,15 +932,18 @@ layout and cannot drift apart.
 **What exists in code.** The schema-2 codecs and validators; the 96-bit path-copied chunk-key
 index; the storage device seam with real, in-memory and fault-injecting implementations; the
 content-addressed object store and the slot pair; the journal writer with segment rotation;
-`FTerrainWorldStore` (create, open, publish checkpoint); `Terrain.PersistDump`; and the commit
+`FTerrainWorldStore` (create, open, publish checkpoint); `Terrain.PersistDump`; the commit
 seam — `UTerrainService` will durably record an operation **before** advancing its sequence or
-broadcasting it, and closes admission with `ShuttingDown` if it cannot.
+broadcasting it, and closes admission with `ShuttingDown` if it cannot — and **replay**: a
+fresh backend plus a journal reproduces the world that was shut down, proven by chunk-hash
+equality over overlapping edits.
 
 **What does not exist.** Nothing attaches a journal to a running game: the service's
 `CommitJournal` is null unless something sets it, and no bootstrap creates a world store for
-a real session. **No edit survives a restart.** Also absent: the capture pump, checkpoint
-capture, settlement, SQLite, replay/recovery and retention. Build step 4 is not complete and
-DEF-1/2/9 remain open.
+a real session. **No edit survives a restart of the actual game** — the machinery that would
+make it survive is built and tested, and nothing calls it. Also absent: checkpoint capture
+(so G is always 0 and replay cost grows with every edit ever made), settlement, SQLite,
+retention, and the crash matrix. Build step 4 is not complete and DEF-1/2/9 remain open.
 
 - **Commit:** journal append + durable flush precedes terrain broadcast and
   TerrainCommitted; SQLite settlement follows, with idempotent `(WorldId, OpSeq)`
@@ -1484,7 +1487,8 @@ Run against `FMemoryTerrainBackend`. Seconds, on every build.
 | `Snapshot.EncodingChoice` | The smaller encoding is selected; both decode — **done** by `Persistence.Format.RoundTrip` |
 | `Snapshot.MaterialOnlyChange` | A material-only edit survives sparse encoding and is not misclassified as pristine — **done** by `Persistence.Format.RoundTrip` |
 | `Revision.Monotonic` | Chunk revs never decrease, including across payload deletion; a multi-chunk op bumps every affected chunk exactly once |
-| `Replay.Equivalence` | `snapshot@R + ops after R` == `apply all ops from base`. **The central persistence invariant** |
+| `Persistence.Replay.Equivalence` | **Implemented, passing — the central persistence invariant, in its R=0 form.** Six overlapping edits are played into one backend and recorded; a **fresh** store object and a **fresh** backend then replay the journal, and every edited chunk comes back with an identical `HashRegion` — position-sensitive and material-inclusive, so it is a comparison of two worlds and not a count of operations that succeeded. Also: revisions are reconstructed, an untouched chunk is identical to the pristine base, a damaged **interior** record refuses the world outright, and a damaged **final** record is indistinguishable from a torn append and returns the world without that edit |
+| `Replay.Equivalence` | `snapshot@R + ops after R` == `apply all ops from base`. **The central persistence invariant.** Its **R=0 form is implemented and passing** above. The `snapshot@R` half needs checkpoint capture, which does not exist, so replay cost still grows with every edit ever made |
 | `Compaction.Equivalence` | Region hash before == after |
 | `Compaction.Reverted` | A chunk restored to natural shape keeps its metadata and reloads identically |
 | `Retention.Dependency` | A segment is not deletable while any consumer, terrain or entity, still needs it |

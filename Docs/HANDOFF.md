@@ -1,6 +1,6 @@
 → No action. For your reading only.
 
-# HANDOFF.md — commit path wired; next is attaching a journal to a running world
+# HANDOFF.md — replay works; next is attaching a journal to a running world
 
 ## Identity, authority and Git state
 
@@ -58,6 +58,48 @@ The reimplementation lives in the session scratchpad and is **not committed** �
 two pip packages and is evidence, not project code. Re-running it means recreating the venv
 and re-writing it from P-004, which is the point: if it needed to be kept, it would not be
 independent.
+
+## Replay — a world can now be rebuilt from its journal
+
+**This is the increment that demonstrates Pillar 1 rather than building towards it.**
+
+`TerrainReplayJournal` is P-003 §3's terrain pass: walk the segment chain in ascending order,
+check contiguity *across* segments (no single segment's scan can), and re-apply each operation
+**whole and exactly once** onto a freshly initialised backend, validating the recorded
+before/after revisions as it goes. A record whose changed-chunk set does not match what the
+backend actually did is `BaseMismatch` — a record describing a different world.
+
+`Persistence.Replay.Equivalence` is the proof: six deliberately **overlapping** edits are
+played into one backend and recorded; a fresh store object and a fresh backend then replay,
+and **every edited chunk comes back with an identical `HashRegion`**. That hash is
+position-sensitive and includes materials, so it compares two worlds rather than counting
+operations that happened to succeed. An untouched chunk is identical to the pristine base, so
+replay writes only where it was asked to.
+
+**Two honest findings, both now written into the code rather than left to be discovered.**
+
+1. **Replay must NOT release its residency interest.** P-003 §3 says replay's interests are
+   "released afterwards", which is right in the world P-003 describes — one where a checkpoint
+   holds the restored state, so an evicted chunk reloads from its payload. *That world does
+   not exist yet.* With no capture pump, G is 0 and everything replay rebuilds lives only in
+   backend RAM, so releasing the interest on a backend that evicts would silently discard the
+   entire restored world. The interest is retained and handed to the caller. This is one of
+   the concrete reasons the capture pump is required rather than an optimisation.
+2. **A damaged FINAL journal record is indistinguishable from a torn append.** Both are the
+   same bytes, so the world returns *without that edit* and no reader can tell which happened.
+   That is a property of an append-only journal, not a defect here, and the test asserts it
+   explicitly rather than leaving it to be found in a saved world. A damaged **interior**
+   record, by contrast, refuses the world outright. My first version of that test corrupted
+   the only record in a one-record journal and expected a refusal; it got a torn tail, which
+   was the format being right and the test being wrong.
+
+**Verified:** both targets build; **32 of 32** tests pass, exit 0 (`Saved/Logs/Replay-Pass.log`).
+
+**The gap that remains, and it is the important one.** Nothing attaches a journal to a running
+game. `UTerrainService::CommitJournal` is null unless something sets it, and no bootstrap
+creates a world store for a real session, so **no edit survives a restart of the actual
+game**. Every piece needed is now built and tested; what is missing is the wiring and a
+decision about where a world directory lives. That is the next increment and it is small.
 
 ## The commit path — durable before published
 
