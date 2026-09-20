@@ -3,6 +3,9 @@
 #include "VPLegacyBackend.h"
 #include "TerrainBackendVPLegacy.h"
 #include "TerrainChunk.h"
+#include "TerrainOpGeometry.h"
+#include "VoxelTools/Impl/VoxelSphereToolsImpl.inl"
+#include "VoxelTools/VoxelToolHelpers.h"
 #include "VPLegacyDensityGenerator.h"
 
 // The plugin. These four includes are the entire reason this module exists as a module.
@@ -84,6 +87,7 @@ bool FVPLegacyBackend::Initialize(const FTerrainBackendInit& InInit)
 		return false;
 	}
 	if (!InInit.World
+		|| (InInit.DensityField && InInit.DensityFieldOwner.Get() != InInit.DensityField)
 		|| !(InInit.VoxelSizeCm > 0.f) || !FMath::IsFinite(InInit.VoxelSizeCm)
 		|| InInit.WorldBoundsVox.IsEmpty()
 		|| (InInit.Role != ETerrainRole::Server && InInit.Role != ETerrainRole::Client))
@@ -250,7 +254,7 @@ bool FVPLegacyBackend::ConformVoxelWorld(AVoxelWorld& Actor)
 		{
 			Generator.Reset(NewObject<UVPLegacyDensityGenerator>(GetTransientPackage()));
 		}
-		Generator->SetField(Init.DensityField);
+		Generator->SetField(Init.DensityField, Init.DensityFieldOwner);
 
 		if (Actor.Generator.GetObject() != Generator.Get())
 		{
@@ -315,6 +319,7 @@ void FVPLegacyBackend::Shutdown()
 	// Released before the borrowed field goes away with the service. The generator holds a
 	// raw pointer to that field, so an instance still meshing after this point would be
 	// reading freed memory (AR-2: the field is borrowed until Shutdown).
+	if (Generator.IsValid()) Generator->SetField(nullptr);
 	Generator.Reset();
 	VoxelWorld.Reset();
 	World.Reset();
@@ -341,123 +346,95 @@ bool FVPLegacyBackend::IsBoxInWorld(const FTerrainBox& Box) const
 		&& Box.Min.Z >= Bounds.Min.Z && Box.Max.Z <= Bounds.Max.Z;
 }
 
+namespace
+{
+	// The plugin supplies density values; this view enforces the game's exact W/B.
+	// The only lock is the plugin's own documented data lock, matching its generated tools.
+	struct FCanonicalSphereData
+	{
+		TVoxelDataImpl<FModifiedVoxelValue>& Data;
+		const FTerrainOp& Op;
+		FVoxelIntBox Bounds;
+		template<typename T, typename F> void Set(const FVoxelIntBox&, F Edit)
+		{
+			Data.template Set<T>(Bounds, [&](int32 X, int32 Y, int32 Z, T& Value)
+			{
+				if (!TerrainOpContains(Op,FIntVector(X,Y,Z))) return;
+                // Fully contained half-open cells must reach empty/full; the plugin's
+                // two-voxel edge ramp alone does not satisfy that contract.
+                const double Radius = double(Op.RadiusVoxQ16)/65536.;
+                double FarthestSquared = 0;
+                const FIntVector P(X,Y,Z);
+                for (int32 A=0; A<3; ++A)
+                {
+                    const double D = double(P[A])-Op.CentreVox[A];
+                    FarthestSquared += FMath::Max(D*D,(D+1)*(D+1));
+                }
+                if (FarthestSquared<=Radius*Radius)
+                    Value = Op.Kind==ETerrainOpKind::Remove ? T::Empty() : T::Full();
+                else Edit(X,Y,Z,Value);
+			});
+		}
+	};
+}
+
 bool FVPLegacyBackend::ApplyOp(const FTerrainOp& Op, FTerrainEditResult& Out)
 {
-	Out = FTerrainEditResult();
-
-	if (!IsInGameThread())
-	{
-		UE_LOG(LogTerrainBackendVPLegacy, Error, TEXT("ApplyOp called off the game thread. Refused (DEF-4)."));
-		return false;
-	}
+	Out = {};
+	if (!IsInGameThread()) return false;
 	AVoxelWorld* Actor = GetLiveVoxelWorld();
-	if (!Actor)
-	{
-		return false;
-	}
-
-	// Shape and kind. An operation this backend cannot perform exactly is refused, never
-	// approximated with a nearby one: DEF-5 is open precisely because "close enough" terrain
-	// semantics are how server and client stop agreeing.
-	if (Op.Shape != ETerrainShape::Sphere)
-	{
-		UE_LOG(LogTerrainBackendVPLegacy, Warning, TEXT("Box operations are not implemented at build step 2."));
-		return false;
-	}
-	if (Op.Kind != ETerrainOpKind::Remove && Op.Kind != ETerrainOpKind::Add)
-	{
-		UE_LOG(LogTerrainBackendVPLegacy, Warning,
-			TEXT("Operation kind %u is unsupported: Flatten and Smooth have no ruled semantics (DEF-5) and "
-				 "Paint has no game-id-to-plugin-index table until K9 at build step 6."),
-			static_cast<uint32>(Op.Kind));
-		return false;
-	}
-	if (Op.RadiusVoxQ16 <= 0)
-	{
-		return false;
-	}
-
-	const double RadiusVox = static_cast<double>(Op.RadiusVoxQ16) / 65536.0;
-	const int32 RadiusCeil = FMath::CeilToInt(RadiusVox);
-	const FTerrainBox Footprint(Op.CentreVox - FIntVector(RadiusCeil), Op.CentreVox + FIntVector(RadiusCeil + 1));
-	if (!IsBoxInWorld(Footprint))
-	{
-		return false;
-	}
-
-	// Own bound, independent of the service's. §7.1 caps a single op at 65,536 written voxels
-	// and splitting belongs to the service (step 3, DEF-7) — never to this backend.
-	const double Estimate = (4.0 / 3.0) * PI * FMath::Pow(RadiusVox + 0.5, 3.0);
-	if (Estimate > static_cast<double>(VPLegacyMaxWrites))
-	{
-		UE_LOG(LogTerrainBackendVPLegacy, Warning,
-			TEXT("Operation of radius %.2f voxels is above MaxVoxelsPerOp; the service splits, this does not."),
-			RadiusVox);
-		return false;
-	}
-
-	// §4.3: the C++ overload APPENDS. Reset explicitly, every op.
+	FTerrainBox Footprint;
+	int64 Writes=0, Scans=0;
+	if (!Actor || (Op.Kind != ETerrainOpKind::Remove && Op.Kind != ETerrainOpKind::Add)
+		|| !TerrainOpBounds(Op,Footprint) || !IsBoxInWorld(Footprint)
+		|| !TerrainOpCounts(Op,VPLegacyMaxWrites,Writes,Scans)) return false;
+	TArray<FTerrainChunkKey> Keys;
+	if (!TerrainChunkKeysForBox(Footprint,Keys)) return false;
+	for (const auto& Key : Keys) if (!IsRegionResident(Key)) return false;
+	const FVoxelIntBox Bounds(Footprint.Min,Footprint.Max);
 	ScratchModified.Reset();
-
-	FVoxelIntBox EditedBounds;
-	// bConvertToVoxelSpace = FALSE. The server already quantised, once (§4.3): handing the
-	// plugin a world-space float here would reintroduce exactly the per-machine rounding
-	// divergence the integer wire op exists to remove.
-	const FVector PositionVox(Op.CentreVox.X, Op.CentreVox.Y, Op.CentreVox.Z);
-	const float RadiusVoxFloat = static_cast<float>(RadiusVox);
-
-	if (Op.Kind == ETerrainOpKind::Remove)
 	{
-		UVoxelSphereTools::RemoveSphere(Actor, PositionVox, RadiusVoxFloat,
-			&ScratchModified, &EditedBounds,
-			/*bMultiThreaded*/ false, /*bConvertToVoxelSpace*/ false, /*bUpdateRender*/ true);
+		auto& WorldData = Actor->GetData();
+		FVoxelWriteScopeLock Lock(WorldData,Bounds,FUNCTION_FNAME);
+		auto Data = TVoxelDataImpl<FModifiedVoxelValue>(WorldData,false,true);
+		if (Op.Shape == ETerrainShape::Sphere)
+		{
+			FCanonicalSphereData Clipped{Data,Op,Bounds};
+			const FVoxelVector Position(Op.CentreVox);
+			const float Radius = float(double(Op.RadiusVoxQ16)/65536.0);
+			if (Op.Kind == ETerrainOpKind::Remove) FVoxelSphereToolsImpl::RemoveSphere(Clipped,Position,Radius);
+			else FVoxelSphereToolsImpl::AddSphere(Clipped,Position,Radius);
+		}
+		else
+		{
+			Data.Set<FVoxelValue>(Bounds,[&](int32,int32,int32,FVoxelValue& Value)
+			{ Value = Op.Kind == ETerrainOpKind::Remove ? FVoxelValue::Empty() : FVoxelValue::Full(); });
+		}
+		ScratchModified = MoveTemp(Data.ModifiedValues);
 	}
-	else
+	TSet<FTerrainChunkKey> Affected;
+	for (const FModifiedVoxelValue& Modified : ScratchModified)
 	{
-		UVoxelSphereTools::AddSphere(Actor, PositionVox, RadiusVoxFloat,
-			&ScratchModified, &EditedBounds,
-			/*bMultiThreaded*/ false, /*bConvertToVoxelSpace*/ false, /*bUpdateRender*/ true);
+		const FIntVector P = Modified.Position;
+		Affected.Add(TerrainChunkKeyForVoxel(P));
+		if (Out.VoxelsTouched++ == 0) Out.EditedBounds = FTerrainBox(P,P+FIntVector(1));
+		else for (int32 A=0;A<3;++A)
+		{
+			Out.EditedBounds.Min[A]=FMath::Min(Out.EditedBounds.Min[A],P[A]);
+			Out.EditedBounds.Max[A]=FMath::Max(Out.EditedBounds.Max[A],P[A]+1);
+		}
 	}
-
-	const int64 Touched = ScratchModified.Num();
-
-	FTerrainBox Edited(EditedBounds.Min, EditedBounds.Max);
-	if (Touched > 0 && Edited.IsEmpty())
-	{
-		// A degenerate bounds with real modifications would leave the chunks that changed
-		// without a revision bump. Fall back to the op's own footprint, which is a superset.
-		Edited = Footprint;
-	}
-
-	Out.EditedBounds = Edited;
-	Out.VoxelsTouched = Touched;
-	Out.VoxelsScanned = static_cast<int64>(Footprint.Max.X - Footprint.Min.X)
-		* (Footprint.Max.Y - Footprint.Min.Y)
-		* (Footprint.Max.Z - Footprint.Min.Z);
-	Out.bTruncated = false;
-
-	if (!Edited.IsEmpty() && !TerrainChunkKeysForBox(Edited, Out.AffectedChunks))
-	{
-		UE_LOG(LogTerrainBackendVPLegacy, Error, TEXT("Edited bounds enumerate too many chunks; refusing to report them."));
-		return false;
-	}
-
-	// Out.Removed stays empty. See the class comment: yield needs a separate material read
-	// (§2.3 — FModifiedVoxelValue carries no material) and the K9 id table, both build step 6.
-
-	// Free the scratch when an op was unusually large, so one big edit does not hold a
-	// multi-megabyte array for the rest of the session.
-	if (ScratchModified.Num() > 4096)
-	{
-		ScratchModified.Empty();
-	}
-
+	Out.VoxelsScanned=Scans;
+	Out.AffectedChunks=Affected.Array();
+	Out.AffectedChunks.Sort([](const FTerrainChunkKey& A,const FTerrainChunkKey& B)
+	{ return A.X!=B.X ? A.X<B.X : A.Y!=B.Y ? A.Y<B.Y : A.Z<B.Z; });
+	if (Out.VoxelsTouched) FVoxelToolHelpers::UpdateWorld(Actor,Bounds);
 	return true;
 }
 
 bool FVPLegacyBackend::IsRegionResident(const FTerrainChunkKey& Key) const
 {
-	if (!GetLiveVoxelWorld())
+	if (!IsInGameThread() || !GetLiveVoxelWorld())
 	{
 		return false;
 	}
@@ -468,6 +445,7 @@ bool FVPLegacyBackend::IsRegionResident(const FTerrainChunkKey& Key) const
 
 void FVPLegacyBackend::FlushPendingWork()
 {
+	if (!IsInGameThread()) return;
 	// Intentionally empty. §4.5: "Rendering and collision updates remain the plugin's own
 	// async work and are explicitly not serialised by us. This is the seam where the
 	// fall-through-the-floor bug lives: the data edit completes before the collision cook
@@ -509,6 +487,7 @@ bool FVPLegacyBackend::ReadRegion(const FTerrainChunkKey& Key, FTerrainRegionDat
 {
 	Out = FTerrainRegionData();
 	Out.Key = Key;
+	if (!IsInGameThread()) return false;
 	Out.GeneratorVersion = Init.GeneratorVersion;
 	Out.ValueConfig = VPLegacyValueConfig;
 

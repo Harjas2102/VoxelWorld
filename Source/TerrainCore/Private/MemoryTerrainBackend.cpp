@@ -2,6 +2,7 @@
 
 #include "MemoryTerrainBackend.h"
 #include "ITerrainDensityField.h"
+#include "TerrainOpGeometry.h"
 
 namespace
 {
@@ -66,6 +67,7 @@ namespace
 
 bool FMemoryTerrainBackend::Initialize(const FTerrainBackendInit& InInit)
 {
+	if (!IsInGameThread()) return false;
 	const double Size = InInit.VoxelSizeCm;
 	const double Volume = Size * Size * Size * 1000.0; // cm3 -> microlitres
 	if (bInitialized || !(Size > 0.0) || !FMath::IsFinite(Size)
@@ -82,6 +84,7 @@ bool FMemoryTerrainBackend::Initialize(const FTerrainBackendInit& InInit)
 
 void FMemoryTerrainBackend::Shutdown()
 {
+	if (!IsInGameThread()) return;
 	Interests.Empty();
 	Values.Empty();
 	Materials.Empty();
@@ -134,7 +137,7 @@ bool FMemoryTerrainBackend::HasInterest(const FTerrainChunkKey& Key) const
 
 bool FMemoryTerrainBackend::IsRegionResident(const FTerrainChunkKey& Key) const
 {
-	return bInitialized && IsKeyInWorld(Key) && Values.Contains(Key) && HasInterest(Key);
+	return IsInGameThread() && bInitialized && IsKeyInWorld(Key) && Values.Contains(Key) && HasInterest(Key);
 }
 
 void FMemoryTerrainBackend::GenerateInterestedChunks()
@@ -200,7 +203,7 @@ void FMemoryTerrainBackend::GenerateInterestedChunks()
 
 void FMemoryTerrainBackend::SetStreamingInterest(const FTerrainStreamingInterest& In)
 {
-	if (!bInitialized || In.WorldLocation.ContainsNaN() || !FMath::IsFinite(In.RadiusCm)
+	if (!IsInGameThread() || !bInitialized || In.WorldLocation.ContainsNaN() || !FMath::IsFinite(In.RadiusCm)
 		|| In.RadiusCm < 0.0
 		|| (In.WorldLocation / double(Init.VoxelSizeCm)).ContainsNaN()
 		|| !FMath::IsFinite(In.RadiusCm / double(Init.VoxelSizeCm)))
@@ -213,17 +216,20 @@ void FMemoryTerrainBackend::SetStreamingInterest(const FTerrainStreamingInterest
 
 void FMemoryTerrainBackend::ClearStreamingInterest(uint32 InterestId)
 {
+	if (!IsInGameThread()) return;
 	Interests.Remove(InterestId);
 }
 
 void FMemoryTerrainBackend::FlushPendingWork()
 {
+	if (!IsInGameThread()) return;
 	// All data operations complete before returning. No world or async work exists.
 }
 
 bool FMemoryTerrainBackend::QueryPoint(const FIntVector& Position, FTerrainPointSample& Out) const
 {
 	Out = FTerrainPointSample();
+	if (!IsInGameThread()) return false;
 	const FTerrainChunkKey Key = KeyAt(Position);
 	if (!bInitialized || !Init.WorldBoundsVox.Contains(Position) || !IsRegionResident(Key))
 	{
@@ -240,7 +246,7 @@ bool FMemoryTerrainBackend::ReadRegion(const FTerrainChunkKey& Key, FTerrainRegi
 {
 	Out = FTerrainRegionData();
 	Out.Key = Key;
-	if (!bInitialized)
+	if (!IsInGameThread() || !bInitialized)
 	{
 		return false;
 	}
@@ -269,7 +275,7 @@ bool FMemoryTerrainBackend::ReadRegion(const FTerrainChunkKey& Key, FTerrainRegi
 
 bool FMemoryTerrainBackend::WriteRegion(const FTerrainRegionData& In)
 {
-	if (!bInitialized || !IsKeyInWorld(In.Key) || In.Encoding != ETerrainRegionEncoding::Dense
+	if (!IsInGameThread() || !bInitialized || !IsKeyInWorld(In.Key) || In.Encoding != ETerrainRegionEncoding::Dense
 		|| In.Payload.Num() != MemorySampleCount * 4 || In.ValueConfig != 0
 		|| In.GeneratorVersion != Init.GeneratorVersion)
 	{
@@ -314,7 +320,9 @@ uint64 FMemoryTerrainBackend::HashRegion(const FTerrainChunkKey& Key) const
 bool FMemoryTerrainBackend::ApplyOp(const FTerrainOp& Op, FTerrainEditResult& Out)
 {
 	Out = FTerrainEditResult();
-	if (!bInitialized || (Op.Kind != ETerrainOpKind::Remove && Op.Kind != ETerrainOpKind::Add
+	int64 CanonicalWrites = 0, CanonicalScans = 0;
+	if (!IsInGameThread() || !TerrainOpCounts(Op,MaxWrites,CanonicalWrites,CanonicalScans)) return false;
+	if (!IsInGameThread() || !bInitialized || (Op.Kind != ETerrainOpKind::Remove && Op.Kind != ETerrainOpKind::Add
 		&& Op.Kind != ETerrainOpKind::Paint)
 		|| (Op.Shape != ETerrainShape::Sphere && Op.Shape != ETerrainShape::Box))
 	{

@@ -26,7 +26,7 @@
  *
  * This library is that sentence, in code. It holds no plugin type, no AVoxelWorld reference,
  * and no terrain state; it turns a look direction into an FTerrainEditRequest and hands it to
- * UTerrainService, which decides everything else.
+ * the owning PlayerController stream, whose RPC reaches UTerrainService.
  *
  * A function library rather than a component so that the Blueprint change is one node per
  * input event: an asset that references nothing but game types is far easier to keep honest
@@ -45,10 +45,9 @@ public:
 	 * a 200 uu brush — so the rewire is testable as "the same dig, through the service", with
 	 * the routing as the only variable.
 	 *
-	 * Returns false, with a reason in the receipt, when the trace misses or the service
-	 * refuses. On a client it returns false with NoAuthority: build step 3 replaces that with
-	 * a ServerRequestEdit RPC. Refusing is deliberate — letting a client edit its own copy is
-	 * the client-authoritative shortcut AGENTS.md §4 forbids.
+	 * True means the owning connection queued an intent, not that terrain changed.
+     * The server validates and commits it; the stream receives the authoritative receipt.
+     * A miss or unavailable transport returns false immediately. No client prediction.
 	 */
 	UFUNCTION(BlueprintCallable, Category = "Terrain", meta = (DefaultToSelf = "Pawn", AdvancedDisplay = "TraceDistanceCm,ToolId"))
 	static bool RequestTerrainEditFromView(

@@ -1,6 +1,8 @@
 // Copyright VoxelWorld. See Docs/ARCHITECTURE.md.
 
 #include "TerrainInteractionLibrary.h"
+#include "TerrainStreamComponent.h"
+#include "Kismet/GameplayStatics.h"
 #include "Engine/Engine.h"
 #include "Engine/World.h"
 #include "GameFramework/Pawn.h"
@@ -37,13 +39,18 @@ bool UTerrainInteractionLibrary::RequestTerrainEditAt(
 	Request.Kind = Kind;
 	Request.WorldLocation = WorldLocation;
 	Request.RadiusCm = RadiusCm;
-	Request.SourceId = SourceId;
+
 	Request.ToolId = ToolId;
-	Request.MaterialId = 0;   // material identity is K9 / build step 6
+
 
 	// Every decision from here on is the service's: quantisation, bounds, work limits,
 	// sequencing and revisions. Gameplay states an intent and reads a receipt.
-	return Service->RequestEdit(Request, OutReceipt);
+	const APawn* Pawn = Cast<APawn>(WorldContextObject);
+	APlayerController* PC = Pawn ? Cast<APlayerController>(Pawn->GetController()) : Cast<APlayerController>(const_cast<UObject*>(WorldContextObject));
+	if (!PC) PC = UGameplayStatics::GetPlayerController(WorldContextObject,0);
+	auto* Stream = PC ? PC->FindComponentByClass<UTerrainStreamComponent>() : nullptr;
+	if (!Stream) { OutReceipt.Rejection=ETerrainEditRejection::NotReady; return false; }
+	return Stream->SubmitEdit(Request,OutReceipt);
 }
 
 bool UTerrainInteractionLibrary::RequestTerrainEditFromView(

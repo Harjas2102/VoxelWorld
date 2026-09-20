@@ -36,10 +36,9 @@
  * FTerrainDensitySample documents "negative is solid". No inversion is needed and none is
  * applied.
  *
- * LIFETIME. The field is BORROWED (AR-2: "the density field is borrowed until Shutdown"). It
- * is owned by UTerrainService, outlives the backend by construction, and is sampled here from
- * the plugin's mesher worker threads — which is exactly why ITerrainDensityField requires
- * implementations to be immutable and free of memoisation.
+ * LIFETIME. The immutable field is created by UTerrainService. This UObject and each
+ * generator instance retain shared ownership, so outstanding plugin workers may finish
+ * after service teardown without dereferencing freed memory or waiting on the game thread.
  */
 UCLASS()
 class UVPLegacyDensityGenerator : public UVoxelGenerator
@@ -47,8 +46,10 @@ class UVPLegacyDensityGenerator : public UVoxelGenerator
 	GENERATED_BODY()
 
 public:
-	/** Must be called before the world is created or recreated. The field is not owned. */
-	void SetField(const ITerrainDensityField* InField) { Field = InField; }
+	/** Must be called before the world is created or recreated. The shared field lifetime is retained. */
+	void SetField(const ITerrainDensityField* InField, TSharedPtr<const ITerrainDensityField, ESPMode::ThreadSafe> InOwner = {})
+	{ Field = InField; FieldOwner = MoveTemp(InOwner); }
+	TSharedPtr<const ITerrainDensityField, ESPMode::ThreadSafe> GetFieldOwner() const { return FieldOwner; }
 
 	const ITerrainDensityField* GetField() const { return Field; }
 
@@ -59,6 +60,7 @@ public:
 private:
 	/** Raw and not a UPROPERTY because it is not a UObject. See LIFETIME above. */
 	const ITerrainDensityField* Field = nullptr;
+	TSharedPtr<const ITerrainDensityField, ESPMode::ThreadSafe> FieldOwner;
 };
 
 /**
@@ -82,6 +84,7 @@ public:
 	explicit FVPLegacyDensityGeneratorInstance(UVPLegacyDensityGenerator& Object)
 		: Super(&Object)
 		, Field(Object.GetField())
+		, FieldOwner(Object.GetFieldOwner())
 	{
 	}
 
@@ -149,4 +152,6 @@ private:
 	}
 
 	const ITerrainDensityField* Field = nullptr;
+	// Plugin tasks can outlive actor destruction. This immutable owner survives with the instance.
+	TSharedPtr<const ITerrainDensityField, ESPMode::ThreadSafe> FieldOwner;
 };

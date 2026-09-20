@@ -4,6 +4,7 @@
 
 #include "BackendConformance.h"
 #include "MemoryTerrainBackend.h"
+#include "Async/Async.h"
 #include "Misc/AutomationTest.h"
 
 namespace
@@ -110,6 +111,65 @@ namespace
 				Sample.bResident, bSolid, Material));
 		}
 		return bMatches;
+	}
+
+	bool RunThreadAffinity(FAutomationTestBase& Test, const FTerrainBackendFactory& Factory)
+	{
+		TUniquePtr<ITerrainBackend> Backend = Factory();
+		if (!Test.TestTrue(TEXT("Thread fixture factory succeeds"), Backend.IsValid())) return false;
+		const FTerrainBackendInit Init = MakeInit();
+		// The game thread waits, so a missing guard is detected without introducing a data race.
+		Test.TestFalse(TEXT("Worker Initialize refused on a fresh backend"),
+			Async(EAsyncExecution::Thread, [&]() { return Backend->Initialize(Init); }).Get());
+		if (!Test.TestTrue(TEXT("Worker init left backend uninitialized"), Backend->Initialize(Init))) return false;
+		const FTerrainChunkKey Key(0, 0, 0);
+		const FTerrainRegionData Data = MakeRegion(Key);
+		Backend->SetStreamingInterest(MakeInterest());
+		if (!Test.TestTrue(TEXT("Thread fixture data writes"), Backend->WriteRegion(Data))) return false;
+		const uint64 Before = Backend->HashRegion(Key);
+		Test.TestTrue(TEXT("Thread fixture is resident"), Before != 0);
+		FTerrainOp Op;
+		Op.CentreVox = FIntVector(16);
+		Op.RadiusVoxQ16 = 65536;
+		FTerrainEditResult Result;
+		Result.VoxelsTouched = 123;
+		Test.TestFalse(TEXT("Worker ApplyOp refused"),
+			Async(EAsyncExecution::Thread, [&]() { return Backend->ApplyOp(Op, Result); }).Get());
+		Test.TestEqual(TEXT("Worker ApplyOp clears output"), Result.VoxelsTouched, int64(0));
+		Test.TestEqual(TEXT("Worker ApplyOp leaves region unchanged"), Backend->HashRegion(Key), Before);
+		FTerrainRegionData Read = Data;
+		Test.TestFalse(TEXT("Worker ReadRegion refused"),
+			Async(EAsyncExecution::Thread, [&]() { return Backend->ReadRegion(Key, Read); }).Get());
+		Test.TestTrue(TEXT("Worker ReadRegion clears output"), Read.Payload.IsEmpty());
+		const FTerrainRegionData Replacement = MakeRegion(Key, 32767, 99);
+		Test.TestFalse(TEXT("Worker WriteRegion refused"),
+			Async(EAsyncExecution::Thread, [&]() { return Backend->WriteRegion(Replacement); }).Get());
+		Test.TestEqual(TEXT("Worker WriteRegion leaves region unchanged"), Backend->HashRegion(Key), Before);
+		FTerrainPointSample Sample;
+		Sample.bResident = true;
+		Test.TestFalse(TEXT("Worker QueryPoint refused"),
+			Async(EAsyncExecution::Thread, [&]() { return Backend->QueryPoint(FIntVector(16), Sample); }).Get());
+		Test.TestFalse(TEXT("Worker QueryPoint clears residency"), Sample.bResident);
+		Test.TestFalse(TEXT("Worker IsRegionResident refused"),
+			Async(EAsyncExecution::Thread, [&]() { return Backend->IsRegionResident(Key); }).Get());
+		Test.TestEqual(TEXT("Worker HashRegion returns unavailable sentinel"),
+			Async(EAsyncExecution::Thread, [&]() { return Backend->HashRegion(Key); }).Get(), uint64(0));
+		Async(EAsyncExecution::Thread, [&]() { Backend->ClearStreamingInterest(1); }).Get();
+		Test.TestTrue(TEXT("Worker clear cannot remove interest"), Backend->IsRegionResident(Key));
+		FTerrainStreamingInterest Moved = MakeInterest();
+		Moved.WorldLocation = FVector(1.e6);
+		Moved.RadiusCm = 0;
+		Async(EAsyncExecution::Thread, [&]() { Backend->SetStreamingInterest(Moved); }).Get();
+		Test.TestTrue(TEXT("Worker set cannot move interest"), Backend->IsRegionResident(Key));
+		Async(EAsyncExecution::Thread, [&]() { Backend->FlushPendingWork(); }).Get();
+		Test.TestEqual(TEXT("Worker flush leaves region unchanged"), Backend->HashRegion(Key), Before);
+		Async(EAsyncExecution::Thread, [&]() { Backend->Shutdown(); }).Get();
+		Test.TestEqual(TEXT("Worker shutdown leaves live region unchanged"), Backend->HashRegion(Key), Before);
+		FTerrainEditResult LegalResult;
+		Test.TestTrue(TEXT("Game-thread edit still succeeds after worker refusals"), Backend->ApplyOp(Op, LegalResult));
+		Test.TestTrue(TEXT("Game-thread edit changes data"), Backend->HashRegion(Key) != Before);
+		Backend->Shutdown();
+		return !Test.HasAnyErrors();
 	}
 
 	bool RunLifecycle(FAutomationTestBase& Test, const FTerrainBackendFactory& Factory)
@@ -499,6 +559,7 @@ bool RunTerrainPointConformance(FAutomationTestBase& Test, FTerrainBackendFactor
 bool RunTerrainBackendConformance(FAutomationTestBase& Test, FTerrainBackendFactory Factory)
 {
 	RunLifecycle(Test, Factory);
+	RunThreadAffinity(Test, Factory);
 	RunStreamingAndTransfer(Test, Factory);
 	RunHashPositions(Test, Factory);
 	RunEdits(Test, Factory);

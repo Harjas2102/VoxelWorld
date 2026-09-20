@@ -20,7 +20,7 @@
  *   Touched means an actual value/material change; no-op success has empty bounds.
  *   Bounds are the tight half-open envelope of changed samples. Missing data or
  *   any footprint outside WorldBounds rejects the entire op, without mutation.
- *   Work is bounded: 65,536 changed samples (7.1), 262,144 candidate reads. Larger
+ *   Work is bounded: 65,536 samples in the write set (7.1), 262,144 candidate reads. Larger
  *   operations return false; the later service owns splitting, never this backend.
  * - Physical reference occupancy is clamp((1-density)/2, 0, 1). Volumes aggregate
  *   before rounding to integer microlitres; Remove uses old material, Add uses new.

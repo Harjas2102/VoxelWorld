@@ -32,9 +32,9 @@ class UVoxelSimpleInvokerComponent;
  * edit semantics, ordering, revisions, validation, material identity, yield, persistence,
  * relevancy, chunk keys and streaming INTENT — belongs to the game and is not decided here.
  *
- * WHAT BUILD STEP 2 IMPLEMENTS, AND WHAT IT HONESTLY DOES NOT:
+ * BUILD STEP 3 SUPPORT AND REMAINING LIMITS:
  *
- *  - ApplyOp: Remove and Add spheres, the two operations T-101A proved and the two the
+ *  - ApplyOp: canonical Remove and Add spheres and boxes, the two operations T-101A proved and the two the
  *    rewired dig Blueprint issues. Flatten and Smooth are unsupported under DEF-5, which
  *    records that they "are named without plane, strength, iteration or falloff semantics";
  *    Paint is unsupported because a game material id has no plugin index to map onto until
@@ -59,13 +59,13 @@ class UVoxelSimpleInvokerComponent;
  *    hide the exact seam DEF-8 is about.
  *
  * Because of the above, this backend does NOT pass the full §6.1 Backend.Conformance suite
- * yet, and nothing in T-113 claims it does. §10 requires that pass before this is a proven
+ * yet; the density-only step-3 evidence is narrower. §10 requires that pass before this is a proven
  * replaceable backend; the material and snapshot halves of the contract arrive with the
  * steps that decide them.
  *
  * THREADING. Game thread only. §4.5 ruled the serialised execution path onto the game thread
- * (K4, D-024) and DEF-4 remains open: "a serialised execution path does not establish plugin
- * thread or lifetime safety". Every entry point here checks IsInGameThread rather than
+ * (K4, D-024); DEF-4 specifies lifecycle safety in section 4.5.1.
+ * Every entry point here checks IsInGameThread rather than
  * relying on callers, and the edits run single-threaded (bMultiThreaded = false) until E-2
  * has shown the plugin's parallel mode to be deterministic — client results supply collision
  * and are not cosmetic, so a nondeterministic mode cannot be kept on either side (DEF-5).

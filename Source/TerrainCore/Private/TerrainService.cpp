@@ -13,19 +13,6 @@
 
 namespace
 {
-	/**
-	 * The number of written voxels a sphere of RadiusVox covers, as a bound rather than a
-	 * count. The backend decides which samples its kernel actually touches; the service only
-	 * needs to know whether the request can possibly exceed MaxVoxelsPerOp (§7.1), and it has
-	 * to know that BEFORE calling the backend. Half a voxel of slack on the radius keeps the
-	 * estimate on the safe side of the integer lattice.
-	 */
-	double EstimateSphereVoxels(double RadiusVox)
-	{
-		const double R = FMath::Max(0.0, RadiusVox) + 0.5;
-		return (4.0 / 3.0) * PI * R * R * R;
-	}
-
 	const TCHAR* RejectionName(ETerrainEditRejection Rejection)
 	{
 		switch (Rejection)
@@ -70,6 +57,9 @@ void UTerrainService::Initialize(FSubsystemCollectionBase& Collection)
 		return;
 	}
 	RevisionIndex = MakeUnique<FTerrainRevisionIndex>();
+	State = ETerrainServiceState::Uninitialised;
+	WorldTearDownHandle = FWorldDelegates::OnWorldBeginTearDown.AddUObject(
+		this, &UTerrainService::OnWorldBeginTearDown);
 	Super::Initialize(Collection);
 }
 
@@ -77,6 +67,8 @@ void UTerrainService::Deinitialize()
 {
 	check(IsInGameThread());
 	DestroyBackend();
+	FWorldDelegates::OnWorldBeginTearDown.Remove(WorldTearDownHandle);
+	WorldTearDownHandle.Reset();
 	RevisionIndex.Reset();
 	Super::Deinitialize();
 }
@@ -98,7 +90,7 @@ void UTerrainService::OnWorldBeginPlay(UWorld& InWorld)
 void UTerrainService::CreateBackend(UWorld& InWorld)
 {
 	check(IsInGameThread());
-	if (Backend)
+	if (State != ETerrainServiceState::Uninitialised || Backend)
 	{
 		return;
 	}
@@ -147,14 +139,15 @@ void UTerrainService::CreateBackend(UWorld& InWorld)
 	// Until this existed the actor kept whatever generator it was authored with — a
 	// VoxelFlatGenerator — which is why the test world was a plane and why the T-101A hill
 	// had to be sculpted by script and did not survive a map load (finding 2e, R-003).
-	// The field is owned by this subsystem and only LENT to the backend (AR-2): it must
-	// outlive Shutdown, so DestroyBackend releases it strictly afterwards.
+	// The subsystem creates the immutable field; async generator instances retain shared
+	// lifetime so releasing this owner after Shutdown cannot invalidate plugin workers.
 	{
 		FTerrainWorldFieldParams FieldParams;
 		FieldParams.Seed = Settings->Seed;
-		DensityField = MakeUnique<FTerrainWorldField>(FieldParams);
+		DensityField = MakeShared<FTerrainWorldField, ESPMode::ThreadSafe>(FieldParams);
 	}
 	ActiveInit.DensityField = DensityField.Get();
+	ActiveInit.DensityFieldOwner = DensityField;
 	ActiveInit.Role = InWorld.GetNetMode() == NM_Client ? ETerrainRole::Client : ETerrainRole::Server;
 	ActiveInit.World = &InWorld;
 	ActiveInit.OriginTransform = Settings->GetTerrainOrigin();
@@ -164,10 +157,15 @@ void UTerrainService::CreateBackend(UWorld& InWorld)
 		UE_LOG(LogTerrainCore, Error, TEXT("Terrain backend '%s' failed to initialize. Terrain edits will be refused."),
 			*BackendName.ToString());
 		Backend.Reset();
+		ActiveInit = {};
 		DensityField.Reset();
 		return;
 	}
 
+	State = ETerrainServiceState::Ready;
+	FTerrainSourceState Admin;
+	EditQueue.RegisterSource(1,Admin);
+	InWorld.GetTimerManager().SetTimer(ServiceTickHandle,this,&UTerrainService::TickService,0.01f,true);
 	UE_LOG(LogTerrainCore, Log,
 		TEXT("Terrain backend '%s' ready: role=%s, voxel=%.1f cm, bounds=[%d,%d,%d)-[%d,%d,%d), generator version %u."),
 		*BackendName.ToString(),
@@ -178,32 +176,57 @@ void UTerrainService::CreateBackend(UWorld& InWorld)
 		ActiveInit.GeneratorVersion);
 }
 
+void UTerrainService::OnWorldBeginTearDown(UWorld* World)
+{
+	if (World && World == GetWorld())
+	{
+		// Close admission immediately. Release the backend at Deinitialize, after actor
+		// EndPlay: a level-authored voxel actor still uses the borrowed field before then.
+		if (State != ETerrainServiceState::TornDown)
+		{
+			State = ETerrainServiceState::Draining;
+			EditQueue.Cancel(QueueCallbacks());
+		}
+	}
+}
+
 void UTerrainService::DestroyBackend()
 {
 	check(IsInGameThread());
-	if (!Backend)
+	if (bDestroyingBackend || State == ETerrainServiceState::TornDown)
 	{
-		Interests.Empty();
-		DensityField.Reset();
 		return;
 	}
+	State = ETerrainServiceState::Draining;
+	TGuardValue<bool> DestroyGuard(bDestroyingBackend, true);
+	EditQueue.Cancel(QueueCallbacks());
+	if (GetWorld()) GetWorld()->GetTimerManager().ClearTimer(ServiceTickHandle);
+	Streams.Reset();
 
 	// Clear interests through the backend before shutting it down: the backend owns whatever
 	// it created for each one, and a shutdown that leaves those alive is the teardown half of
 	// the DEF-10 arrangement failing silently.
-	for (const TPair<uint32, FTerrainStreamingInterest>& Pair : Interests)
+	if (Backend)
 	{
-		Backend->ClearStreamingInterest(Pair.Key);
+		for (const TPair<uint32, FTerrainStreamingInterest>& Pair : Interests)
+		{
+			Backend->ClearStreamingInterest(Pair.Key);
+		}
 	}
 	Interests.Empty();
 
-	Backend->Shutdown();
+	if (Backend)
+	{
+		Backend->Shutdown();
+	}
 	Backend.Reset();
 
 	// STRICTLY AFTER Shutdown. The backend holds a borrowed pointer to this field and its
 	// teardown may still sample it; releasing it first would be a use-after-free that only
 	// shows up under a mesher thread still in flight, which is the hardest kind to see.
+	ActiveInit = FTerrainBackendInit();
 	DensityField.Reset();
+	State = ETerrainServiceState::TornDown;
 }
 
 bool UTerrainService::HasAuthority() const
@@ -234,168 +257,45 @@ bool UTerrainService::QueryPoint(const FIntVector& VoxelPos, FTerrainPointSample
 {
 	check(IsInGameThread());
 	OutSample = FTerrainPointSample();
-	return Backend && Backend->QueryPoint(VoxelPos, OutSample);
+	return IsBackendReady() && Backend->QueryPoint(VoxelPos, OutSample);
 }
 
 bool UTerrainService::RequestEdit(const FTerrainEditRequest& Request, FTerrainEditReceipt& OutReceipt)
 {
 	check(IsInGameThread());
-	OutReceipt = FTerrainEditReceipt();
-
-	// --- admission: who, and is there anything to talk to ---------------------------------
-	// Step 3 replaces this refusal on the client with a ServerRequestEdit RPC. Until then a
-	// client asking to dig is told no rather than being allowed to edit its own copy, which
-	// is the client-authoritative shortcut AGENTS.md §4 forbids outright.
-	if (!HasAuthority())
+	OutReceipt = {};
+	if (!IsBackendReady())
 	{
-		OutReceipt = Reject(ETerrainEditRejection::NoAuthority);
+		OutReceipt = Reject(State == ETerrainServiceState::Draining ? ETerrainEditRejection::ShuttingDown : ETerrainEditRejection::NotReady);
 		return false;
 	}
-	if (!Backend)
+	if (!HasAuthority()) { OutReceipt = Reject(ETerrainEditRejection::NoAuthority); return false; }
+#if !UE_BUILD_SHIPPING
+	// Legacy console diagnostics only. Gameplay uses the owning controller's transport.
+	// There is no network RPC into this admin path, and it is unavailable in multiplayer.
+	if (GetWorld()->GetNetMode() == NM_Standalone)
 	{
-		OutReceipt = Reject(ETerrainEditRejection::NotReady);
-		return false;
+		FTerrainOp Op;
+		auto Failure = QuantiseRequest(Request,Op);
+		if (Request.RadiusCm > GetDefault<UTerrainSettings>()->MaxEditRadiusCm) Failure = ETerrainEditRejection::RadiusTooLarge;
+		Op.Source = ETerrainSource::Admin;
+		const int64 Id = NextAdminRequest++;
+		const auto Cb = QueueCallbacks();
+		EditQueue.Submit(1,Id,Op,GetWorld()->GetTimeSeconds(),Cb,OutReceipt,
+			GetDefault<UTerrainSettings>()->MaxVoxelsPerOp,Failure);
+		EditQueue.Pump(GetWorld()->GetTimeSeconds(),Cb,256,1.);
+		if (LastAdminReceipt.RequestId == Id) OutReceipt=LastAdminReceipt;
+		return OutReceipt.bApplied;
 	}
-
-	// --- admission: is the request even well formed ---------------------------------------
-	if (Request.WorldLocation.ContainsNaN()
-		|| !FMath::IsFinite(Request.RadiusCm)
-		|| Request.RadiusCm <= 0.0
-		|| Request.MaterialId < 0 || Request.MaterialId > MAX_uint16
-		|| (Request.Kind != ETerrainEditKind::Remove && Request.Kind != ETerrainEditKind::Add))
-	{
-		OutReceipt = Reject(ETerrainEditRejection::BadRequest);
-		return false;
-	}
-
-	const UTerrainSettings* Settings = GetDefault<UTerrainSettings>();
-	if (Request.RadiusCm > Settings->MaxEditRadiusCm)
-	{
-		OutReceipt = Reject(ETerrainEditRejection::RadiusTooLarge);
-		return false;
-	}
-
-	// --- quantise ONCE, here (§4.3) --------------------------------------------------------
-	// The integers below are the operation: for the wire, for the journal, and for this
-	// server's own application of it. Nothing downstream re-derives them from a float.
-	FIntVector CentreVox;
-	if (!QuantiseEdit(Request.WorldLocation, ActiveInit.OriginTransform, ActiveInit.VoxelSizeCm, CentreVox))
-	{
-		OutReceipt = Reject(ETerrainEditRejection::OutOfBounds);
-		return false;
-	}
-
-	const int32 RadiusVoxQ16 = QuantiseRadiusQ16(Request.RadiusCm, ActiveInit.VoxelSizeCm);
-	if (RadiusVoxQ16 <= 0)
-	{
-		OutReceipt = Reject(ETerrainEditRejection::BadRequest);
-		return false;
-	}
-	const double RadiusVox = static_cast<double>(RadiusVoxQ16) / 65536.0;
-
-	// --- bound the work (§7.1) -------------------------------------------------------------
-	// Over the cap the correct answer is to split into sub-ops sharing a TransactionId. That
-	// is step 3 work under DEF-7, which also owns whether a split is geometrically equivalent
-	// to the unsplit op — so until then, refuse rather than invent the semantics.
-	if (EstimateSphereVoxels(RadiusVox) > static_cast<double>(Settings->MaxVoxelsPerOp))
-	{
-		OutReceipt = Reject(ETerrainEditRejection::TooLarge);
-		return false;
-	}
-
-	// --- footprint, and whether it is inside the world -------------------------------------
-	const int32 RadiusCeil = FMath::CeilToInt(RadiusVox);
-	const FTerrainBox Footprint(CentreVox - FIntVector(RadiusCeil), CentreVox + FIntVector(RadiusCeil + 1));
-	const FTerrainBox& Bounds = ActiveInit.WorldBoundsVox;
-	if (Footprint.Min.X < Bounds.Min.X || Footprint.Max.X > Bounds.Max.X
-		|| Footprint.Min.Y < Bounds.Min.Y || Footprint.Max.Y > Bounds.Max.Y
-		|| Footprint.Min.Z < Bounds.Min.Z || Footprint.Max.Z > Bounds.Max.Z)
-	{
-		OutReceipt = Reject(ETerrainEditRejection::OutOfBounds);
-		return false;
-	}
-
-	TArray<FTerrainChunkKey> PredictedChunks;
-	if (!TerrainChunkKeysForBox(Footprint, PredictedChunks))
-	{
-		OutReceipt = Reject(ETerrainEditRejection::TooLarge);
-		return false;
-	}
-
-	// Revision exhaustion is checked BEFORE the backend is called. AR-4's helper refuses an
-	// overflowing batch without mutating anything, but by then the terrain would already have
-	// moved — leaving changed terrain that no revision records, which is the one failure this
-	// step can actually prevent. The predicted footprint is a superset of what the kernel
-	// touches, so this is conservative in the safe direction.
-	for (const FTerrainChunkKey& Key : PredictedChunks)
-	{
-		if (GetRevision(Key) == MAX_uint32)
-		{
-			OutReceipt = Reject(ETerrainEditRejection::RevisionExhausted);
-			return false;
-		}
-	}
-
-	// --- build the operation ---------------------------------------------------------------
-	FTerrainOp Op;
-	Op.OpSeq = 0;               // assigned at commit, below, and only if the edit lands
-	Op.TransactionId = 0;       // splitting is step 3; a single op is its own transaction
-	Op.Kind = Request.Kind == ETerrainEditKind::Add ? ETerrainOpKind::Add : ETerrainOpKind::Remove;
-	Op.Shape = ETerrainShape::Sphere;
-	Op.Source = ETerrainSource::Player;
-	Op.SourceId = static_cast<uint32>(FMath::Max(0, Request.SourceId));
-	Op.ToolId = static_cast<uint32>(FMath::Max(0, Request.ToolId));
-	Op.CentreVox = CentreVox;
-	Op.RadiusVoxQ16 = RadiusVoxQ16;
-	Op.ExtentVox = FIntVector::ZeroValue;
-	Op.MaterialId = static_cast<FTerrainMatId>(Request.MaterialId);
-	Op.Flags = 0;
-
-	// --- execute ----------------------------------------------------------------------------
-	FTerrainEditResult Result;
-	if (!Backend->ApplyOp(Op, Result))
-	{
-		OutReceipt = Reject(ETerrainEditRejection::BackendFailed);
-		return false;
-	}
-
-	// --- commit: sequence, then revisions ---------------------------------------------------
-	// Journal append, yield settlement and client acknowledgement all belong here too, and
-	// their relative ordering is DEF-1, bound to build step 4 with K5 ruled but unimplemented.
-	// Nothing about this step's ordering should be read as settling that.
-	const FTerrainOpSeq AssignedSeq = NextOpSeq++;
-	Op.OpSeq = AssignedSeq;
-
-	if (!Result.AffectedChunks.IsEmpty() && !TryAdvanceRevisions(Result.AffectedChunks))
-	{
-		// The pre-check above makes overflow unreachable for the predicted footprint; a
-		// backend reporting chunks OUTSIDE that footprint can still land here. Say so loudly
-		// rather than pretending the metadata is consistent.
-		UE_LOG(LogTerrainCore, Error,
-			TEXT("Terrain op %llu mutated %d chunk(s) but its revisions could not be advanced. "
-				 "Chunk metadata is now behind the terrain."),
-			AssignedSeq, Result.AffectedChunks.Num());
-	}
-
-	OutReceipt.bApplied = true;
-	OutReceipt.Rejection = ETerrainEditRejection::None;
-	OutReceipt.OpSeq = static_cast<int64>(AssignedSeq);
-	OutReceipt.ChunksAffected = Result.AffectedChunks.Num();
-	OutReceipt.VoxelsTouched = Result.VoxelsTouched;
-
-	UE_LOG(LogTerrainCore, Verbose,
-		TEXT("Terrain op %llu %s at (%d,%d,%d) r=%.2f vox: %lld voxels over %d chunk(s)."),
-		AssignedSeq, Op.Kind == ETerrainOpKind::Add ? TEXT("Add") : TEXT("Remove"),
-		CentreVox.X, CentreVox.Y, CentreVox.Z, RadiusVox,
-		Result.VoxelsTouched, Result.AffectedChunks.Num());
-
-	return true;
+#endif
+	OutReceipt = Reject(ETerrainEditRejection::NoAuthority);
+	return false;
 }
 
 uint32 UTerrainService::AcquireStreamingInterest(const FVector& WorldLocation, double RadiusCm, bool bCollision, bool bRender)
 {
 	check(IsInGameThread());
-	if (!Backend || WorldLocation.ContainsNaN() || !FMath::IsFinite(RadiusCm) || RadiusCm < 0.0)
+	if (!IsBackendReady() || WorldLocation.ContainsNaN() || !FMath::IsFinite(RadiusCm) || RadiusCm < 0.0)
 	{
 		return 0;
 	}
@@ -415,7 +315,7 @@ uint32 UTerrainService::AcquireStreamingInterest(const FVector& WorldLocation, d
 void UTerrainService::UpdateStreamingInterest(uint32 InterestId, const FVector& WorldLocation)
 {
 	check(IsInGameThread());
-	if (!Backend || InterestId == 0 || WorldLocation.ContainsNaN())
+	if (!IsBackendReady() || InterestId == 0 || WorldLocation.ContainsNaN())
 	{
 		return;
 	}
@@ -431,7 +331,7 @@ void UTerrainService::UpdateStreamingInterest(uint32 InterestId, const FVector& 
 void UTerrainService::ReleaseStreamingInterest(uint32 InterestId)
 {
 	check(IsInGameThread());
-	if (InterestId == 0 || Interests.Remove(InterestId) == 0)
+	if (!IsBackendReady() || InterestId == 0 || Interests.Remove(InterestId) == 0)
 	{
 		return;
 	}

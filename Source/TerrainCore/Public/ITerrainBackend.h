@@ -8,7 +8,7 @@ class UWorld;
 
 class ITerrainDensityField;
 
-/** ARCHITECTURE.md header ruling AR-2. The density field is borrowed until Shutdown. */
+/** ARCHITECTURE.md header ruling AR-2. The raw density view is borrowed; async adapters also require DensityFieldOwner. */
 struct FTerrainBackendInit
 {
 	int32 Seed = 0;
@@ -16,6 +16,8 @@ struct FTerrainBackendInit
 	float VoxelSizeCm = 50.f;
 	FTerrainBox WorldBoundsVox;
 	const ITerrainDensityField* DensityField = nullptr;
+	/** Optional shared lifetime for async generator consumers. Raw field must match when supplied. */
+	TSharedPtr<const ITerrainDensityField, ESPMode::ThreadSafe> DensityFieldOwner;
 	ETerrainRole Role = ETerrainRole::Server;
 
 	/**
@@ -47,7 +49,13 @@ struct FTerrainBackendInit
 	FTransform OriginTransform = FTransform::Identity;
 };
 
-/** The eleven methods of ARCHITECTURE.md 4.3; no plugin or world dependencies. */
+/**
+ * The eleven methods of ARCHITECTURE.md 4.3. Every method is game-thread only (§4.5.1).
+ * Refuse worker calls before accessing backend state, including reads and Shutdown.
+ * Failed output parameters are reset. FlushPendingWork remains a no-op; it never waits
+ * for plugin rendering or collision workers. The borrowed density field is the separate
+ * any-thread interface; asynchronous consumers retain DensityFieldOwner after Shutdown.
+ */
 class TERRAINCORE_API ITerrainBackend
 {
 public:

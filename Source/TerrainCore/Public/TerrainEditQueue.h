@@ -1,0 +1,67 @@
+// Copyright VoxelWorld. Bounded, game-thread-owned admission and commit (§4.11).
+#pragma once
+#include "TerrainEdit.h"
+#include "TerrainOpGeometry.h"
+
+struct FTerrainSourceState
+{
+	bool bConnected = true, bOwnsTool = true, bEquipped = true, bPermitted = true;
+	uint32 ToolId = 0;
+	FTerrainMatId PlacementMaterial = 0;
+	FVector Position = FVector::ZeroVector;
+	double ReachCm = 1150, MaxRadiusCm = 1000, CooldownUntil = 0;
+	int32 Charges = -1; // -1: prototype hand tool has no consumable. Other tools can be finite.
+	int32 ChargePerOp = 0;
+};
+
+struct FTerrainQueueCallbacks
+{
+	TFunction<void(uint32, FTerrainSourceState&)> Refresh;
+	TFunction<ETerrainEditRejection(const FTerrainOp&, const FTerrainSourceState&)> Validate;
+	TFunction<bool(const FTerrainOp&, FTerrainEditResult&)> Apply;
+	TFunction<void(const FTerrainOp&, const FTerrainEditResult&)> Commit;
+	TFunction<void(uint32, const FTerrainEditReceipt&)> Receipt;
+};
+
+class TERRAINCORE_API FTerrainEditQueue
+{
+public:
+	FTerrainEditQueue() = default;
+	FTerrainEditQueue(const FTerrainEditQueue&) = delete;
+	FTerrainEditQueue& operator=(const FTerrainEditQueue&) = delete;
+	void RegisterSource(uint32 Id, const FTerrainSourceState& State);
+	void Disconnect(uint32 Id);
+	bool SetSourceState(uint32 Id, const FTerrainSourceState& State);
+	bool Submit(uint32 Id, int64 RequestId, const FTerrainOp& Intent, double Now, const FTerrainQueueCallbacks& Cb,
+		FTerrainEditReceipt& Receipt, int32 MaxWrites = 65536, ETerrainEditRejection AdmissionFailure = ETerrainEditRejection::None);
+	/** Fair between transactions; pin a bounded split transaction to keep its OpSeq contiguous. */
+	void Pump(double Now, const FTerrainQueueCallbacks& Cb, int32 MaxOps = 32, double BudgetSeconds = .008);
+	void Cancel(const FTerrainQueueCallbacks& Cb);
+	int32 Depth() const { return PendingCount; }
+	FTerrainOpSeq NextSequence() const { return NextOpSeq; }
+	double MaxQueueAgeSeconds() const { return MaxObservedAge; }
+	double MaxApplySeconds() const { return MaxObservedApply; }
+	int32 GlobalLimit = 256, SourceLimit = 16;
+	double RatePerSecond = 3, Burst = 3;
+private:
+	struct FTransaction { double EnqueuedAt = 0; int64 RequestId; TArray<FTerrainOp> Parts; int32 Next = 0, ChargePerPart = 0; FTerrainEditReceipt Receipt; };
+	struct FSource
+	{
+		FTerrainSourceState State;
+		TArray<FTransaction> Jobs;
+		TArray<FTerrainEditReceipt> Recent;
+		int64 HighWater = 0;
+		int32 Pending = 0, ReservedCharge = 0;
+		double Tokens = 0, LastTime = 0;
+	};
+	TMap<uint32, TUniquePtr<FSource>> Sources;
+	TArray<uint32> RoundRobin;
+	int32 Cursor = 0, PendingCount = 0;
+	uint32 ActiveSource = 0;
+	uint64 NextTransaction = 1;
+	FTerrainOpSeq NextOpSeq = 1;
+	bool bPumping = false;
+	double MaxObservedAge = 0, MaxObservedApply = 0;
+	void Resolve(uint32 Id, FSource& Source, FTerrainEditReceipt Receipt, const FTerrainQueueCallbacks& Cb);
+	void Refill(FSource& Source, double Now);
+};
