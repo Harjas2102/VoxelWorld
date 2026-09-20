@@ -1,6 +1,6 @@
 → No action. For your reading only.
 
-# HANDOFF.md — CP-014 taken; T-101B step 4 continues at the storage owner
+# HANDOFF.md — CP-014 taken, R-016 review run; next is the storage owner
 
 ## Identity, authority and Git state
 
@@ -26,6 +26,36 @@
   BACKLOG, DECISIONS, RISKS and this handoff.
 - No `.Build.cs`, `.uproject`, config, `.uasset` or `.umap` changed. No dependency added.
   The 58-byte operation wire and every existing golden value are untouched.
+
+## The R-016 review — run after CP-014, findings fixed
+
+`STATE.md` made this the first task of the next session and it was done immediately.
+
+**An independent encoder was written in Python from P-004's byte tables alone** — not
+translated from the C++ — in a disposable scratchpad venv with real BLAKE3 and XXH3, both
+checked against their published test vectors first. Nothing was installed into the machine's
+Python. It reproduced **16 of 16 pinned golden vectors exactly**. The document and the code
+agree at the byte level, which is exactly what R-016 said was unproved.
+
+Two findings, both fixed, both now tested, neither moving a byte (the golden vectors are
+unchanged):
+
+- **F-1 — P-004 understated the format.** The decoders enforced reference-validity rules the
+  document never stated, so a decoder written from P-004 alone would have accepted objects
+  this one rejects. Now stated in §§6.2, 7, 8, 9.1 and 9.5, with a new §1 rule 11 making it
+  a standing convention.
+- **F-2 — an over-cap SparseDiff count reported `FieldOutOfRange` on encode and
+  `CapExceeded` on decode.** Both are `CapExceeded` now.
+
+**What the review did not cover**, and what therefore remains single-author: the reimplementation
+was of **encoders**. A decoder, the path-copy index algorithm and the scanner's torn-tail
+logic were not independently implemented, and no reimplementation reviews a *design*. R-016
+is reduced to that residual rather than closed.
+
+The reimplementation lives in the session scratchpad and is **not committed** — it depends on
+two pip packages and is evidence, not project code. Re-running it means recreating the venv
+and re-writing it from P-004, which is the point: if it needed to be kept, it would not be
+independent.
 
 ## What this increment is
 

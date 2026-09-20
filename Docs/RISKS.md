@@ -452,12 +452,38 @@ D-028 was written for. Keep writing the breadcrumb *before* the risky half, not 
 - **The specific thing that is unproved.** The 16 golden vectors were produced by the same
   implementation they now pin. They lock the format against future drift, which is their job.
   They do **not** prove the code matches P-004's byte tables, because one author wrote both.
-- **Mitigation experiment:** a cross-vendor pass over P-004 and `893a029` that
-  **reimplements two or three objects from the document alone** and compares them against the
-  pinned hashes. That is the only cheap thing that proves document and code agree. It needs
-  BLAKE3 and XXH3 outside the engine; neither is installed on this machine.
-- **Owner / task:** the next agent, and the vendor that did not write T-117. `STATE.md` makes
-  it the first task of the next session.
-- **Result:** *open*
-- **Decision:** *open — the Director may also simply accept the exposure and move on, which
-  is his call to make and not a thing to re-litigate.*
+- **Mitigation experiment:** a pass over P-004 and `893a029` that **reimplements the
+  objects from the document alone** and compares them against the pinned hashes.
+- **RESULT, 2026-09-20 — the experiment was run, and it passed.** An independent encoder was
+  written in Python from P-004's byte tables, in a disposable scratchpad venv with real
+  BLAKE3 and XXH3 (both verified against their published test vectors first; nothing was
+  installed into the machine's Python). It reproduced **16 of 16 pinned golden vectors
+  exactly** — every object type, both slot files, both record frames, the intent digest, the
+  record digest and the WorldTag. **P-004's tables and the C++ encoders agree.** That is the
+  specific thing this risk said was unproved, and it is now proved.
+- **Two findings came out of it, both fixed:**
+  - **F-1, the real one — the document understated the format.** The decoders enforce
+    reference-validity rules that P-004 never stated: nonzero `SegmentId` / `FirstOpSeq`,
+    nonzero anchor segment IDs, `PredecessorLastOpSeq == 0` when there is no predecessor,
+    nonzero root-slot descriptor references with an upper bound, an upper bound on
+    `RootPageLength`, and nonzero index child digests and lengths. **A decoder written from
+    P-004 alone would have accepted objects this one rejects** — and the more permissive
+    implementation is the one that accepts a corrupt world. The rules are now stated in
+    §§6.2, 7, 8, 9.1 and 9.5, and P-004 §1 gained rule 11: a field rule a conforming decoder
+    enforces is written down in the section that defines the field, and anything not stated
+    there is not a requirement a decoder may invent.
+  - **F-2 — one condition, two error codes.** An over-cap SparseDiff sample count was
+    `FieldOutOfRange` on encode and `CapExceeded` on decode. The taxonomy only earns its keep
+    if the same condition reports the same way. Both are `CapExceeded` now.
+  Both findings have their own test cases; the suite is **24 of 24** after them, and the
+  golden vectors are unchanged because neither finding moved a byte.
+- **What is still NOT proved, stated precisely.** The reimplementation covered **encoders**.
+  It did not independently implement a **decoder**, the **path-copy index algorithm**, or the
+  **segment scanner's torn-tail logic** — the three places where behaviour is more than a
+  byte layout. And no reimplementation can review a **design**: whether schema 2 is the right
+  format is still a judgement only a second reader can second.
+- **Owner / task:** residual is a design read by the vendor that did not write T-117.
+- **Result:** *substantially mitigated — the byte-level claim is proved; decoder behaviour,
+  the index algorithm and the design judgement remain single-author work.*
+- **Decision:** *open, and now cheap to close either way. The Director may accept the residual
+  and move on; that is his call and not a thing to re-litigate.*

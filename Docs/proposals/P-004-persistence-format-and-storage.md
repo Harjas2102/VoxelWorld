@@ -78,6 +78,12 @@ every Empty chunk. This strengthens an adopted requirement; it does not change o
 10. **The format contains no file paths.** Objects are named by their digest and nothing
     else (§11). This is what lets §12's storage-mode question stay open without touching a
     single byte table.
+11. **A field rule that a conforming decoder enforces is written down in the section that
+    defines the field.** A byte table alone is not a specification: two implementations can
+    agree on every offset and still disagree about which files are valid, and the more
+    permissive one is the one that accepts a corrupt world. Each section below therefore
+    carries its own "field rules" paragraph, and anything not stated there is **not** a
+    requirement a decoder may invent.
 
 ### 1.1 Error taxonomy
 
@@ -291,7 +297,12 @@ leaf page**. Traversal is exactly 12 bytes and maximum depth is 12 levels of pag
 Entries are sorted **strictly ascending by `ByteValue`** (`OrderViolation` otherwise, which
 subsumes duplicate detection). A leaf entry with `Encoding == 2` (Empty) must have a zero
 `PayloadDigest` and `PayloadLength == 0`; a non-Empty entry must have a nonzero
-`PayloadLength` within the §5 cap. `ChildLength` must be within the page cap.
+`PayloadLength` within the §5 cap.
+
+An internal entry must have a **nonzero `ChildDigest`** and a **nonzero `ChildLength`** no
+greater than `96 + 32,768`, the largest a page object can be. A zero digest is the format's
+"absent" marker and an entry that is present cannot also be absent; a zero length names an
+object that cannot exist. Both are `FieldOutOfRange`.
 
 Maximum page body: internal 16 + 256·37 = 9,488 B; leaf 16 + 256·50 = 12,816 B. The
 validation cap is **32,768 B**, as P-003 §4 states, with the measured maxima well inside it.
@@ -330,6 +341,10 @@ require a digest to contain itself.
 `HasRootPage` clear is the legal, required state of the **empty G=0 checkpoint that world
 creation publishes before any edit is admitted** (P-003 §4). Validation cap 16,384 B.
 
+When `HasRootPage` is set, `RootPageLength` must additionally be no greater than
+`96 + 32,768` — the largest a page object can be — and `RootPageDigest` must be nonzero.
+Violations are `FieldOutOfRange`. A bit outside bit0 of `Flags` is `ReservedNotZero`.
+
 Advisory fields are advisory: a mismatch between `LeafKeyCount` and the walked closure is a
 logged diagnostic, not a boot refusal, because the closure is the authority and a second
 authority for the same fact is how inconsistencies become unbootable worlds.
@@ -351,6 +366,14 @@ Two pre-created fixed-size files, overwritten in place, never renamed (P-003 §4
 | 56 | 8 | `PublishedUtcMillis` `int64` |
 | 64 | 3936 | `Reserved`, all zero |
 | | **4000** | |
+
+**Field rules.** `DescriptorDigest` must be nonzero and `DescriptorLength` must be nonzero
+and no greater than `96 + 16,384`, the largest a checkpoint-descriptor object can be
+(`FieldOutOfRange`) — a root that names nothing, or names something that cannot exist, is not
+a root. A `StoreFormatVersion` other than 2 is `UnsupportedSchema`, not `FieldOutOfRange`:
+it means a build that does not know this layout wrote the slot, which is the same condition
+the header's own schema field reports. Every byte of the reserved tail must be zero
+(`ReservedNotZero`).
 
 `BodyLength` is 4000, so the body checksum covers the **whole slot** including its reserved
 tail: P-003's "whole-slot checksum", obtained without a second checksum field. A torn
@@ -376,8 +399,15 @@ Written and flushed, with its namespace, **before any record is appended** (P-00
 | 64 | 4 | `Flags` — bit0 `HasPredecessor`; other bits zero |
 | 68 | 4 | `Reserved` zero |
 
+**Field rules.** `SegmentId` and `FirstOpSeq` are both **nonzero** (`FieldOutOfRange`).
+Sequence numbering is 1-based, so a segment claiming to start at `OpSeq` 0 has no first
+record; and segment 0 is reserved because §9.5's anchor uses `PredecessorSegmentId == 0` to
+mean "none", and one value cannot also name a real segment.
+
 `HasPredecessor` clear requires `PredecessorSegmentId == 0` and a zero seal digest, and is
-legal only for the world's first segment, whose `FirstOpSeq` is 1.
+legal only for the world's first segment, whose `FirstOpSeq` is 1. Set, it requires a nonzero
+`PredecessorSegmentId` and a nonzero seal digest. A bit outside bit0 of `Flags` is
+`ReservedNotZero`.
 
 **The header is never rewritten.** Sealing appends a record (§9.4) instead of flipping a bit
 in a header that has already been flushed, so no durable object in schema 2 is ever modified
@@ -495,6 +525,12 @@ requires at both ends of the join.
 | 84 | 4 | `Reserved` zero |
 | 88 | 3912 | `Reserved`, all zero |
 | | **4000** | |
+
+**Field rules.** `ActiveSegmentId` and `ActiveSegmentFirstOpSeq` are both **nonzero**, for
+the reasons §9.1 gives. `HasPredecessor` clear requires `PredecessorSegmentId == 0`, a zero
+seal digest **and** `PredecessorLastOpSeq == 0`; set, it requires a nonzero segment ID and a
+nonzero seal digest. Violations are `FieldOutOfRange`, a stray `Flags` bit is
+`ReservedNotZero`, and every byte of the reserved tail must be zero.
 
 Two pre-created slots, same publication discipline and same whole-slot checksum argument as
 §8. Rotation order, normative: create and flush the new segment's header and namespace →

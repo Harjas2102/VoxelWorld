@@ -953,6 +953,77 @@ bool FTerrainPersistenceCorruptTest::RunTest(const FString& Parameters)
 			(int32)TerrainPersistDenseDensityAt(Dense, -1), 0);
 	}
 
+	// --- one condition, one error code ------------------------------------------------------
+	{
+		// R-016 review: an over-cap sample count was FieldOutOfRange on encode and CapExceeded
+		// on decode. The taxonomy only earns its keep if the same condition reports the same way.
+		FTerrainChunkPayloadRecord Overfull;
+		Overfull.Encoding = ETerrainRegionEncoding::SparseDiff;
+		Overfull.Sparse.AddDefaulted(TerrainPersistMaxSparseSamples + 1);
+		for (int32 Index = 0; Index < Overfull.Sparse.Num(); ++Index)
+		{
+			Overfull.Sparse[Index].LocalIndex = static_cast<uint16>(Index);
+		}
+
+		TArray<uint8> Out;
+		TestEqual(TEXT("an over-cap SparseDiff -> CapExceeded on encode"),
+			TerrainPersistEncodeChunkPayloadBody(Overfull, Out), ETerrainPersistError::CapExceeded);
+	}
+
+	// --- reference-validity rules, now stated in P-004 6.2/7/8/9.1/9.5 ------------------------
+	{
+		// R-016 review: the decoders enforced these, and the document did not state them, so a
+		// decoder written from P-004 alone would have accepted objects this one rejects.
+		FTerrainCheckpointDescriptor Descriptor;
+		Descriptor.bHasRootPage   = true;
+		Descriptor.RootPageDigest = MakeDigest(0x12);
+		Descriptor.RootPageLength = static_cast<uint32>(
+			TerrainPersistObjectHeaderSize + TerrainPersistMaxIndexPageBody + 1);
+		TArray<uint8> Out;
+		TestEqual(TEXT("a checkpoint naming an over-large root page -> FieldOutOfRange"),
+			TerrainPersistEncodeCheckpointBody(Descriptor, Out), ETerrainPersistError::FieldOutOfRange);
+
+		FTerrainRootSlot Root;
+		Root.DescriptorDigest = FTerrainDigest();   // a root that names nothing
+		Root.DescriptorLength = 176;
+		TestEqual(TEXT("a root slot with a zero descriptor digest -> FieldOutOfRange"),
+			TerrainPersistEncodeRootSlotBody(Root, Out), ETerrainPersistError::FieldOutOfRange);
+
+		Root.DescriptorDigest    = MakeDigest(0x13);
+		Root.StoreFormatVersion  = 3;
+		TestEqual(TEXT("a root slot from a future store format -> UnsupportedSchema"),
+			TerrainPersistEncodeRootSlotBody(Root, Out), ETerrainPersistError::UnsupportedSchema);
+
+		FTerrainJournalAnchor Anchor;
+		Anchor.AnchorGeneration        = 1;
+		Anchor.ActiveSegmentId         = 0;   // segment 0 is reserved
+		Anchor.ActiveSegmentFirstOpSeq = 1;
+		TestEqual(TEXT("an anchor naming segment 0 -> FieldOutOfRange"),
+			TerrainPersistEncodeAnchorBody(Anchor, Out), ETerrainPersistError::FieldOutOfRange);
+
+		Anchor.ActiveSegmentId      = 4;
+		Anchor.bHasPredecessor      = false;
+		Anchor.PredecessorLastOpSeq = 9;   // contradicts the flag
+		TestEqual(TEXT("an anchor with no predecessor but a predecessor sequence -> FieldOutOfRange"),
+			TerrainPersistEncodeAnchorBody(Anchor, Out), ETerrainPersistError::FieldOutOfRange);
+
+		FTerrainIndexPage Page;
+		Page.Depth = 0;
+		Page.bLeaf = false;
+		FTerrainIndexInternalEntry Child;
+		Child.ByteValue   = 1;
+		Child.ChildDigest = FTerrainDigest();   // present and absent at once
+		Child.ChildLength = 200;
+		Page.Internal.Add(Child);
+		TestEqual(TEXT("an internal entry with a zero child digest -> FieldOutOfRange"),
+			TerrainIndexEncodePageBody(Page, Out), ETerrainPersistError::FieldOutOfRange);
+
+		Page.Internal[0].ChildDigest = MakeDigest(0x14);
+		Page.Internal[0].ChildLength = 0;
+		TestEqual(TEXT("an internal entry with a zero child length -> FieldOutOfRange"),
+			TerrainIndexEncodePageBody(Page, Out), ETerrainPersistError::FieldOutOfRange);
+	}
+
 	// --- the object-naming rule ------------------------------------------------------------
 	{
 		const FTerrainDigest Digest = MakeDigest(0x01);

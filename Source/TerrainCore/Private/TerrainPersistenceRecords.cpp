@@ -377,10 +377,16 @@ ETerrainPersistError TerrainPersistEncodeChunkPayloadBody(
 		{
 			return ETerrainPersistError::FieldOutOfRange;
 		}
-		if (In.Sparse.Num() < 1 || In.Sparse.Num() > TerrainPersistMaxSparseSamples)
+		if (In.Sparse.Num() < 1)
 		{
 			// Zero samples is not an empty SparseDiff -- it is Empty, which is the index's job.
 			return ETerrainPersistError::FieldOutOfRange;
+		}
+		if (In.Sparse.Num() > TerrainPersistMaxSparseSamples)
+		{
+			// Over-cap is CapExceeded on the way in as well as on the way out. One condition
+			// reported under two different codes makes the taxonomy useless for diagnosis.
+			return ETerrainPersistError::CapExceeded;
 		}
 
 		for (int32 Index = 0; Index < In.Sparse.Num(); ++Index)
