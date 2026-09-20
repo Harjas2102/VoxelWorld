@@ -14,6 +14,50 @@
 **Also carried:** the evidence table and experiment discipline of
 `Docs/reviews/P-001-terrain-astra.md`, per D-017.
 
+→ No action. For your reading only.
+
+> **Step-3 implementation determinations, 2026-09-17 (D-023; Director explicitly
+> delegated P-002 and completion of the active T-101B increment).** This current note
+> supersedes historical step-2 absence statements below; it does not close the full gate.
+>
+> - **P-002 is adopted:** nearest balanced representable box partition (§4.11.7).
+>   No operation-wire change: `FTerrainOp` remains 58 bytes. Geometry and split tests
+>   cover exact union, negative coordinates, overflow and bounded construction.
+> - **AR-7, lifetime:** `FTerrainBackendInit` adds an optional thread-safe shared owner
+>   for the immutable field alongside its raw view. The production adapter requires a
+>   matching owner when a field is supplied. Each plugin generator instance retains it.
+>   Actor destruction need not finish every worker; the last consumer releases the field.
+>   The service releases its own reference after backend shutdown, without waiting.
+> - **Queue scheduling:** round-robin applies between transactions. A split transaction
+>   remains selected across pump calls to preserve §4.11.7's contiguous OpSeq requirement.
+>   Admission reserves all children (global 256, per source 16); each commits separately.
+>   Thus a split can delay another source by more than one 8 ms slice, bounded by its
+>   child count. Measured queue age and backend-apply maximum are in the MP test log.
+>   One token per intent, three tokens/sec with burst three; charges reserve per child.
+> - **Prototype policy:** only the existing tool 0 is valid, nonconsuming, available
+>   throughout the prototype world. No inventory or zone system is invented. The queue
+>   accepts server-owned equip/charge/permission state and tests revalidation changes.
+>   Server pawn position determines reach; placement checks every pawn's collision bounds.
+> - **Transport:** reliable owner-only PlayerController component, server-generated source
+>   identity, monotonic request IDs, 64 cached receipts; no client prediction. Blueprint
+>   success means queued; an authoritative receipt arrives later. Session protocol 1 fixes
+>   this initial canonical kernel/envelope; it also checks backend module, seed, generator,
+>   voxel size and origin. Future incompatible kernels must increment compatibility.
+>   Every delivered op carries the unchanged encoded op plus before/after revisions for
+>   its entire read box. Gap/contract failure blocks affected chunks pending resync.
+> - **Subscriptions:** distance-based pristine subscriptions and matching retained revisions
+>   are supported. Unknown modified chunks and failed replay await step 5; no invented
+>   snapshot transfer or false acknowledgement. Full JIP is deliberately not claimed.
+> - **Adapter density contract:** plugin ramp values are clipped to W; wholly contained
+>   cells become fully empty/full. One plugin-prescribed data lock surrounds the internal
+>   unlocked kernel; no external game lock wraps a lock-taking plugin API. Edits remain
+>   single-threaded on both peers. `Terrain.AdapterChecks` pins four density hashes over
+>   20 runs and checks W, whole-cell occupancy, idempotence and refusal atomicity.
+>   Parallel kernel determinism, materials and full `Backend.Conformance` remain unproven.
+>
+> Verification commands, evidence and limitations live in HANDOFF. Checkpoint records
+> remain CP-013 until the Director requests `checkpoint`.
+
 > **Architect ruling, 2026-09-06 (technical, per D-023).** Four items live in ARCHITECTURE v0
 > had no home in this document when it was adopted. They are carried in here rather than left
 > in the archive. None is a GAME decision, so this is logged here and not as a new
@@ -1321,9 +1365,13 @@ that already exists.
 
 Split rules:
 
-1. **Partition, do not re-shape.** The box is halved along its longest axis, recursively, until
-   every sub-box is within `MaxVoxelsPerOp`. Sub-boxes are disjoint and their union is exactly
-   the original write set.
+1. **Partition, do not re-shape.** P-002, accepted 2026-09-17 under explicit Director
+   delegation: recursively choose the longest axis of length at least four (ties X/Y/Z).
+   Cut at the most balanced position that leaves both lengths even; ties choose the lower
+   coordinate. Integer centres/extents cannot encode odd-length equal halves. Continue
+   until every sub-box is within `MaxVoxelsPerOp`. The children are disjoint and exactly
+   tile the parent. A cap below eight cannot hold the minimum 2×2×2 box and is rejected.
+   Bound subdivision by admission capacity before allocating an unbounded tree.
 2. **One `TransactionId`, many `OpSeq`.** Sub-ops share the transaction id and each receives its
    own `OpSeq`, increasing, contiguous within the transaction.
 3. **The transaction is NOT atomic.** Each sub-op commits independently and satisfies 4.11.6
