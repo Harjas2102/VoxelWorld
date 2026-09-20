@@ -214,6 +214,39 @@ ETerrainStorageResult FTerrainPlatformStorageDevice::Read(const FString& Relativ
 	return ETerrainStorageResult::Ok;
 }
 
+ETerrainStorageResult FTerrainPlatformStorageDevice::ListFiles(
+	const FString& RelativeDirectory, TArray<FString>& OutNames) const
+{
+	const FString Absolute = Resolve(RelativeDirectory);
+	if (Absolute.IsEmpty())
+	{
+		return ETerrainStorageResult::BadPath;
+	}
+
+	IPlatformFile& File = FPlatformFileManager::Get().GetPlatformFile();
+	if (!File.DirectoryExists(*Absolute))
+	{
+		// Not an empty list: "there is no journal directory" and "the journal directory is
+		// empty" are different facts about a world.
+		return ETerrainStorageResult::NotFound;
+	}
+
+	OutNames.Reset();
+	File.IterateDirectory(*Absolute,
+		[&OutNames](const TCHAR* Path, bool bIsDirectory) -> bool
+		{
+			if (!bIsDirectory)
+			{
+				OutNames.Add(FPaths::GetCleanFilename(Path));
+			}
+			return true;
+		});
+
+	// Sorted, so discovery does not depend on the order the file system happens to report.
+	OutNames.Sort();
+	return ETerrainStorageResult::Ok;
+}
+
 ETerrainStorageResult FTerrainPlatformStorageDevice::WriteNew(const FString& RelativePath, TArrayView<const uint8> Bytes)
 {
 	const FString Absolute = Resolve(RelativePath);
@@ -339,6 +372,36 @@ ETerrainStorageResult FTerrainMemoryStorageDevice::Read(const FString& RelativeP
 		return ETerrainStorageResult::NotFound;
 	}
 	OutBytes = *Found;
+	return ETerrainStorageResult::Ok;
+}
+
+ETerrainStorageResult FTerrainMemoryStorageDevice::ListFiles(
+	const FString& RelativeDirectory, TArray<FString>& OutNames) const
+{
+	if (!TerrainStorageIsSafeRelativePath(RelativeDirectory))
+	{
+		return ETerrainStorageResult::BadPath;
+	}
+	if (!Directories.Contains(RelativeDirectory))
+	{
+		return ETerrainStorageResult::NotFound;
+	}
+
+	OutNames.Reset();
+	const FString Prefix = RelativeDirectory + TEXT("/");
+	for (const TPair<FString, TArray<uint8>>& Pair : Files)
+	{
+		if (!Pair.Key.StartsWith(Prefix))
+		{
+			continue;
+		}
+		const FString Remainder = Pair.Key.RightChop(Prefix.Len());
+		if (!Remainder.Contains(TEXT("/")))   // direct children only, never recursive
+		{
+			OutNames.Add(Remainder);
+		}
+	}
+	OutNames.Sort();
 	return ETerrainStorageResult::Ok;
 }
 
@@ -469,6 +532,20 @@ ETerrainStorageResult FTerrainFaultDevice::Read(const FString& RelativePath, TAr
 {
 	++Counts[static_cast<int32>(ETerrainStorageOp::Read)];
 	return Inner.Read(RelativePath, OutBytes);
+}
+
+ETerrainStorageResult FTerrainFaultDevice::ListFiles(
+	const FString& RelativeDirectory, TArray<FString>& OutNames) const
+{
+	// P-003 §8 names "segment discovery" among the mandatory injected failures, so listing is
+	// faultable even though it mutates nothing. The const_cast is confined to the counter: a
+	// read that can fail is still a read.
+	int32 Tear = -1;
+	if (const_cast<FTerrainFaultDevice*>(this)->ShouldFail(ETerrainStorageOp::ListFiles, RelativeDirectory, Tear))
+	{
+		return ETerrainStorageResult::IoError;
+	}
+	return Inner.ListFiles(RelativeDirectory, OutNames);
 }
 
 ETerrainStorageResult FTerrainFaultDevice::WriteNew(const FString& RelativePath, TArrayView<const uint8> Bytes)

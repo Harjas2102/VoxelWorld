@@ -1,6 +1,6 @@
 → No action. For your reading only.
 
-# HANDOFF.md — CP-015 taken; next is the journal writer
+# HANDOFF.md — journal writer and world store built; next is the commit path
 
 ## Identity, authority and Git state
 
@@ -58,6 +58,55 @@ The reimplementation lives in the session scratchpad and is **not committed** �
 two pip packages and is evidence, not project code. Re-running it means recreating the venv
 and re-writing it from P-004, which is the point: if it needed to be kept, it would not be
 independent.
+
+## The journal writer and the world store — a world directory now exists
+
+P-003 §8 item 3's remaining half, on top of the device.
+
+**`FTerrainJournalWriter`** owns the active segment, the anchor pair and the ordering P-004
+§9.5 makes normative — create and flush the segment header and its namespace, publish and
+flush the **inactive** anchor, then append. Sealing and rotating are one operation rather than
+two a caller could get out of order, because the new segment's continuity evidence is the
+digest of the seal frame that rotation just wrote.
+
+**`FTerrainWorldStore`** owns a world directory: create (base descriptor, the empty G=0
+checkpoint, both root slots, the first segment, both anchors), open, and checkpoint
+publication. **A fresh world is 7 files.**
+
+**Every claim about what the writer wrote is checked with the scanner**, never with the
+writer's own state. The two were built as halves of one contract in T-117 and T-119 precisely
+so neither marks its own work.
+
+What the tests actually demonstrate, beyond round trips:
+
+- A **torn append** closes the writer over an uncertain tail, and a reopen finds the tear,
+  keeps the last complete record, and still refuses to append. It does **not** truncate:
+  P-003 §3 requires the torn bytes preserved before repair, and repair is the recovery
+  increment's job with its own policy.
+- An **interrupted rotation** — the new segment header written, the anchor publication failed
+  — leaves a world that boots to the sealed segment with no acknowledged record lost, and
+  reports the new segment as an ignorable orphan. That is exactly the window P-004 §9.5's
+  ordering exists to make survivable.
+- A newer unanchored **non-empty** segment refuses boot; a named-but-**missing** segment
+  refuses boot rather than reporting an empty journal.
+- A **torn root publication** leaves the previous checkpoint current, reports root redundancy
+  as broken, and is repaired by republishing. P-004 §12's *containment* argument is now
+  demonstrated rather than asserted — the durability half is still unproved.
+- A checkpoint beyond the journal head refuses to open, and a cross-wired world (this world's
+  base descriptor in front of another world's roots) is refused with `WorldMismatch`.
+
+**One wart, documented rather than hidden.** A rotation that fails after writing its segment
+header consumes that segment ID: the orphan file exists and rewriting it is refused, because
+an immutable object is never overwritten. A retry must use the next ID. That is the safe
+failure, and there is a test that pins it.
+
+**Verified:** both targets build; **30 of 30** tests pass, exit 0
+(`Saved/Logs/Journal-Final.log`). Two new cases: `Journal.Writer`, `WorldStore.Lifecycle`.
+Both declare their expected error logs, so "the writer shouts when it closes itself" is a
+checked expectation rather than noise.
+
+**Still missing:** the commit path, the capture pump, settlement, SQLite, replay/recovery and
+retention. Nothing calls any of this from the game yet, and **no edit survives a restart**.
 
 ## The storage device seam — built after the review
 

@@ -626,9 +626,19 @@ world, no plugin and no file system.
 File handles live behind **`ITerrainStorageDevice`** in `TerrainStorage.h`, which the codec
 headers do not include — the format stays testable with no file system, and the device stays
 replaceable by an in-memory or fault-injecting implementation. Its surface is six mutating
-operations, deliberately small: every one of them is a place a crash can happen, and a
-smaller surface is a smaller crash matrix. SQLite and the world store arrive later, behind
-the same discipline. No plugin type, no `UObject` and
+operations plus two reads, deliberately small: every mutating one is a place a crash can
+happen, and a smaller surface is a smaller crash matrix.
+
+Above it: **`FTerrainJournalWriter`** owns the active segment, the anchor pair and the
+rotation ordering below, and **`FTerrainWorldStore`** owns a world directory — create, open
+and checkpoint publication. SQLite and the commit path arrive later, behind the same
+discipline.
+
+**A rotation consumes its segment ID even when it fails.** If the new segment's header is
+written and the anchor publication then fails, the file exists as an orphan and rewriting it
+is refused, because an immutable object is never overwritten. A retry therefore uses the next
+ID. That is the safe failure — the alternative is a writer that overwrites a file it cannot
+prove is its own — and reclaiming an orphan's ID belongs to retention. No plugin type, no `UObject` and
 no engine-asset type is ever persisted or crosses the adapter boundary (D-011, §4.1.0).
 
 ---
@@ -669,7 +679,11 @@ breaks the one property the two-slot protocol rests on. A length mismatch is ref
 than truncating to fit.
 
 **Ruling for this packet.** Schema 2 is specified so the question is *isolable and
-deferrable*, not so it is answered by assertion:
+deferrable*, not so it is answered by assertion. The containment half of the argument below
+is now **demonstrated rather than asserted**: a torn slot publication is rejected by the
+whole-slot checksum, the other slot still carries the last acknowledged generation, and the
+retry repairs the damaged slot instead of touching the good one. What remains unproved is the
+durability half — a fault injected in process is not a power loss.
 
 - The four durable-publication primitives — two root slots and two anchor slots — are
   **pre-created, fixed-size, overwritten in place**. They create no new names at runtime, so

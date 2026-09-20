@@ -114,6 +114,19 @@ public:
 	virtual ETerrainStorageResult Read(const FString& RelativePath, TArray<uint8>& OutBytes) const = 0;
 
 	/**
+	 * Lists the file names directly inside a directory -- names only, not paths, not recursive.
+	 *
+	 * Journal segment discovery needs it: P-003 §3 requires boot to tell an anchored segment
+	 * from a newer **unanchored** one, and to tell an orphan (created, never written) from a
+	 * protocol violation (created, written, never anchored). Neither is knowable without
+	 * looking at what is actually on disk.
+	 *
+	 * A missing directory is NotFound, not an empty list. "There is no journal directory" and
+	 * "the journal directory is empty" are different facts about a world.
+	 */
+	virtual ETerrainStorageResult ListFiles(const FString& RelativeDirectory, TArray<FString>& OutNames) const = 0;
+
+	/**
 	 * Creates a file that does not exist, writes it, flushes it, closes it.
 	 *
 	 * Refuses with AlreadyExists rather than overwriting. Immutable objects are immutable:
@@ -148,6 +161,7 @@ public:
 	virtual bool  Exists(const FString& RelativePath) const override;
 	virtual int64 Size(const FString& RelativePath) const override;
 	virtual ETerrainStorageResult Read(const FString& RelativePath, TArray<uint8>& OutBytes) const override;
+	virtual ETerrainStorageResult ListFiles(const FString& RelativeDirectory, TArray<FString>& OutNames) const override;
 	virtual ETerrainStorageResult WriteNew(const FString& RelativePath, TArrayView<const uint8> Bytes) override;
 	virtual ETerrainStorageResult OverwriteInPlace(const FString& RelativePath, TArrayView<const uint8> Bytes) override;
 	virtual ETerrainStorageResult Append(const FString& RelativePath, TArrayView<const uint8> Bytes) override;
@@ -170,6 +184,7 @@ public:
 	virtual bool  Exists(const FString& RelativePath) const override;
 	virtual int64 Size(const FString& RelativePath) const override;
 	virtual ETerrainStorageResult Read(const FString& RelativePath, TArray<uint8>& OutBytes) const override;
+	virtual ETerrainStorageResult ListFiles(const FString& RelativeDirectory, TArray<FString>& OutNames) const override;
 	virtual ETerrainStorageResult WriteNew(const FString& RelativePath, TArrayView<const uint8> Bytes) override;
 	virtual ETerrainStorageResult OverwriteInPlace(const FString& RelativePath, TArrayView<const uint8> Bytes) override;
 	virtual ETerrainStorageResult Append(const FString& RelativePath, TArrayView<const uint8> Bytes) override;
@@ -193,6 +208,7 @@ enum class ETerrainStorageOp : uint8
 {
 	EnsureDirectory = 0,
 	Read,
+	ListFiles,
 	WriteNew,
 	OverwriteInPlace,
 	Append,
@@ -226,6 +242,7 @@ public:
 	virtual bool  Exists(const FString& RelativePath) const override;
 	virtual int64 Size(const FString& RelativePath) const override;
 	virtual ETerrainStorageResult Read(const FString& RelativePath, TArray<uint8>& OutBytes) const override;
+	virtual ETerrainStorageResult ListFiles(const FString& RelativeDirectory, TArray<FString>& OutNames) const override;
 	virtual ETerrainStorageResult WriteNew(const FString& RelativePath, TArrayView<const uint8> Bytes) override;
 	virtual ETerrainStorageResult OverwriteInPlace(const FString& RelativePath, TArrayView<const uint8> Bytes) override;
 	virtual ETerrainStorageResult Append(const FString& RelativePath, TArrayView<const uint8> Bytes) override;
