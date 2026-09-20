@@ -2,6 +2,37 @@
 
 # HANDOFF.md - T-101B build step 3
 
+## Active continuation — 2026-09-19
+
+- Director requested **"Commit and move to the next step"**. Committed and pushed
+  `52ccee9` (P-002/specification) and `21e3a2c` (step-3 implementation), `main -> main`.
+  Prior step-3 evidence below remains valid; the only code cleanup was a blank EOF line.
+- `9a8dd7b` reconciles the older lifecycle/fairness paragraphs with those already adopted
+  step-3 determinations; it is also pushed. No runtime behavior changed in that commit.
+- New runtime base: **`21e3a2c`**; incoming Git base is this enclosing draft-document commit.
+  Next task is the **R3 prerequisite design for build step 4**:
+  DEF-1/2/9 remain open. No save implementation has started and no checkpoint was requested.
+- Drafted `Docs/proposals/P-003-persistence-commit-and-recovery.md`: journal commit authority,
+  idempotent settlement, complete checkpoint manifests, fallback/retention and migration.
+  Exact byte-layout packet and platform durability verification remain required.
+  It is saved as a documentation-only draft with this handoff, not a completed or approved
+  persistence implementation. Checkpoint documents remain CP-013.
+- Cross-vendor review was attempted through the installed Claude CLI, Opus as OPERATIONS
+  specifies, restricted to Read/Glob/Grep with MCP disabled. It returned **401: API key
+  is invalid**; no review was produced and no approval is inferred. The process has exited.
+  The wrapper also hit a console-encoding error after saving the authentication result;
+  neither event changed source files. Evidence: `Saved/P003-review-output.txt`.
+- **Next safe action:** an authenticated independent review of P-003, then reconciliation
+  of its findings and the exact format/storage packet. DEF-1/2/9 remain open; no save code
+  or new dependency has been introduced. This is a concrete draft, not an adopted design.
+- Author audit added an explicit ban on snapshotting a provisional mutation during
+  storage-fault teardown. Ordinary shutdown compaction would otherwise risk publishing
+  data ahead of the durable journal. This addition still requires independent review.
+- Platform read evidence: installed UE 5.8 `WindowsPlatformFile.cpp:933` implements
+  `FFileHandleWindows::Flush` with `FlushFileBuffers`; `OpenWrite` at line 1638 returns
+  that handle. This verifies the file-content primitive, not the whole checkpoint
+  namespace/publication protocol. No fault-injection or power-loss test has run.
+
 ## Identity, authority and worktree
 
 - Updated **2026-09-17**. Outgoing **Codex**, Implementer with explicit technical
