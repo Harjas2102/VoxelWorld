@@ -916,14 +916,24 @@ a flat plane until T-108. That is now closed: the world is a pure function of po
 and needs no save file to come back. D-012's deterministic base names `GeneratorVersion` and the
 seed as its generation inputs; there are no authored stamps.
 
-### 4.7 Persistence contract — P-003 revision 3 adopted
+### 4.7 Persistence contract — P-003 revision 3 adopted, P-004 format specified
 
 The normative architectural contract is [P-003 §§1–7](proposals/P-003-persistence-commit-and-recovery.md),
 adopted 2026-09-20 under D-023/D-032 after the [independent revision-3 review](reviews/P-003-review-claude-r3.md).
-Its exact-format/storage specification packet remains **unwritten and required before
-any codec/service implementation**. The former unimplemented schema-1 byte sketches
-and ~122-byte record estimate are withdrawn; new envelopes will be schema 2. The
-58-byte operation codec and the §4.2 Dense transfer layout are unchanged.
+Its exact-format/storage specification packet is
+[**P-004**](proposals/P-004-persistence-format-and-storage.md), written and implemented
+2026-09-20: every byte offset, width, cap, ordering rule, checksum and digest of **schema 2**,
+plus the error taxonomy, the file-naming rule and the module boundary. The former
+unimplemented schema-1 byte sketches and ~122-byte record estimate are withdrawn. The
+58-byte operation codec and the §4.2 Dense transfer layout are unchanged — P-004 §5.1
+re-homes that Dense layout as the on-disk chunk payload, so replication and disk share one
+layout and cannot drift apart.
+
+**What exists in code** (`TerrainCore`, headless, no file system): the codecs and validators
+for every schema-2 object and journal record, the 96-bit path-copied chunk-key index with its
+in-memory object-store seam, and `Terrain.PersistDump`. **What does not exist**: the storage
+owner, the commit path, the capture pump, settlement, SQLite, recovery and retention. Build
+step 4 is not complete and DEF-1/2/9 remain open.
 
 - **Commit:** journal append + durable flush precedes terrain broadcast and
   TerrainCommitted; SQLite settlement follows, with idempotent `(WorldId, OpSeq)`
@@ -953,11 +963,15 @@ and ~122-byte record estimate are withdrawn; new envelopes will be schema 2. The
   is advisory; roots/journal own sequence authority. Tests/Saves carries versioned
   fixtures, including malformed input and migration cases.
 
-The format packet fixes all byte tables, lengths, checksums, caps, storage/module
-ownership, journal rotation and OS publication primitives. If durable new filenames
-cannot be established, P-003 defines the preallocated-container fallback. Eager boot
-cost, game-thread journal flush, capture throughput/delay, pinned memory and production
-material transfer are explicit gates, not assumed successes. §14 defects remain open.
+P-004 fixes all byte tables, lengths, checksums, caps, storage/module ownership and
+journal rotation. On OS publication it rules **Mode A (named content-addressed objects)**
+as the default and makes the byte tables mode-independent — no format field contains a
+path — so P-003's preallocated-container fallback can still be adopted later without
+changing a single stored byte. Whether Windows durably publishes a new directory entry
+across power loss is **not proved** and stays a named acceptance gate before service
+integration (P-004 §12). Eager boot cost, game-thread journal flush, capture
+throughput/delay, pinned memory and production material transfer likewise remain explicit
+gates, not assumed successes. §14 defects remain open.
 
 ### 4.8 Relevancy and join-in-progress
 
@@ -1442,12 +1456,19 @@ Run against `FMemoryTerrainBackend`. Seconds, on every build.
 | `Field.Strata` | Strata are ordered by depth; the ore body exists, is finite, and never breaks the surface |
 | `Field.Range` | `SampleRange` never excludes a value `Sample` can produce (AR-6), and saturates for sky and deep rock |
 | `Field.Determinism` | Two fields with one seed agree bitwise; a field does not drift as it is used; a different seed changes the world |
-| `Journal.RoundTrip` | Write N records, reopen, read N identical |
-| `Journal.TornTail` | Truncate mid-record → loader recovers N−1 and reports the truncation |
-| `Journal.BadCrc` | A flipped byte is detected, not loaded |
-| `Snapshot.Codec.Dense/Sparse/Empty` | Round-trip for all three; sparse and dense produce identical regions |
-| `Snapshot.EncodingChoice` | The smaller encoding is selected; both decode |
-| `Snapshot.MaterialOnlyChange` | A material-only edit survives sparse encoding and is not misclassified as pristine |
+| `Persistence.Format.Sizes` | **Implemented, passing.** Every fixed size in P-004 §§3–9 measured from the encoder and logged as a number: 96, 4096, 4000, 122, 32, 131104, 16, 37, 50, 80, 72, 20, 140, 64. Also the worst-case journal record (84,768 B) against its 131,072 B cap |
+| `Persistence.Format.RoundTrip` | **Implemented, passing.** Every schema-2 object and record round-trips field-for-field and byte-for-byte: negative coordinates, maximum counts, zero-change commits, the empty G=0 checkpoint. Covers the encoding-choice rule at, side and past the 21,844-sample break-even, including a **material-only** difference that must not be classified as pristine |
+| `Persistence.Format.Golden` | **Implemented, passing.** Sixteen pinned BLAKE3 vectors over fixed fixtures. A reordered, widened or re-endianed field changes a hex string in the diff. Failing one is a save-format change under AGENTS §4, not a constant to update |
+| `Persistence.Format.Corrupt` | **Implemented, passing.** Every defence fires with its **own** error code: short buffer, trailing bytes, bad magic, schema 1, bad header size, header/body checksum, wrong object type, world/epoch/base mismatch, absurd declared length, nonzero reserved, out-of-range enum, descending/duplicate ordering, over-cap counts, Empty-as-payload, unadvanced revision, NoEconomy-with-deltas, physical-availability lies, and the 64-hex object-naming rule |
+| `Persistence.Format.TornTail` | **Implemented, passing.** An incomplete or zero-filled FINAL record of the ACTIVE segment is a torn tail; the same bytes on an inactive segment, a damaged INTERIOR record, a sequence gap, a lying seal digest and a record after a seal all fail closed |
+| `Persistence.Index.Keys` | **Implemented, passing.** The 96-bit key transform is order-preserving over signed coordinates including `INT32_MIN`/`INT32_MAX`, on 507 comparisons, and round-trips |
+| `Persistence.Index.PathCopy` | **Implemented, passing.** 64 keys wrote 147 pages against the 12·D bound of 768; one changed key then rewrote exactly 12 and shared everything else; both roots still resolve their own values; an Empty chunk stays IN the index with its revision metadata |
+| `Journal.RoundTrip` | Write N records, reopen, read N identical — **needs the storage owner; not implemented** |
+| `Journal.TornTail` | Truncate mid-record → loader recovers N−1 and reports the truncation. The **byte-level** half is `Persistence.Format.TornTail` above; the loader half is not implemented |
+| `Journal.BadCrc` | A flipped byte is detected, not loaded — byte level done above; the loader is not implemented |
+| `Snapshot.Codec.Dense/Sparse/Empty` | Round-trip for all three; sparse and dense produce identical regions. Codec half done by `Persistence.Format.RoundTrip`; "identical regions" needs a backend round-trip and is not implemented |
+| `Snapshot.EncodingChoice` | The smaller encoding is selected; both decode — **done** by `Persistence.Format.RoundTrip` |
+| `Snapshot.MaterialOnlyChange` | A material-only edit survives sparse encoding and is not misclassified as pristine — **done** by `Persistence.Format.RoundTrip` |
 | `Revision.Monotonic` | Chunk revs never decrease, including across payload deletion; a multi-chunk op bumps every affected chunk exactly once |
 | `Replay.Equivalence` | `snapshot@R + ops after R` == `apply all ops from base`. **The central persistence invariant** |
 | `Compaction.Equivalence` | Region hash before == after |

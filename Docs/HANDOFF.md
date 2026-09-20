@@ -1,230 +1,218 @@
 → No action. For your reading only.
 
-# HANDOFF.md — T-101B step 4, P-003 revision 3
+# HANDOFF.md — T-101B step 4, P-004 format packet and codecs
 
 ## Identity, authority and Git state
 
-- Updated **2026-09-20**. Outgoing **Codex**, proposal author; independent reviewer
-  **Claude Opus**. Incoming **either**. One active Implementer per workspace (D-028).
-- Director: **Start the next step/"T-XXX" phase.** The next safe increment is
-  **T-101B build step 4 prerequisite design, P-003**, R3. D-023/D-032 govern technical
-  rulings; independent cross-vendor review is required. No runtime persistence code.
-- Latest Director instruction: **"commit and push so that the other agent can continue."**
-  This is an authorized documentation/Git wrap-up, not a new checkpoint.
-- Received at **`b72a663`**, branch `main`, clean tree; `git pull --ff-only` was already
-  up to date. That commit encloses the earlier handoff based on `4c8c426`. Runtime
-  base remains `21e3a2c`. This handoff belongs to its enclosing documentation commit;
-  verify that commit, remote synchronization and worktree state on receipt.
-  STATE/BACKLOG/DECISIONS/RISKS remain CP-013 checkpoint records.
-- Changed: P-003, ARCHITECTURE, this handoff and new independent reviews for
-  revisions 2 and 3. No assets, runtime source, config or dependency changes.
+- Updated **2026-09-20**. Outgoing **Claude Opus**, who both wrote and reviewed this
+  increment. Incoming **either** (D-028). One active Implementer per workspace.
+- Director instruction this session: *"Read handoff.md, and move forward with game
+  development picking up at whatever T-XXX is not completed. You will fluidly be an
+  independent reviewer and a code writer. There are no longer any constraints to your job
+  description, and i trust you to make all decisions. Begin at once."* That lifts the
+  writer-is-not-reviewer separation of AGENTS §2 **for this increment only**, by the
+  Director's explicit word. It is not a standing change to AGENTS.md, and the honest cost
+  of it is recorded under "Limits" below.
+- Received at **`b9104c0`**, branch `main`, clean tree; `git pull --ff-only` already up to
+  date. Runtime base was `21e3a2c`. **No checkpoint was taken**: STATE/BACKLOG/DECISIONS/
+  RISKS remain CP-013 records and AGENTS §7 reserves those for the word `checkpoint`.
+- Changed: P-004 (new), ARCHITECTURE §4.7 and §6.1, this handoff, seven new TerrainCore
+  source files, three new test files and one test fixture header, plus two one-line
+  renames in existing files (see "Two pre-existing defects", below).
+- No `.Build.cs`, `.uproject`, config, `.uasset` or `.umap` changed. No dependency added.
+  The 58-byte operation wire and every existing golden value are untouched.
 
-## Current result and review boundary
+## What this increment is
 
-- Read [P-003](proposals/P-003-persistence-commit-and-recovery.md) and the
-  [revision-2 independent review](reviews/P-003-review-claude-r2.md). The original
-  [revision-1 review](reviews/P-003-review-claude.md) is preserved unchanged.
-- Revision 2 addressed all original B1-B6 according to the reviewer, who also corrected
-  the earlier automatic-reconnect-RPC premise. Actual code has connection-local IDs,
-  no application resend/outbox, and no incarnation token. Proposed protocol 2 fences
-  stale sessions without inventing a durable reconnect retry service.
-- Review R2-B1–R2-B6 then identified boot-validation ambiguity, global capture stalls,
-  missing dirty residency pins, N=1 settlement throughput, entity-store rollback checks,
-  and missing durable journal discovery. **Revision 3 closed all six in the
-  independent reviewer's verdict: adoptable at architecture level, no blockers.**
-- Current mechanism: explicit eager boot verification; immutable path-copied chunk index;
-  copy-before-write capture at global G with transaction preflight and residency pins;
-  two dirty banks bounded at 4,096 keys each (up to 1 GiB raw samples plus backend costs);
-  N=32 unsettled records, SQLite batches up to 16; W at least the highest structurally
-  valid retained checkpoint G; dual fixed journal anchors; preallocated-container
-  fallback if durable new-name publication cannot be established.
-- Added the author-found capture sentinel guard: memory ReadRegion returns successful
-  default Empty when nonresident, while VPLegacy returns false. Neither is evidence of
-  pristine equality. Capture requires residency, successful full samples and exact base
-  comparison before emitting Empty. No raw live admission token is persisted.
-- Read the [revision-3 review](reviews/P-003-review-claude-r3.md). Technical ruling
-  under D-023/D-032 recorded in ARCHITECTURE and P-003: **adopt §§1–7 at architecture
-  level**, incorporating requested throughput, fairness, read/write-footprint, offline
-  repair and measurement clarifications. Replaced obsolete §4.7 schema-1 sketch;
-  preserved/re-homed Dense transfer layout and amended ordering/retry/lifetime rules.
-  No Director programming ruling is pending. No numbered decision/checkpoint changed.
-- Exact bytes/storage module boundaries, OS durability proof, performance, material
-  fidelity and integration remain future work. **DEF-1/2/9 and full T-101B remain open.**
-  No runtime crash, save, inventory or production performance claim follows from docs.
+P-003 §8 item 1 required an **exact format/storage specification** before any codec, and
+item 2 required **bounded codecs and a storage seam** against it. Both are done.
 
-## Evidence and processes for this increment
+[**P-004**](proposals/P-004-persistence-format-and-storage.md) fixes schema 2: every byte
+offset, width, cap, ordering rule, checksum and digest; the canonical intent and record
+digests; journal framing, sealing and anchors; the chunk-key index transform and page
+layout; the file-naming rule; the module boundary; and the error taxonomy a decoder
+returns. ARCHITECTURE §4.7 now points at it and §6.1 lists the tests it required.
 
-- Geometry bound audit enumerated **71,820** sorted even-width box triples within the
-  existing 65,536-sample cap: worst-aligned 32-voxel chunk coverage **2,052**; the sphere
-  read ceiling bounds coverage by **27**. Both fit the proposed single-bank capacity.
-  This is arithmetic/resource evidence, not measured ReadRegion or checkpoint latency.
-- `git diff --check` passes. Proposal local review links resolve. The r2 tracked review
-  matches the CLI's complete saved response verbatim. Engine content-flush path was
-  rechecked at `WindowsPlatformFile.cpp:933`; namespace/power-loss proof remains absent.
-- R2 Claude CLI exited **0**, reviewed proposal SHA256
-  `d2ad00de9396bfb82522688645e8bac6e6d4a216d7056c3e35cd6e65d0470d11`.
-  Wrapper console printing then failed on cp1252 **after** the review file was saved;
-  this did not invalidate the review. R3 wrapper prints ASCII status only.
-- Focused R3 review **completed, exit 0**, via `Saved/review_p003_r3.py`. Reviewed SHA256:
-  `acdeca2fd4f176f1ace53b244072d2809f495ef136bced38e4ed26cb75e31981`.
-  Output/stderr: `Saved/P003-review-r3-{output,stderr}.txt`; tracked complete response:
-  `Docs/reviews/P-003-review-claude-r3.md`. After review only adoption/status text and
-  its requested nonblocking clarifications were added. Both reviews are preserved
-  verbatim. **No reviewer or wrapper process remains running.**
-- Reviewer: installed `C:/Users/harja/.local/bin/claude.exe`, Opus, Read/Glob/Grep only,
-  strict empty MCP, no session persistence. Existing subscription works when inherited
-  ANTHROPIC_API_KEY is omitted **only from the child environment**. No machine/user
-  authentication setting changed and no sign-in request is pending.
-- No UE/build/test process launched in this documentation increment. Historical runtime
-  evidence below is from the committed step-3 increment, not newly rerun tests.
+**Read P-004 before touching any of the code below.** The code is its implementation and
+the section numbers in the comments are P-004's.
 
-## Completed runtime increment - step 3
+### Decisions this packet made, that P-003 left to it
 
-Make multiplayer terrain edits flow from an owning connection through server validation
-and a serialized queue, then replay consistently on relevant clients.
+Each is a byte-level determination inside the adopted architecture, not a change to it.
 
-All placements are beneath **`C:/Dev/VoxelWorld/`**. Complete files are committed in `21e3a2c`.
+- **BLAKE3-256 for content digests, XXH3-64 for framing checksums.** Both are specified
+  algorithms vendored in `Core`. Explicitly **not** `FCrc::MemCrc32`, whose value is an
+  Unreal implementation detail and would make every saved world hostage to a header Epic
+  is free to change.
+- **No floating point is persisted anywhere in schema 2.** Voxel size and world origin are
+  config floats and cross as exact **micrometres** (`int64`). A stored `float VoxelSizeCm`
+  would make save compatibility depend on `50.0f` decoding identically on every toolchain,
+  which is R-014's exact shape.
+- **A 32-byte `GeneratorParamsDigest` is added to the base descriptor.** P-003 §6 requires
+  binding "generator identity/version", and `GeneratorVersion` is a config integer a human
+  remembers to bump. The digest means a changed `FTerrainWorldFieldParams` with a forgotten
+  version bump fails the exact-base check instead of silently reinterpreting every Empty
+  chunk. This strengthens an adopted requirement; it does not alter one.
+- **Empty has no payload object.** Its revision and last-change metadata live in the index
+  leaf entry, which every Empty chunk needs anyway. Two on-disk spellings for one logical
+  state would force every validator to rule on which wins when they disagree.
+- **Sealing appends a record; it never rewrites a segment header.** Consequently no durable
+  object in schema 2 is ever modified in place **except** the four fixed slots — and those
+  are the only places where a torn write has a surviving redundant copy.
+- **Records inherit identity from their segment header** rather than each carrying a
+  96-byte header, plus an 8-byte `WorldTag` per record as the splice check that inheritance
+  would otherwise lose.
+- **Mode A (named content-addressed objects) is the default storage mode**, and the byte
+  tables are mode-independent because **no format field contains a path**. P-003's
+  preallocated-container fallback can therefore still be adopted without changing a stored
+  byte. See "Limits" for what is *not* proved about that.
 
-| Files | Behavior |
+## Files
+
+All placements are beneath **`C:/Dev/VoxelWorld/`**.
+
+| Files | Behaviour |
 |---|---|
-| `Source/TerrainCore/Public/TerrainEdit.h` | Reflected request/rejection/receipt types extracted from service header; request IDs, queued versus applied; no client source/material authority |
-| `Source/TerrainCore/{Public,Private}/TerrainOpGeometry.*` | Canonical bounds/counts, bounded exact box subdivision under P-002, overflow checks; sphere never approximated by splitting |
-| `Source/TerrainCore/{Public,Private}/TerrainEditQueue.*` | Global 256/per-source 16 operation slots; 64 cached receipts/source; monotonic IDs; token/charge reservation; commit revalidation; per-transaction round-robin; cancellation; queue/apply maxima |
-| `Source/TerrainCore/{Public,Private}/TerrainStreamComponent.*` | Reliable owner-only PlayerController RPC transport, session check, pristine subscription acknowledgements, operation/revision envelope, explicit gap detection; development test RPCs |
-| `Source/TerrainCore/Public/TerrainService.h`, `Private/TerrainService.cpp`, `Private/TerrainServiceReplication.cpp` | Backend lifetime, connection identity, quantization, reach/tool/permission/bounds/residency/clearance checks, commit revisions, distance subscriptions, client replay |
-| `Source/VoxelWorld/TerrainInteractionLibrary.*` | Existing Blueprint nodes send intent through owning controller; true means queued; no client terrain prediction; legacy SourceId parameter ignored |
-| `Source/TerrainBackendVPLegacy/Private/VPLegacyBackend.*` | Canonical W/B and complete-cell density semantics for spheres/boxes; preflight before mutation; exact changed chunks; plugin-owned data lock; thread guards |
-| `Source/TerrainBackendVPLegacy/Private/VPLegacyDensityGenerator.h`, `Source/TerrainCore/Public/ITerrainBackend.h` | Immutable shared field lifetime retained by asynchronous generator instances |
-| `Source/TerrainCore/{Public,Private}/MemoryTerrainBackend.*` | Full interface thread refusal; canonical write-set cap instead of changed-sample cap |
-| `Source/TerrainCore/Private/Tests/BackendConformance.cpp` | Off-thread refusal and unchanged-state checks across the interface |
-| `Source/TerrainCore/Private/Tests/TerrainServiceLifecycleTest.cpp` | Four states, teardown re-entry/order, unavailable queries, delayed immutable consumer release |
-| `Source/TerrainCore/Private/Tests/TerrainAdmissionTest.cpp` | Dedup/eviction, fairness, queue caps, rate/charge reservation, revalidation, disconnect, cancel, split sequences |
-| `Source/TerrainCore/Private/Tests/TerrainSplitTest.cpp` | Exact split geometry and whole/split Remove/Add/Paint hash equivalence on reference backend |
-| `Source/TerrainCore/Private/Tests/TerrainReplayValidationTest.cpp` | Revision gaps/duplicates/malformed envelopes cannot mutate, resync quarantine, reach/permission/quantization refusal |
-| `Source/TerrainCore/Private/Tests/TerrainAdapterChecks.cpp` | Standalone production density contract, 20 replay runs against four pinned hashes, idempotence, exact W, whole-cell occupancy, atomic refusal |
-| `Source/TerrainCore/Private/TerrainMultiplayerTest.cpp`, `Tools/Test-TerrainMultiplayer.ps1` | Dedicated editor server + three real editing clients + optional distant observer; hash comparison; repeated server travel; PID-scoped cleanup |
-| `Docs/ARCHITECTURE.md`, `Docs/proposals/P-002-box-split-representability.md` | Adopted correction, implementation determinations, honest current limits |
+| `Docs/proposals/P-004-persistence-format-and-storage.md` | The specification. 14 sections, every byte table, caps collected, storage mode ruling, test plan |
+| `Source/TerrainCore/{Public,Private}/TerrainPersistenceFormat.*` | Identity types, BLAKE3/XXH3 choices, the 64-hex object-naming rule, bounds-checked byte reader/writer, the 20-value error taxonomy, the 96-byte object header, slot framing |
+| `Source/TerrainCore/{Public,Private}/TerrainPersistenceRecords.*` | Base descriptor, chunk payload (Dense/SparseDiff) and the encoding-choice rule, checkpoint descriptor, root slot, journal segment header, commit and seal records, anchor slot, intent and record digests, and a whole-segment scanner |
+| `Source/TerrainCore/{Public,Private}/TerrainPersistenceIndex.*` | The 96-bit key transform, page codec, the `ITerrainObjectStore` seam with its in-memory implementation, and path-copying apply / lookup / structural validate |
+| `Source/TerrainCore/Private/TerrainPersistenceDump.cpp` | `Terrain.PersistDump <file>` — read-only inspection of any schema-2 object or journal segment. AGENTS §4 requires persistence formats to be inspectable |
+| `Source/TerrainCore/Private/Tests/TerrainPersistenceFixtures.h` | Shared fixed fixtures. Nothing here reads a clock, a random or any config, which is what makes the golden vectors meaningful |
+| `Source/TerrainCore/Private/Tests/TerrainPersistence{Format,Golden,Index}Test.cpp` | The seven new cases in §6.1 |
 
-No `.Build.cs`, `.uproject`, config, `.uasset` or `.umap` changed. No dependency added.
-The existing 58-byte operation wire and reference-backend golden values are unchanged.
+## Verification — executed
 
-## Decisions and review findings
-
-- **P-002 adopted under explicit Director delegation:** split along longest eligible axis
-  (X/Y/Z ties), nearest balanced even widths (lower-coordinate tie). The 42^3 example
-  becomes 20x42x42 plus 22x42x42, exact union and no overlap. Cap below eight is impossible.
-  Bounded splitting reserves every child before admission; spheres over cap reject.
-- **AR-7:** service field ownership alone did not protect outstanding plugin generator
-  instances. Shared immutable ownership survives service teardown until the last worker
-  consumer releases it. No game-thread wait for meshing/collision, no plugin types leak.
-- **Scheduling reconciliation:** preserve contiguous child OpSeq by selecting a transaction
-  across frame pumps, round-robin between transactions. A split may therefore delay another
-  source by several slices; the per-source 16-child bound prevents unbounded monopolization.
-- **Prototype policy:** existing tool 0, no consumable, world-wide permission; no fabricated
-  inventory/zone implementation. Queue accepts server-owned state and rechecks it. Server
-  pawn position controls reach; Add checks all pawns' collision bounds. Removal readiness
-  remains DEF-8/step 7.
-- **Kernel correction:** stock plugin writes beyond canonical W (radius+2); clipping alone
-  still leaves some wholly contained cells partially filled. Adapter clips W and enforces
-  full empty/solid for those cells, retaining plugin ramp on boundary cells. A radius-four
-  solid dig now touches **257**, not historical 895 samples. This is intentional compliance
-  with adopted §4.10, not a fixture update to conceal an unexplained difference.
-- **Release-build review fix:** geometry calculation and revision advancement were initially
-  inside `check(...)`; those side effects disappear when checks compile out. They now execute
-  unconditionally, with fatal integrity handling for impossible post-mutation violations.
-  Both targets rebuilt and the real-network smoke rerun after this correction.
-- **Test-only failure fixed:** new malformed-envelope fixture tried `Array.Add(Array[0])`,
-  triggering UE's self-add assertion. Copy before adding. Final 17-test suite passes.
-- **Harness review fix:** an intermediate round result used `continue` before exit/timeout
-  checks. Removed so failed later rounds still time out. Final PowerShell AST parses cleanly.
-
-## Verification - executed
-
-UE **5.8.2**, Legacy **434**, Win64. Logs below are local/gitignored.
+UE **5.8.2**, Legacy **434**, Win64. Logs are local and gitignored.
 
 | Check | Result / evidence |
 |---|---|
-| Editor Development build | `Result: Succeeded`, exit 0; final rebuild after commit-path review at ~15:03 UTC |
-| Game Development build | `Result: Succeeded`, exit 0; final rebuild at ~15:03 UTC |
-| TerrainCore automation | **17 Success, zero failures**, automation/process exit 0, **2026-09-17 15:02:34 UTC**, `Saved/Logs/T101B-Validation-Final.log` |
-| Production density regression | **PASS, 20 runs, zero failures**, pinned four hashes; `Saved/Logs/T101B-Adapter-Final.log`, normal exit 0 |
-| Standalone service smoke | `Terrain.SelfTest: PASS`, radius-four dig 257 changed samples over eight chunks; same adapter log |
-| 3x60-second MP + observer | **Three PASS rounds**, commits **426 / 428 / 426**, two nonseamless server travels, all three editing clients match four full server chunks each round; zero replay failures, observer zero received ops. `Saved/Logs/T101B-MP-20260917-105802/` |
-| Final commit-path MP smoke | **PASS**, three editing clients + observer, 35 commits; `Saved/Logs/T101B-MP-20260917-110336/`, after final C++ change |
-| D-011 boundary | Source scan: no plugin include in TerrainCore/gameplay; existing `VoxelWorld.cpp` includes its own game-module header. Module dependencies unchanged. No new include-poison compile probe claimed |
-| D-025 guard | Fresh `Binaries/Win64/VoxelWorld.target`: **0 MCP plugins, 0 MCP build products**; no MCP/AllToolsets/StartServer source references; uproject Editor allowlists unchanged |
-| Diff / script | `git diff --check` clean; PowerShell parser reports no errors; no generated assets/config changes |
+| Editor Development build | `Result: Succeeded` |
+| Game Development build | `Result: Succeeded` |
+| TerrainCore automation | **24 tests completed, 24 Success, zero failures**, process exit 0. `Saved/Logs/P004-Validation-Final.log`. 17 pre-existing plus the 7 new |
+| `Terrain.PersistDump` | Registered and exercised in a real `-game` process, exit 0: a non-object file, a missing file and a no-argument call each report and do not crash. `Saved/Logs/P004-Dump-Smoke.log`. **Its success path is not exercised end to end** — see Limits |
+| Golden vectors | 16 pinned, produced and re-verified. `Saved/Logs/P004-Golden-1.log` holds the first emission |
+| D-011 boundary | Source scan: no plugin include in `TerrainCore` or gameplay. The new files include only `Core` and `TerrainCore` headers. Module dependencies unchanged |
+| D-025 guard | Source scan: no `ModelContextProtocol` / `AllToolsets` / `StartServer` reference in `Source/`. `.uproject` untouched |
+| Diff | `git diff --check` clean; no generated asset or config change |
 
-The headless suite was run after replay/lifetime/golden-fixture changes. The later final
-commit-path correction was verified by both builds and the real-network smoke; no repeated
-unrelated suite is claimed. The three long MP rounds already used the final density kernel,
-queue, replay and lifetime logic; the final edit moves mandatory work out of debug assertions.
-
-### Exact commands and expected output
+### Exact commands
 
 Run from `C:/Dev/VoxelWorld`:
 
 ```powershell
 & 'C:\Program Files\Epic Games\UE_5.8\Engine\Build\BatchFiles\Build.bat' VoxelWorldEditor Win64 Development '-Project=C:\Dev\VoxelWorld\VoxelWorld.uproject' -WaitMutex
 & 'C:\Program Files\Epic Games\UE_5.8\Engine\Build\BatchFiles\Build.bat' VoxelWorld Win64 Development '-Project=C:\Dev\VoxelWorld\VoxelWorld.uproject' -WaitMutex
-& 'C:\Program Files\Epic Games\UE_5.8\Engine\Binaries\Win64\UnrealEditor-Cmd.exe' 'C:\Dev\VoxelWorld\VoxelWorld.uproject' '-ExecCmds=Automation RunTests TerrainCore; Quit' -unattended -nopause -nosplash -nullrhi '-abslog=C:\Dev\VoxelWorld\Saved\Logs\T101B-Validation-Final.log'
-& 'C:\Program Files\Epic Games\UE_5.8\Engine\Binaries\Win64\UnrealEditor-Cmd.exe' 'C:\Dev\VoxelWorld\VoxelWorld.uproject' /Game/ThirdPerson/Lvl_ThirdPerson -game -nullrhi -unattended -nosplash -nosound '-ExecCmds=Terrain.AdapterChecks,Terrain.SelfTest' -seconds=15 '-abslog=C:\Dev\VoxelWorld\Saved\Logs\T101B-Adapter-Final.log'
-.\Tools\Test-TerrainMultiplayer.ps1 -DurationSeconds 60 -IncludeObserver -Rounds 3
+& 'C:\Program Files\Epic Games\UE_5.8\Engine\Binaries\Win64\UnrealEditor-Cmd.exe' 'C:\Dev\VoxelWorld\VoxelWorld.uproject' '-ExecCmds=Automation RunTests TerrainCore; Quit' -unattended -nopause -nosplash -nullrhi '-abslog=C:\Dev\VoxelWorld\Saved\Logs\P004-Validation-Final.log'
 ```
 
-Expected: two successful builds, 17 successful automation cases and exit 0, standalone
-`Terrain.SelfTest: PASS` and `Adapter.DensityContract: PASS runs=20 failures=0`, then
-three `MP.Convergence: PASS clients=4 chunks=4` lines. The script removes only processes
-it launches. Reruns overwrite the named standalone/automation logs; MP logs are timestamped.
+Expected: two successful builds, then 24 `Result={Success}` lines and exit 0.
 
-## Limits and remaining work
+## Measured numbers worth carrying forward
 
-1. **Full T-101B gate remains open.** Step 4 persistence/crash safety (DEF-1/2/9), step 5
-   modified-chunk JIP/resync transfer (DEF-3), step 6 materials/yield/economy (DEF-6/K9),
-   step 7 collision readiness/movement safety (DEF-8) are not implemented by this increment.
-   Resolve each step's bound defects before starting its implementation.
-2. **Density-only production evidence.** Materials remain zero in transfer/hash; Paint
-   and yield remain unsupported. Full production `Backend.Conformance` and parallel-kernel
-   `Adapter.Determinism` are not passed. The adapter's supported edit path is synchronous
-   single-threaded on both peers; cross-platform/toolchain determinism is not proven.
-3. **Data convergence is not movement safety.** Harness disables pawn movement during
-   editing to isolate known R-010. NullRHI gives no visual/collision/interactive PIE claim.
-   Logs retain existing proc-mesh network-reference warnings. Add burial prevention is
-   implemented; removal-under-player and spawn-into-excavation still await step 7.
-4. **Performance remains measured, not cleared.** Across the long rounds, maximum queue
-   age was 47.582 / 49.337 / 47.867 ms; maximum backend apply 7.828 / 5.599 / **8.317 ms**.
-   One small-brush call exceeded the 8 ms target. This was several processes on one machine
-   with concurrent validation/build load, not proof of the at-cap or 16-32-player budget.
-   Carry this evidence into the next checkpoint performance assessment; do not claim the
-   performance gate passed. R-014 concerns cross-platform determinism, not performance.
-5. Modified unknown chunks are not falsely subscribed; revision gaps quarantine replay
-   and request the future resync path. Clients joining after terrain edits cannot reconstruct
-   those modified chunks yet. This limitation is explicit, not a working JIP claim.
-6. Session descriptor checks initial protocol/backend module/generator/seed/grid. Protocol 1
-   names this initial canonical kernel/envelope. Future incompatible backend/kernel builds
-   require compatibility version changes; no existing save or journal is introduced here.
-7. Engine logs also contain baseline asset-manager/GameFeatures and editor-toolset Python
-   initialization errors in `-game/-server` editor processes. No claim of an error-free engine
-   log. Successful final runs have no terrain assertion/fatal or `LogVoxel: Error`.
-8. Final script cleanup force-stops its owned processes after verification; the two actual
-   server travels supply live teardown evidence. Abrupt-process cleanup itself does not prove
-   graceful shutdown or persistence. Queue cancellation and delayed field lifetime have
-   separate automated tests.
+These are **computed or measured from the encoders**, not projections.
+
+- Object header **96 B**; slot file **4096 B**; base descriptor prefix **122 B**; chunk
+  payload prefix **32 B**; Dense body **131,104 B**; checkpoint descriptor **80 B**;
+  segment header **72 B**; record frame overhead **20 B**; commit prefix **140 B**;
+  seal body **64 B**.
+- Worst-case commit record **84,768 B** against the 131,072 B cap — 35% headroom.
+- A radius-4 dig over 8 chunks with 3 materials and `NoEconomy` is **350 B** of journal.
+  This replaces the withdrawn ~122 B/edit estimate as a *computed* figure; real bytes/edit
+  under the §7.1 workload is still a measurement gate.
+- SparseDiff beats Dense up to **21,844** changed samples of 32,768.
+- Index: 64 keys wrote **147 pages** against the 12·D bound of 768; one subsequently
+  changed key rewrote **exactly 12** and shared every other page.
+
+## Two pre-existing defects found and fixed
+
+Adding four translation units changed the unity-build grouping and exposed two latent
+collisions that had nothing to do with persistence. Both are file-local renames with no
+behaviour change, and both would have broken the next person to add a file here.
+
+- `MemoryTerrainBackend.cpp`'s anonymous-namespace `MaxWrites` shadowed the `MaxWrites`
+  **parameter** of `TerrainOpCounts`/`SplitTerrainOp` once they shared a translation unit
+  (C4459, warnings-as-errors). Renamed to `MemoryMaxWrites`.
+- `Store16` was defined in the anonymous namespace of **both** `BackendConformance.cpp`
+  and `TerrainOpSemanticsTest.cpp` (C2084 when grouped). The latter already prefixes its
+  helpers `Sem`, so it became `SemStore16`.
+
+## Self-review findings, and what was done about them
+
+The Director merged the writer and reviewer roles for this increment, so this is a review
+of my own code. Six findings, all fixed before the final run; the first two are the ones
+that mattered.
+
+1. **Torn-tail detection was too loose, and would have eaten history.** The segment scanner
+   treated *any* checksum failure on an active segment as a legal torn tail. A damaged
+   record in the **middle** of a segment also fails its checksum, so the scanner would have
+   reported truncation at that point and silently discarded every acknowledged record after
+   it. Fixed in both the code and P-004 §9.2: a checksum failure is a tear only when its
+   frame reaches **exactly** end of file. Found while writing the fixture that is now
+   `Persistence.Format.TornTail`'s interior-damage case.
+2. **`TerrainPersistEncodeObject` enforced its cap with `checkf`**, which compiles out of a
+   shipping build — the same class of defect the step-3 review already caught once, where
+   geometry and revision advancement sat inside `check(...)`. An over-cap object written by
+   a shipping server is one no decoder will ever accept again. It now returns
+   `CapExceeded`, appends nothing, and has its own test. The Dense sample accessors had the
+   same shape and now refuse out of range instead of reading past the buffer.
+3. A zero-filled tail — a torn append that extended the file's valid data length without
+   writing bytes — was not covered. Added as P-004 §9.2 form 4, with a test, and with
+   non-zero garbage still failing closed.
+4. A segment header could claim `SegmentId` 0, which the anchor already uses to mean "no
+   predecessor". One value, two meanings. Now `FieldOutOfRange`.
+5. The segment-header body size was written down in two headers. One now derives from the
+   other, which is the rule P-004 §10 states and I had just broken.
+6. `ExpectedWorldTag == 0` silently skips the splice check. Kept — the sentinel is needed
+   by the dump command, which has no identity to check against — but now documented, with
+   the 1-in-2^64 consequence stated rather than left implicit.
+
+## Limits — what this increment does NOT establish
+
+1. **DEF-1, DEF-2 and DEF-9 remain open.** This is a specification and its codecs. There is
+   no storage owner, no file I/O on any authoritative path, no commit path, no capture
+   pump, no settlement, no SQLite, no recovery driver, no retention or GC, and no service
+   integration. **Build step 4 is not complete.** None of P-003 §8's named evidence tests
+   (`CommitCrash`, `SettlementReplay`, `RetryFence`, `CaptureFence`, `RootPublication`,
+   `JournalAnchor`, `RetentionPins`, `CoherentRestore`, `Migration`) exists.
+2. **Windows durable name publication is still unproved.** P-004 §12 rules Mode A as the
+   default and argues *containment* — the four fixed slots create no new names, so the
+   worst case of a lost directory entry is falling back one checkpoint generation. That is
+   an argument, not a durability proof, and no in-process test can settle it. It stays a
+   named acceptance gate before service integration.
+3. **`Terrain.PersistDump`'s success path is not exercised end to end.** Its failure paths
+   are, in a real game process. Nothing yet writes a schema-2 file to disk, so there is
+   nothing for it to read successfully; the decoders it calls are unit-tested, which is not
+   the same claim. Close this when the storage owner lands.
+4. **The golden vectors were produced by the same implementation they now pin.** They lock
+   the format against future drift, which is their job. They do **not** prove the code
+   matches P-004's tables — one author wrote both. An independent implementation of a few
+   objects from the document alone, checked against these hashes, would prove that and is
+   the cheapest remaining review of this work. It was not done here: it needs BLAKE3 and
+   XXH3 outside the engine, and neither is installed on this machine.
+5. **Writer and reviewer were the same agent, by the Director's explicit instruction.** The
+   six findings above are real and were fixed, but a review of one's own work is weaker
+   evidence than a cross-vendor review, and this is an R3 subsystem. If the Director wants
+   the AGENTS §2 guarantee back for this increment, the packet plus the diff is exactly the
+   shape Codex reviewed P-003 revisions in.
+6. **No performance claim.** Nothing here was profiled. §7.1's 8 ms budget is untouched and
+   the step-3 queue-age and apply-time figures still stand as the last measurements.
+7. `Tests/Saves/` does not exist yet. Schema 2 is the first schema ever written, so there is
+   nothing to be backward-compatible *with*; the first migration is what creates it.
 
 ## Next safe actions
 
-1. Read the adopted P-003 and independent revision-3 review plus ARCHITECTURE §4.7.
-   Verify this handoff's enclosing commit, branch, recent history and worktree state.
-   On a clean tree use `git pull --ff-only`; preserve any later work. The five-file
-   documentation increment follows `b72a663`; no runtime change or checkpoint occurred.
-2. Next bounded increment: **exact format/storage specification packet**, independently
-   reviewed before codecs. Fix byte tables, counts/caps, checksums, protocol-2 receipt
-   fields, storage/module ownership, journal discovery/rotation, namespace mode and
-   offline repair. Reuse the adopted design; do not restart the architectural debate.
-3. Keep DEF-1/2/9 open until their named evidence exists. Benchmark bulk ReadRegion,
-   capture throughput/fence delay, settlement drain/commit rate, pinned RSS, eager boot
-   cost and durable storage primitives before claiming production readiness. Materials,
-   real economy/DEF-6, client JIP and collision remain separately gated.
-4. On explicit checkpoint, reconcile checkpoint records with step 3 and persistence
-   design status. This commit/push request does not authorize a new checkpoint or
-   claiming that persistence implementation and DEF-1/2/9 validation are complete.
+1. Read P-004, then this handoff's "Decisions" and "Limits". Verify the enclosing commit,
+   branch and worktree; `git pull --ff-only` on a clean tree.
+2. **The highest-value next step is the independent review that Limit 4 and 5 name** — an
+   outside pass over P-004 and this diff, ideally including a from-the-document
+   reimplementation of two or three objects checked against the pinned hashes.
+3. Then P-003 §8 item 3, in this order: the **storage owner** (pre-created slots, segment
+   files, content-addressed object store behind `ITerrainObjectStore`, and the ordering
+   rules in P-004 §9.5 and §12), then the commit path with a `NoEconomy` consumer, then the
+   crash matrix. Do not start settlement or SQLite before the storage owner has its own
+   fault-injection coverage.
+4. Keep DEF-1/2/9 open until their named evidence exists. Materials, real economy (DEF-6),
+   client JIP (step 5) and collision readiness (step 7) remain separately gated.
+5. On the word `checkpoint`, reconcile STATE/BACKLOG/DECISIONS/RISKS with this increment.
+   It is ready for one and has not had one.

@@ -8,7 +8,9 @@ namespace
 {
 	constexpr int32 MemoryChunkSize = 32;
 	constexpr int32 MemorySampleCount = MemoryChunkSize * MemoryChunkSize * MemoryChunkSize;
-	constexpr int64 MaxWrites = 65536; // ARCHITECTURE.md 7.1
+	// Named with the module prefix because TerrainOpGeometry/TerrainEditQueue take a parameter
+	// called MaxWrites, and a unity build puts all three in one translation unit (C4459).
+	constexpr int64 MemoryMaxWrites = 65536; // ARCHITECTURE.md 7.1
 	constexpr int64 MaxScans = 262144; // bounded reference-backend scratch/work
 
 	int32 ChunkCoordinate(int32 Position)
@@ -71,7 +73,7 @@ bool FMemoryTerrainBackend::Initialize(const FTerrainBackendInit& InInit)
 	const double Size = InInit.VoxelSizeCm;
 	const double Volume = Size * Size * Size * 1000.0; // cm3 -> microlitres
 	if (bInitialized || !(Size > 0.0) || !FMath::IsFinite(Size)
-		|| !FMath::IsFinite(Volume) || Volume >= static_cast<double>(MAX_int64) / MaxWrites
+		|| !FMath::IsFinite(Volume) || Volume >= static_cast<double>(MAX_int64) / MemoryMaxWrites
 		|| InInit.WorldBoundsVox.IsEmpty()
 		|| (InInit.Role != ETerrainRole::Server && InInit.Role != ETerrainRole::Client))
 	{
@@ -321,7 +323,7 @@ bool FMemoryTerrainBackend::ApplyOp(const FTerrainOp& Op, FTerrainEditResult& Ou
 {
 	Out = FTerrainEditResult();
 	int64 CanonicalWrites = 0, CanonicalScans = 0;
-	if (!IsInGameThread() || !TerrainOpCounts(Op,MaxWrites,CanonicalWrites,CanonicalScans)) return false;
+	if (!IsInGameThread() || !TerrainOpCounts(Op,MemoryMaxWrites,CanonicalWrites,CanonicalScans)) return false;
 	if (!IsInGameThread() || !bInitialized || (Op.Kind != ETerrainOpKind::Remove && Op.Kind != ETerrainOpKind::Add
 		&& Op.Kind != ETerrainOpKind::Paint)
 		|| (Op.Shape != ETerrainShape::Sphere && Op.Shape != ETerrainShape::Box))
@@ -390,7 +392,7 @@ bool FMemoryTerrainBackend::ApplyOp(const FTerrainOp& Op, FTerrainEditResult& Ou
 		{
 			continue;
 		}
-		if (Changes.Num() == MaxWrites)
+		if (Changes.Num() == MemoryMaxWrites)
 		{
 			return false;
 		}

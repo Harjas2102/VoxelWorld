@@ -34,7 +34,7 @@ namespace
 		return static_cast<int32>(Voxels * 65536.0);
 	}
 
-	void Store16(TArray<uint8>& Payload, int32 Offset, uint16 Value)
+	void SemStore16(TArray<uint8>& Payload, int32 Offset, uint16 Value)
 	{
 		Payload[Offset] = static_cast<uint8>(Value);
 		Payload[Offset + 1] = static_cast<uint8>(Value >> 8);
@@ -60,8 +60,8 @@ namespace
 			const int16 Density = static_cast<int16>(-32767 + ((Index + KeySalt) & 0x3F));
 			const FTerrainMatId Material = static_cast<FTerrainMatId>(
 				ETerrainMaterial::Stone + ((Index / 97 + KeySalt) % 3));
-			Store16(Data.Payload, Index * 2, static_cast<uint16>(Density));
-			Store16(Data.Payload, SemSampleCount * 2 + Index * 2, Material);
+			SemStore16(Data.Payload, Index * 2, static_cast<uint16>(Density));
+			SemStore16(Data.Payload, SemSampleCount * 2 + Index * 2, Material);
 		}
 		return Data;
 	}
