@@ -19,7 +19,15 @@ struct FTerrainQueueCallbacks
 	TFunction<void(uint32, FTerrainSourceState&)> Refresh;
 	TFunction<ETerrainEditRejection(const FTerrainOp&, const FTerrainSourceState&)> Validate;
 	TFunction<bool(const FTerrainOp&, FTerrainEditResult&)> Apply;
-	TFunction<void(const FTerrainOp&, const FTerrainEditResult&)> Commit;
+	/**
+	 * Durably record, then publish, one committed operation.
+	 *
+	 * Returns false when the operation could not be made durable, in which case it is NOT
+	 * committed: the sequence is not consumed and the transaction is refused with
+	 * `ShuttingDown`. P-003 §2 requires the durable append to precede the broadcast, and a
+	 * callback that could not refuse would make that ordering unenforceable.
+	 */
+	TFunction<bool(const FTerrainOp&, const FTerrainEditResult&, const FTerrainCommitIdentity&)> Commit;
 	TFunction<void(uint32, const FTerrainEditReceipt&)> Receipt;
 };
 

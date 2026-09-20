@@ -12,6 +12,7 @@
 #include "TerrainStreamComponent.h"
 #include "TerrainService.generated.h"
 
+class ITerrainCommitJournal;
 class UTerrainSettings;
 
 /** World-lifetime states from ARCHITECTURE §4.5.1; transitions are game-thread only. */
@@ -108,8 +109,29 @@ private:
 	void RefreshSubscriptions(UTerrainStreamComponent& Stream);
 	FTerrainQueueCallbacks QueueCallbacks();
 	ETerrainEditRejection ValidateOp(const FTerrainOp& Op, const FTerrainSourceState& Source) const;
+
+	/**
+	 * Points the commit path at a journal, or clears it with null.
+	 *
+	 * The service does not own it and does not open it; the caller's object must outlive the
+	 * service's use of it. Set before any edit is admitted -- attaching a journal to a world
+	 * that has already been edited would produce a journal that does not describe its world.
+	 */
+	void SetCommitJournal(ITerrainCommitJournal* InJournal) { CommitJournal = InJournal; }
+
+	/** True once a commit could not be made durable. Admission is closed; restart to clear. */
+	bool IsStorageFaulted() const { return bStorageFaulted; }
 	ETerrainEditRejection QuantiseRequest(const FTerrainEditRequest& Request, FTerrainOp& Op) const;
-	void BroadcastCommit(const FTerrainOp& Op, const FTerrainEditResult& Result);
+	/**
+	 * P-003 §2 steps 2 and 3: durably record the operation, THEN advance and broadcast.
+	 *
+	 * Returns false when the record could not be made durable. The backend has already
+	 * mutated at that point, so the world holds a change that is neither durable nor
+	 * published; the service marks itself storage-faulted and stops admitting work, and
+	 * recovery is a restart from disk.
+	 */
+	bool CommitOp(const FTerrainOp& Op, const FTerrainEditResult& Result,
+	              const FTerrainCommitIdentity& Identity);
 	FTerrainEditQueue EditQueue;
 	TMap<uint32,TWeakObjectPtr<UTerrainStreamComponent>> Streams;
 	uint32 NextSourceId = 2;
@@ -156,9 +178,30 @@ private:
 	/** Global sequence, assigned at commit (§4.4). Starts at 1; 0 means "no operation". */
 	FTerrainOpSeq NextOpSeq = 1;
 
+	/**
+	 * Where committed operations are made durable, or null.
+	 *
+	 * Null means NOTHING IS PERSISTED and every edit is lost at shutdown -- which is the
+	 * state the game shipped in through build step 3, and which every existing test relies
+	 * on. Wiring a journal is what turns this service from "authoritative" into
+	 * "authoritative and remembered"; not owning one is a valid configuration, not a bug.
+	 */
+	ITerrainCommitJournal* CommitJournal = nullptr;
+
+	/**
+	 * Set when a commit could not be made durable after the backend had already mutated.
+	 *
+	 * P-003 §2 calls this an uncertain storage fault and requires closing admission. Once
+	 * set, every request is refused with `ShuttingDown` and only a restart clears it: the
+	 * in-memory world can no longer be shown to match what is on disk, and continuing to
+	 * serve edits from it would be serving a world nobody can get back.
+	 */
+	bool bStorageFaulted = false;
+
 #if WITH_DEV_AUTOMATION_TESTS
 	friend class FTerrainRevisionMonotonicTest;
 	friend class FTerrainServiceLifecycleTest;
 	friend class FTerrainReplayValidationTest;
+	friend class FTerrainCommitJournalTest;
 #endif
 };

@@ -1,6 +1,6 @@
 → No action. For your reading only.
 
-# HANDOFF.md — journal writer and world store built; next is the commit path
+# HANDOFF.md — commit path wired; next is attaching a journal to a running world
 
 ## Identity, authority and Git state
 
@@ -58,6 +58,50 @@ The reimplementation lives in the session scratchpad and is **not committed** �
 two pip packages and is evidence, not project code. Re-running it means recreating the venv
 and re-writing it from P-004, which is the point: if it needed to be kept, it would not be
 independent.
+
+## The commit path — durable before published
+
+P-003 §2's ordering, wired into the live edit path for the first time.
+
+`UTerrainService::CommitOp` (was `BroadcastCommit`) now, in this order: validates geometry,
+captures before-revisions, advances the revision index, **durably records the operation**, and
+only then advances the committed sequence and broadcasts. If the record cannot be made
+durable it returns false, the service marks itself **storage-faulted**, and admission closes
+with `ShuttingDown` — the rejection that already meant "the world is going away, do not
+retry". The backend has already mutated at that point, so the honest state is RAM holding a
+change that is neither durable nor published, and P-003 §2 resolves that by restarting from
+disk rather than by pretending the edit happened.
+
+**The queue now treats the sequence as provisional.** `Cb.Commit` returns bool, and `OpSeq` is
+only consumed once the record is durable — otherwise a refused commit would leave a gap in the
+journal for an operation that never became part of the world's history.
+
+**One deviation from P-003 §2's literal step order, stated rather than hidden.** The revision
+index advances *before* the append, not after, because the record must carry the true
+after-revisions and the index is the only authority for them. That is safe for one reason: the
+index is in-memory, and P-003 §2 discards unbroadcast provisional RAM on a storage fault. What
+must not happen — publishing before the flush — cannot happen.
+
+**Two honest defaults in the record.** `EconomyKind = NoEconomy`, because DEF-6 is open. And
+`PhysicalAvailability = Unavailable` with an **empty** list even when the backend reports
+volumes, because the production adapter's materials are zero and P-003 §2 forbids encoding
+unknown as a measured zero — `FTerrainWorldStoreJournal::bPhysicalMeasured` flips it when a
+backend genuinely measures. The token digest is zero because protocol 2 does not exist; that
+is an honest "none", not a stand-in.
+
+**Verified:** both targets build; **31 of 31** tests pass, exit 0; and because this touched
+the live service, the real-network harness was rerun — **`MP.Convergence: PASS clients=3
+chunks=4 committed=243`** (`Saved/Logs/T101B-MP-20260920-152624`).
+
+**A gap this increment did not close, and did not pretend to.** `CommitOp` cannot be driven
+from a headless test: `TryAdvanceRevisions` needs `HasAuthority()`, which needs a real game
+`UWorld`, which would make the case §6.2 rather than §6.1. Its internal ordering is read, not
+tested. The first attempt at this test did build a service and drive `CommitOp`, and it
+crashed on exactly that — recorded because the crash is the evidence for the claim.
+
+**Nothing attaches a journal to a running game yet.** `CommitJournal` is null unless something
+sets it and no bootstrap creates a world store for a real session, so **no edit survives a
+restart**. That is the next increment.
 
 ## The journal writer and the world store — a world directory now exists
 

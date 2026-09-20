@@ -29,6 +29,20 @@ enum class ETerrainEditKind : uint8
 };
 
 /**
+ * Who asked for the operation being committed, in the terms a journal record needs.
+ *
+ * The queue knows this and the backend does not, so it travels with the commit callback
+ * rather than being reconstructed later. P-004 §9.3 fixes the widths: `RequestId` is a
+ * positive `uint32` and the child identity is a pair of `uint16`.
+ */
+struct FTerrainCommitIdentity
+{
+	uint32 RequestId = 0;
+	uint16 ChildOrdinal = 0;
+	uint16 ChildCount = 1;
+};
+
+/**
  * Why a request did not become an operation.
  *
  * An enum and not a string because ARCHITECTURE.md §4.4 sends this to the client as

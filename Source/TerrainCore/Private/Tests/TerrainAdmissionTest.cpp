@@ -15,7 +15,7 @@ bool FTerrainAdmissionTest::RunTest(const FString&)
 	FTerrainQueueCallbacks Cb;
 	Cb.Validate=[&](const FTerrainOp&,const FTerrainSourceState&) { return Allowed ? ETerrainEditRejection::None : ETerrainEditRejection::PermissionDenied; };
 	Cb.Apply=[&](const FTerrainOp&,FTerrainEditResult& R) { if (!BackendSucceeds) return false; ++Applied; R.VoxelsTouched=1; return true; };
-	Cb.Commit=[&](const FTerrainOp& P,const FTerrainEditResult&) { Committed.Add(P); };
+	Cb.Commit=[&](const FTerrainOp& P,const FTerrainEditResult&,const FTerrainCommitIdentity&) { Committed.Add(P); return true; };
 	Cb.Receipt=[&](uint32,const FTerrainEditReceipt& R) { Receipts.Add(R); };
 	FTerrainSourceState State;
 	FTerrainEditQueue Queue; Queue.Burst=1000; Queue.RatePerSecond=1000;

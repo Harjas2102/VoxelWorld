@@ -1,5 +1,6 @@
 // Copyright VoxelWorld. Step 3 live transport; snapshot/resync transfer remains step 5.
 #include "TerrainService.h"
+#include "TerrainCommitJournal.h"
 #include "TerrainChunk.h"
 #include "TerrainCore.h"
 #include "TerrainQuantise.h"
@@ -80,6 +81,10 @@ bool UTerrainService::SubmitPlayerEdit(UTerrainStreamComponent* Stream,const FTe
 ETerrainEditRejection UTerrainService::ValidateOp(const FTerrainOp& Op,const FTerrainSourceState& Source) const
 {
 	FTerrainBox B; int64 W,Scans;
+	// P-003 §2: after an uncertain storage fault, admission closes. The in-memory world can no
+	// longer be shown to match what is on disk, so serving edits from it would be serving a
+	// world nobody can get back. ShuttingDown tells the client not to retry.
+	if (bStorageFaulted) return ETerrainEditRejection::ShuttingDown;
 	if (!IsBackendReady()) return ETerrainEditRejection::NotReady;
 	if (!TerrainOpBounds(Op,B)) return ETerrainEditRejection::BadRequest;
 	for (int32 A=0;A<3;++A) if (B.Min[A]<ActiveInit.WorldBoundsVox.Min[A] || B.Max[A]>ActiveInit.WorldBoundsVox.Max[A])
@@ -132,7 +137,8 @@ FTerrainQueueCallbacks UTerrainService::QueueCallbacks()
 	};
 	Cb.Validate=[this](const FTerrainOp& Op,const FTerrainSourceState& S) { return ValidateOp(Op,S); };
 	Cb.Apply=[this](const FTerrainOp& Op,FTerrainEditResult& R) { return IsBackendReady() && Backend->ApplyOp(Op,R); };
-	Cb.Commit=[this](const FTerrainOp& Op,const FTerrainEditResult& R) { BroadcastCommit(Op,R); };
+	Cb.Commit=[this](const FTerrainOp& Op,const FTerrainEditResult& R,const FTerrainCommitIdentity& Id)
+	{ return CommitOp(Op,R,Id); };
 	Cb.Receipt=[this](uint32 Id,const FTerrainEditReceipt& R)
 	{
 		if (Id==1) LastAdminReceipt=R;
@@ -140,21 +146,47 @@ FTerrainQueueCallbacks UTerrainService::QueueCallbacks()
 	};
 	return Cb;
 }
-void UTerrainService::BroadcastCommit(const FTerrainOp& Op,const FTerrainEditResult& R)
+bool UTerrainService::CommitOp(const FTerrainOp& Op,const FTerrainEditResult& R,const FTerrainCommitIdentity& Identity)
 {
     FTerrainBox B;
     TArray<FTerrainChunkKey> Keys;
     // Required work must never live inside check(): shipping builds compile checks out.
     if (R.bTruncated || !TerrainOpBounds(Op,B) || !TerrainChunkKeysForBox(B,Keys))
-    { UE_LOG(LogTerrainCore,Fatal,TEXT("Committed terrain operation violated its geometry contract.")); return; }
+    { UE_LOG(LogTerrainCore,Fatal,TEXT("Committed terrain operation violated its geometry contract.")); return false; }
 	TArray<FTerrainChunkRevision> Revisions;
 	for (const auto& K:Keys) { FTerrainChunkRevision V; V.Key=FIntVector(K.X,K.Y,K.Z); V.Before=GetRevision(K); Revisions.Add(V); }
     for (const auto& K:R.AffectedChunks) if (!Keys.Contains(K))
-    { UE_LOG(LogTerrainCore,Fatal,TEXT("Terrain backend changed a chunk outside the validated footprint.")); return; }
+    { UE_LOG(LogTerrainCore,Fatal,TEXT("Terrain backend changed a chunk outside the validated footprint.")); return false; }
     if (!TryAdvanceRevisions(R.AffectedChunks))
-    { UE_LOG(LogTerrainCore,Fatal,TEXT("Prevalidated terrain revision commit failed.")); return; }
-    NextOpSeq=Op.OpSeq+1;
+    { UE_LOG(LogTerrainCore,Fatal,TEXT("Prevalidated terrain revision commit failed.")); return false; }
 	for (auto& V:Revisions) V.After=GetRevision(FTerrainChunkKey(V.Key.X,V.Key.Y,V.Key.Z));
+
+	// P-003 §2 step 2, and the ONE ordering this function exists to enforce: the record is
+	// durable before anything is told the edit happened.
+	//
+	// The revision index advances just above rather than just below, because the record has to
+	// carry the TRUE after-revisions and the index is the only authority for them. That is a
+	// deviation from the literal step order and it is safe for one stated reason: the index is
+	// in-memory, and P-003 §2 discards unbroadcast provisional RAM on a storage fault. What
+	// must not happen -- publishing before the flush -- cannot happen here.
+	if (CommitJournal != nullptr)
+	{
+		TArray<FTerrainChunkRevision> Changed;
+		Changed.Reserve(R.AffectedChunks.Num());
+		for (const auto& V:Revisions) if (V.After != V.Before) Changed.Add(V);
+
+		if (!CommitJournal->RecordCommit(Op,R,Identity,Changed))
+		{
+			bStorageFaulted = true;
+			UE_LOG(LogTerrainCore,Error,
+				TEXT("Terrain commit could not be made durable at OpSeq %llu. Admission is closed ")
+				TEXT("and this world must be restarted from disk; the edit was NOT broadcast."),
+				Op.OpSeq);
+			return false;
+		}
+	}
+
+    NextOpSeq=Op.OpSeq+1;
 	TArray<uint8> Bytes; SerializeTerrainOp(Op,Bytes);
 	for (const auto& Entry:Streams)
 	{
@@ -167,6 +199,7 @@ void UTerrainService::BroadcastCommit(const FTerrainOp& Op,const FTerrainEditRes
 			for (const auto& V:Revisions) Stream->DeliveredRevisions.Add(FTerrainChunkKey(V.Key.X,V.Key.Y,V.Key.Z),V.After);
 		}
 	}
+	return true;
 }
 bool UTerrainService::ApplyReplicatedOp(const TArray<uint8>& Bytes,const TArray<FTerrainChunkRevision>& Revisions)
 {

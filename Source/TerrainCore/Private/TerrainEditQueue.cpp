@@ -117,8 +117,24 @@ void FTerrainEditQueue::Pump(double Now, const FTerrainQueueCallbacks& Cb, int32
 		MaxObservedApply = FMath::Max(MaxObservedApply,FPlatformTime::Seconds()-ApplyStart);
 		if (Valid)
 		{
-			Op.OpSeq = NextOpSeq++;
-			if (Cb.Commit) Cb.Commit(Op,Result);
+			// P-003 §2: the sequence is PROVISIONAL until the record is durable. Consuming it
+			// before the commit could succeed would leave a gap in the journal for an
+			// operation that never became part of the world's history.
+			Op.OpSeq = NextOpSeq;
+			FTerrainCommitIdentity Identity;
+			Identity.RequestId    = uint32(FMath::Clamp<int64>(Job.RequestId,0,MAX_uint32));
+			Identity.ChildOrdinal = uint16(Job.Next);
+			Identity.ChildCount   = uint16(Job.Parts.Num());
+			if (Cb.Commit && !Cb.Commit(Op,Result,Identity))
+			{
+				// The backend has already mutated and nothing was broadcast. The world is
+				// going away; ShuttingDown is the reason that tells a client not to retry.
+				Valid = false; Rejection = ETerrainEditRejection::ShuttingDown;
+			}
+		}
+		if (Valid)
+		{
+			++NextOpSeq;
 			Job.Receipt.bApplied = true; Job.Receipt.OpSeq = int64(Op.OpSeq);
 			Job.Receipt.VoxelsTouched += Result.VoxelsTouched; Job.Receipt.ChunksAffected += Result.AffectedChunks.Num();
 			S.ReservedCharge -= Job.ChargePerPart;

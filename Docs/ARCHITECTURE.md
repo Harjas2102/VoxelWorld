@@ -929,11 +929,18 @@ unimplemented schema-1 byte sketches and ~122-byte record estimate are withdrawn
 re-homes that Dense layout as the on-disk chunk payload, so replication and disk share one
 layout and cannot drift apart.
 
-**What exists in code** (`TerrainCore`, headless, no file system): the codecs and validators
-for every schema-2 object and journal record, the 96-bit path-copied chunk-key index with its
-in-memory object-store seam, and `Terrain.PersistDump`. **What does not exist**: the storage
-owner, the commit path, the capture pump, settlement, SQLite, recovery and retention. Build
-step 4 is not complete and DEF-1/2/9 remain open.
+**What exists in code.** The schema-2 codecs and validators; the 96-bit path-copied chunk-key
+index; the storage device seam with real, in-memory and fault-injecting implementations; the
+content-addressed object store and the slot pair; the journal writer with segment rotation;
+`FTerrainWorldStore` (create, open, publish checkpoint); `Terrain.PersistDump`; and the commit
+seam — `UTerrainService` will durably record an operation **before** advancing its sequence or
+broadcasting it, and closes admission with `ShuttingDown` if it cannot.
+
+**What does not exist.** Nothing attaches a journal to a running game: the service's
+`CommitJournal` is null unless something sets it, and no bootstrap creates a world store for
+a real session. **No edit survives a restart.** Also absent: the capture pump, checkpoint
+capture, settlement, SQLite, replay/recovery and retention. Build step 4 is not complete and
+DEF-1/2/9 remain open.
 
 - **Commit:** journal append + durable flush precedes terrain broadcast and
   TerrainCommitted; SQLite settlement follows, with idempotent `(WorldId, OpSeq)`
@@ -1466,6 +1473,7 @@ Run against `FMemoryTerrainBackend`. Seconds, on every build.
 | `Persistence.Storage.ObjectStore` | **Implemented, passing.** Content addressing verified on the way **in and out**: a digest the bytes do not hash to is refused on store, a damaged file fails to load rather than returning bad bytes, a repeated store writes nothing, and a **torn** write leaves a file that does not load and can be deleted and rewritten |
 | `Persistence.Storage.SlotPair` | **Implemented, passing.** Publication alternates; a torn publication is rejected with `BodyChecksumMismatch` while the **other** slot keeps the last acknowledged generation; the retry repairs the damaged slot rather than touching the good one; another world's identity validates neither; publishing before reading is refused rather than guessing |
 | `Persistence.Storage.PlatformDevice` | **Implemented, passing.** Against the real file system: an in-place overwrite **does not truncate**, a wrong-length overwrite is refused with the file intact, an append lands at the end, and an escaping path is refused before it reaches the disk |
+| `Persistence.Commit.Journal` | **Implemented, passing.** What a committed operation becomes as a record: `NoEconomy`; `PhysicalAvailability = Unavailable` with an **empty** list even when the backend reported volumes, because the production adapter's materials are zero and P-003 §2 forbids encoding unknown as a measured zero; changed keys sorted into index-key order rather than footprint order; every changed revision advancing by exactly one; a zero token digest, because protocol 2 does not exist. Also that the queue treats the sequence as **provisional** and does not consume it when a commit is refused, and that a storage-faulted service closes admission with `ShuttingDown`. **Does not cover `CommitOp`'s internal ordering** — see the note below the table |
 | `Persistence.Journal.Writer` | **Implemented, passing.** Create, append, seal and rotate, with every claim about the written bytes checked by the **scanner** rather than by the writer's own state. Covers: state recovered across a reopen; a sequence gap, a repeat and a foreign `WorldTag` all refused; rotation sealing its predecessor and carrying continuity evidence at both ends; a **torn append** closing the writer and still refusing to append after a reopen; an interrupted rotation leaving an ignorable **orphan** with no acknowledged record lost; a newer unanchored **non-empty** segment refusing boot; a named-but-**missing** segment refusing boot rather than reporting an empty journal |
 | `Persistence.WorldStore.Lifecycle` | **Implemented, passing.** Create → open → append → publish checkpoint → reopen, on one directory. A fresh world is **7 files**. Covers: the base descriptor's self-referential digest; root generation advancing; a **torn root publication** leaving the previous checkpoint current with redundancy reported broken, then repaired by republishing; a checkpoint beyond the journal head refusing to open; a cross-wired world (this world's base in front of another world's roots) refused with `WorldMismatch` |
 | `Persistence.Index.PathCopy` | **Implemented, passing.** 64 keys wrote 147 pages against the 12·D bound of 768; one changed key then rewrote exactly 12 and shared everything else; both roots still resolve their own values; an Empty chunk stays IN the index with its revision metadata |
@@ -1485,6 +1493,14 @@ Run against `FMemoryTerrainBackend`. Seconds, on every build.
 | `Migration.Fixtures` | Every fixture in `Tests/Saves/` loads and produces its expected region hash |
 | `Query.Point` | `QueryPoint` returns the material and density sign the region was written with, at chunk interiors and at all eight chunk corners; reports `bResident` false outside loaded regions; never returns a stale sample after `ApplyOp` or `WriteRegion` |
 | `Backend.Conformance` | A shared suite run against **both** `FMemoryTerrainBackend` and `FVPLegacyBackend`, covering all eleven methods, `QueryPoint` included, plus: off-game-thread calls are refused (§4.5.1); the state machine rejects with the right reason per state; a failed `ApplyOp` leaves the region hash unchanged (§4.11.6). It asserts the **contract**, never equality of densities between two backends (§4.10.4c). Any future backend must pass it. **This is the operational meaning of "replaceable"** |
+
+**A stated gap in `Persistence.Commit.Journal`.** `UTerrainService::CommitOp` is the function
+that orders *record → advance → broadcast*, and it cannot be driven from a headless test: it
+goes through `TryAdvanceRevisions`, which needs `HasAuthority()`, which needs a real game
+`UWorld`. Building one would make the case an in-engine test (§6.2). The ordering inside
+`CommitOp` is therefore **read, not tested**, and closing that gap belongs with the crash
+matrix, which is §6.2 work and is not built. It is recorded here rather than covered by a
+test that mirrors the ordering in its own callback and proves only that the test is correct.
 
 P-003 additionally requires `Persistence.CommitCrash`, `Persistence.SettlementReplay`,
 `Persistence.RetryFence`, `Persistence.CaptureFence`, `Persistence.RootPublication`,
