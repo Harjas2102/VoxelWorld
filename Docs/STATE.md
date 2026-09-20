@@ -5,8 +5,99 @@
 
 ---
 
-**Checkpoint:** CP-013 · **Date:** 2026-09-07
+**Checkpoint:** CP-014 · **Date:** 2026-09-20
 **Phase:** 1 — Terrain Feasibility
+
+## What happened at CP-014
+
+**Multiplayer terrain edits now replicate authoritatively, and persistence has an adopted
+architecture, a fixed byte format and working codecs.** Three increments ran between CP-013
+and this checkpoint and **none of them was checkpointed at the time**, so CP-014 records all
+three. Build step 3 is complete; build step 4 is specified and part-built.
+
+### T-115 — build step 3, the authoritative edit path (`21e3a2c`)
+
+A client's edit intent now travels owner-only RPC to server validation, into a bounded fair
+queue, through one serialized backend apply, and out to subscribed clients — and three real
+clients converge on the same terrain.
+
+- **P-002 ruled box splitting**: split along the longest eligible axis, nearest balanced
+  **even** widths. A 42³ box becomes 20×42×42 plus 22×42×42 — exact union, no overlap. An
+  over-cap **sphere is rejected, never split**: a sphere has no exact partition and the
+  permanent 58-byte wire has nowhere to put a clip box, so an approximate split would make
+  the same request produce different terrain depending on whether it crossed a cap.
+- **`FTerrainEditQueue`** — 256 global / 16 per-source slots, 64 cached receipts per source,
+  monotonic IDs, token and charge reservation, commit-time revalidation, per-transaction
+  round-robin.
+- **`UTerrainStreamComponent`** — reliable owner-only PlayerController transport, session
+  checks, pristine subscription acknowledgement, explicit gap detection.
+- **AR-7**: service field ownership alone did not protect outstanding plugin generator
+  instances. Shared immutable ownership now survives service teardown until the last worker
+  consumer releases it.
+- **A kernel correction, not a fixture update.** The stock plugin writes beyond the canonical
+  W (radius+2), and clipping alone still leaves wholly-contained cells partially filled. The
+  adapter clips W and enforces full empty/solid for those cells. A radius-four solid dig now
+  touches **257** samples, not the historical 895.
+- **Two review findings fixed before merge**: geometry and revision advancement were inside
+  `check(...)`, which compiles out of a release build; and a new test fixture hit UE's
+  self-add assertion.
+
+Verified at the time: both targets build; **17** TerrainCore tests green; the production
+density regression PASS over 20 runs against four pinned hashes; **three 60-second
+multiplayer rounds with three editing clients plus an observer — 426 / 428 / 426 commits,
+zero replay failures** — across two non-seamless server travels.
+
+### T-116 — the persistence architecture (`b9104c0`)
+
+P-003 went through three revisions and three independent cross-vendor reviews before being
+adopted at the architectural level under D-023/D-032. It resolves DEF-1/2/9 *as design*: the
+journal commits terrain and an idempotent entity ledger settles its economic effects;
+separate cursors G (terrain cut), W (settlement watermark) and H (journal head); consistent
+global checkpoints through copy-before-write capture and two fixed root slots; dual journal
+anchors; entity-only restore prohibited. `ARCHITECTURE.md` §4.7 references it, and the
+withdrawn schema-1 sketches are gone.
+
+### T-117 — the format packet and its codecs (`893a029`)
+
+P-004 fixes **schema 2** — every byte offset, width, cap, ordering rule, checksum and digest
+— and `TerrainCore` now implements it: all seven object types, both journal record types, the
+96-bit path-copied chunk-key index with an `ITerrainObjectStore` seam, and
+`Terrain.PersistDump`. All of it is `Core`-only and tests headless with no file system.
+
+Determinations worth knowing without opening the document:
+
+- **BLAKE3-256 for content digests, XXH3-64 for framing checksums** — both specified
+  algorithms vendored in `Core`, deliberately **not** `FCrc::MemCrc32`, whose value is an
+  Unreal implementation detail and would make every saved world hostage to it.
+- **No floating point is persisted anywhere.** Voxel size and world origin are config floats
+  and cross as exact **micrometres**. That removes R-014's risk shape from the save format.
+- **A `GeneratorParamsDigest` binds the exact generator shape**, so a forgotten
+  `GeneratorVersion` bump now fails the base check instead of silently reinterpreting every
+  Empty chunk.
+- **Empty has no payload object** — its metadata lives in the index leaf alone, so one
+  logical state never has two on-disk spellings for a validator to arbitrate.
+- **Sealing appends a record**, so only the four fixed slots are ever rewritten in place, and
+  those are the only places a torn write has a surviving redundant copy.
+- **No format field contains a path**, so P-003's preallocated-container fallback stays
+  adoptable later without changing one stored byte.
+
+Verified: both targets build; **24 of 24** TerrainCore tests pass, exit 0; 16 golden BLAKE3
+vectors pinned; `Terrain.PersistDump` exercised in a real `-game` process; D-011 and D-025
+scans clean.
+
+**Self-review caught two real defects**, both fixed and both now covered by tests: the
+segment scanner treated *any* checksum failure as a torn tail, so a corrupted record in the
+middle of a segment would have made it silently discard every acknowledged record after it;
+and the object encoder enforced its cap with `checkf`, which compiles out of a shipping
+build — the same shape as the step-3 finding above.
+
+### One process change, on the Director's word
+
+> *"You will fluidly be an independent reviewer and a code writer. There are no longer any
+> constraints to your job description, and i trust you to make all decisions."*
+
+T-117 was therefore written and reviewed by the same agent. That is recorded in **D-033**,
+and the weakened review evidence is tracked as **R-016** rather than left implicit.
 
 ## What happened at CP-013
 
@@ -488,31 +579,47 @@ the roadmap was reordered around a terrain feasibility gate. Reviews archived in
 
 ## What exists right now
 
-**C++ (builds from source; T-112 complete at CP-010):**
+**C++ (builds from source; current at CP-014):**
 
 ```text
 Source/
   VoxelWorld.Target.cs             Game target      | BuildSettingsVersion.V6
-  VoxelWorldEditor.Target.cs       Editor target    | EngineIncludeOrderVersion.Unreal5_7
+  VoxelWorldEditor.Target.cs       Editor target
   VoxelWorld/                      primary game module — depends on TerrainCore ONLY
+    TerrainInteractionLibrary.*    Blueprint nodes; intent through the owning controller
   TerrainCore/                     Core, CoreUObject, Engine. NO plugin dependency.
-    Public/TerrainService.h        UTerrainService : UWorldSubsystem — revision skeleton
-    Public/TerrainRevisionIndex.h in-memory, monotonic per-chunk revisions
+    Public/TerrainService.h        UTerrainService — validation, commit, subscriptions
+    Public/TerrainEdit.h           request / rejection / receipt types
+    Public/TerrainEditQueue.h      bounded fair queue, reservations, revalidation
+    Public/TerrainStreamComponent.h owner-only RPC transport and replay envelope
+    Public/TerrainOpGeometry.h     canonical bounds/counts, exact box subdivision (P-002)
     Public/TerrainTypes.h          §4.2 value types + §4.3 FTerrainPointSample
-    Public/TerrainOp.h             FTerrainOp + the 58-byte codec's declarations
-    Public/TerrainQuantise.h       QuantiseEdit / DequantiseVoxel / QuantiseRadiusQ16
+    Public/TerrainOp.h             FTerrainOp + the 58-byte codec — PERMANENT FORMAT
+    Public/TerrainChunk.h          chunk-space arithmetic, K2 = 32 voxels
+    Public/TerrainQuantise.h       world→voxel, Floor, fixed by §4.3
+    Public/TerrainWorldField.h     FTerrainWorldFieldParams — the world's shape (T-108)
+    Public/TerrainMaterials.h      the game material catalog. IDS ARE PERMANENT
     Public/ITerrainBackend.h       eleven-method interface + FTerrainBackendInit
-    Public/ITerrainDensityField.h  Sample declaration only — implementers at T-108
-    Public/MemoryTerrainBackend.h dense reference backend + documented determinations
-    Private/TerrainOp.cpp          the codec — PERMANENT FORMAT
-    Private/TerrainQuantise.cpp    world→voxel, Floor, fixed by §4.3
-    Private/MemoryTerrainBackend.cpp synchronous data, edits, queries, interest, transfer
-    Private/TerrainRevisionIndex.cpp distinct-key updates with atomic overflow rejection
-    Private/TerrainService.cpp    index ownership, lifecycle and authority gates
-    Private/Tests/                 TerrainOpCodecTest.cpp, TerrainQuantiseTest.cpp
-                                   BackendConformance.h/.cpp (factory suite + Query.Point)
-                                   TerrainRevisionTest.cpp (Revision.Monotonic)
+    Public/ITerrainDensityField.h  the single any-thread interface
+    Public/MemoryTerrainBackend.h  dense reference backend
+    Public/TerrainBackendRegistry.h name→factory; nothing here links a backend
+    Public/TerrainPersistenceFormat.h   schema-2 primitives — PERMANENT FORMAT (P-004)
+    Public/TerrainPersistenceRecords.h  schema-2 record bodies — PERMANENT FORMAT
+    Public/TerrainPersistenceIndex.h    96-bit chunk-key index + object-store seam
+    Private/                       the implementations, plus TerrainPersistenceDump.cpp
+    Private/Tests/                 24 automation cases (§6.1)
+  TerrainBackendVPLegacy/          THE ONLY module that may include plugin headers
+    Private/VPLegacyBackend.*      canonical W/B, complete-cell semantics, thread guards
+    Private/VPLegacyDensityGenerator.*  immutable shared field lifetime (AR-7)
 ```
+
+- **`UTerrainService` is no longer a skeleton.** It owns backend lifetime, connection
+  identity, quantisation, the reach / tool / permission / bounds / residency / clearance
+  checks, commit revisions, distance subscriptions and client replay. Gameplay routes through
+  it and through nothing else (D-011, cleared at CP-012).
+- **Three permanent formats now exist**: the 58-byte op (CP-007), the schema-2 persistence
+  objects and the schema-2 journal records (CP-014). Each is a persistence format under
+  `AGENTS.md` §4 and moves by numbered decision with a migration path, never by an edit.
 
 - **`VoxelWorld`** — the primary game module (`IMPLEMENT_PRIMARY_GAME_MODULE`). Gameplay,
   characters, tools, UI hooks. `ARCHITECTURE.md` §4.1: it depends on `TerrainCore` only, and
@@ -532,8 +639,8 @@ Source/
   gameplay does not call them yet.
 - **`VoxelWorld.uproject`** now carries a `Modules` array (`TerrainCore` first, then
   `VoxelWorld`). Both DLLs build into `Binaries/Win64/` (gitignored).
-- `TerrainBackendVPLegacy` — the only module that may ever include plugin headers — **does
-  not exist yet**. It arrives at build step 2 (T-113).
+- `TerrainBackendVPLegacy` exists as of T-113 (CP-012) and is still the only module that may
+  include plugin headers. `TerrainCore` links no backend; selection is a config line.
 
 **In-engine:**
 
@@ -592,35 +699,70 @@ yield, and server authority is not proven until build step 3.
 
 ## Current task
 
-**Nothing is outstanding from CP-013.** Build steps 0, 1, 2 and 8 are complete; the
-Director's by-hand dig closed step 2, and the by-eye look at the generated hill is the only
-thing left from T-108 and it is optional — `Field.Shape` asserts the shape headlessly.
+**Nothing is outstanding from CP-014.** Build steps 0, 1, 2, 3 and 8 are complete. Build
+step 4 has its architecture (P-003), its byte format (P-004) and its codecs; it does not have
+a storage owner, and therefore nothing is saved to disk yet.
 
-**Next: T-101B / build step 3 — and it MAY now start.** §9 bound it to K1, K4, DEF-4, DEF-5
-and DEF-7. K1 and K4 were ruled at CP-005 (D-024); the three defects were **resolved at
-T-114** (§4.5.1, §4.10, §4.11), so §14's rule no longer reaches this step. It is the largest
-single piece of work in the phase and should be its own increment:
+**Next: build step 4 continued — the storage owner**, P-003 §8 item 3. It is R3 work.
 
-- **Server validation** to the §4.11 specification: trusted inputs, quantised-footprint
-  checks, `(SourceId, RequestId)` dedup ring, two-phase reserve-then-revalidate, bounded
-  fair queue, the four new rejection reasons.
-- **`ServerRequestEdit` / `ClientApplyOp`** and the subscription set (§4.4).
-- **The serialised execution path and the shutdown state machine** to §4.5.1.
-- **Split operations** for box ops only (§4.11.7), with `Split.Equivalence`.
-- **New `Backend.Conformance` clauses**: off-game-thread refusal, state-machine rejection
-  reasons, and a failed `ApplyOp` leaving the region hash unchanged.
-- **Ends with** 3-client PIE convergence (`MP.Convergence`), which is what turns the
-  server-authority drift check from "standalone only" into a real result.
+- **Before writing it, get the independent review this checkpoint did not have.** T-117 was
+  written and reviewed by the same agent on the Director's instruction (D-033 §5), and R-016
+  tracks that as a real weakening of the evidence for an R3 subsystem. The cheapest strong
+  check is a cross-vendor pass over P-004 and `893a029` that **reimplements two or three
+  objects from the document alone** and compares them against the 16 pinned golden hashes:
+  that is the only thing that proves the document and the code agree, since one author wrote
+  both.
+- **Then the storage owner itself**: pre-created root and anchor slots, segment files, the
+  content-addressed object store behind `ITerrainObjectStore`, and the publication ordering
+  in P-004 §9.5 and §12. Fault injection at every write, flush and rename before it carries a
+  single real edit.
+- **Then the commit path** with a `NoEconomy` consumer, then the crash matrix. Do not start
+  settlement or SQLite before the storage owner has its own fault-injection coverage.
 
-**Incoming Implementer: either** Claude or Codex according to availability (D-028). Read
-`HANDOFF.md` first.
+**Incoming Implementer: either** Claude or Codex by availability (D-028). Read `HANDOFF.md`
+first. If the next agent is Claude, the review above must be Codex's.
 
-**Also open, and unassigned:** **R-013** — the production adapter has not passed
-`Backend.Conformance`, and the §6.2 in-engine harness that would run it does not exist;
-§4.10.4(c) now defines what that pass can and cannot mean. **R-010's KillZ** remains a
-prerequisite for anyone actually playing, and the plain now sits 3 m lower than the old flat
-plane so the spawn drop is longer. **R-014** is the new cross-platform kernel-determinism
-watch item. None is build step 3's job unless the Director says so.
+**Also open, and unassigned:** **R-013** — the production adapter still has not passed
+`Backend.Conformance`, and the §6.2 in-engine harness that would run it does not exist.
+**R-010's KillZ** remains a prerequisite for anyone actually playing. **R-014** is the
+cross-platform kernel-determinism watch item; note that P-004 removed floating point from the
+save format, which shrinks R-014's blast radius but does not close it. **R-015** is the
+unproved Windows durable-publication question, and it gates step 4 integration specifically.
+**R-016** is the single-agent-review exposure above. None is step 4's job unless the Director
+says so.
+
+## Drift checks (VISION.md, run at CP-014)
+
+**ONE FLAG MOVED, AND IT MOVED FORWARD.** Server authority is no longer "standalone only".
+
+- [x] **Every gameplay system is server-authoritative — CLEARED, and now against real
+      clients.** CP-012 cleared this for standalone with an explicit caveat: *"there is no
+      `ServerRequestEdit` RPC and no `ClientApplyOp` until build step 3, so authoritative
+      today means there is exactly one authority and it is this process. Re-check at step 3
+      against a real client."* T-115 is that step. A client's intent is an owner-only RPC;
+      the server validates, sequences and applies; clients replay what they are told and
+      **cannot apply an edit they were not sent** — revision gaps quarantine replay rather
+      than guessing. Three real editing clients converged over three 60-second rounds and
+      two server travels, and a distant observer received zero ops. The caveat is discharged.
+- [x] **The terrain backend remains replaceable — CLEARED, limit unchanged.** T-117 added
+      three public headers to `TerrainCore` and not one plugin dependency; the persistence
+      format is `Core`-only and holds no plugin, `UObject` or engine-asset type. R-013's
+      limit (the production adapter has not passed `Backend.Conformance`) is untouched.
+- [x] **The world is malleable and persistent — HALF of this is now real, and the other half
+      is honestly not.** Malleable: yes, over the network, authoritatively. Persistent:
+      **no.** Edits still do not survive a restart. Pillar 1 says *"The server remembers
+      everything at next login"*, and at CP-014 it does not. That is build step 4 and it is
+      the single largest gap between this project and its founding sentence.
+- [x] **Voxels are still invisible to the player (D-015).** Nothing at CP-014 is player
+      facing at all. P-004 stores density and material samples; no player ever sees one.
+- [x] Terrain is smooth-voxel and player-deformable · tech path still leads to electricity ·
+      one planet, 16–32 players · incremental, Minecraft-alpha style · the same five
+      inspiration games.
+
+**What would re-flag these.** Any gameplay code or asset that calls the plugin again; any
+edit path that bypasses `RequestEdit`; a `Build.cs` gaining a plugin dependency; a client
+applying an edit it was not told about; or a persistence change that starts storing engine or
+plugin types.
 
 ## Drift checks (VISION.md, run at CP-013)
 
@@ -676,6 +818,25 @@ reference at all**. Every terrain change now enters through `UTerrainService::Re
 edit path that bypasses `RequestEdit`; a `Build.cs` gaining a plugin dependency; or a client
 being allowed to apply an edit it was not told about by the server.
 
+## R-012 check (process weight, run at CP-014)
+
+**PASS, and the shape of the process changed.** Cost to the Director across the whole CP-014
+window: a handful of one-line instructions — *"commit and push so that the other agent can
+continue"*, then *"resume"*, then the instruction merging the writer and reviewer roles, then
+*"checkpoint"*. No process task, gate or document was created that he has to maintain.
+
+**The honest entry, because R-012 is about process weight and this window cut some.** The
+Director removed the writer-is-not-reviewer separation for R3 work (D-033 §5). That is a
+genuine reduction in ceremony and it bought three increments in the time the previous two
+rounds of cross-vendor P-003 review took. It also removed a real safety property, which is
+why **R-016** now exists rather than the saving being recorded as a pure win.
+
+**The other honest entry:** three increments ran without a checkpoint between them. That is
+allowed — AGENTS §7 reserves the word for the Director — but it meant CP-014 had to
+reconstruct three sessions at once, and the "What exists right now" inventory had been wrong
+since CP-012 because nobody had cause to reread it. If a window goes past two increments,
+the handoff is carrying more than it should.
+
 ## R-012 check (process weight, run at CP-012)
 
 **PASS — and the run of headless-only steps has ended, as CP-008 and CP-010 both said to
@@ -711,15 +872,15 @@ None.
 | Role | Holder |
 |---|---|
 | Director | Harjas |
-| Implementer | Alternating Claude/Codex (D-028); outgoing Claude, either agent next. **The next task is R3**, so whoever implements must not also review it |
-| Architect | Opus in the Claude app. D-027's delegation was limited to the completed T-112.2; D-031's authority was limited to T-113. **AR-5 is awaiting an Architect/Director confirmation** and is cheap to overrule |
-| Independent reviewer | Whichever vendor did not author (R3 only) |
+| Implementer | Alternating Claude/Codex (D-028); outgoing Claude, either agent next |
+| Architect | The acting Implementer, per D-033 §5: the Director merged the roles and rules technical decisions by D-023. Record each ruling; escalate only what a player would notice |
+| Independent reviewer | **Owed.** D-033 §5 lifted the separation for T-117 only. The next agent should be the vendor that did not write T-117, and P-004 plus `893a029` is the first thing to review (R-016) |
 
 ## Toolchain status
 
 | Tool | Status |
 |---|---|
-| **UE 5.8** | ✅ **5.8.2** at `C:\Program Files\Epic Games\UE_5.8` — the build/test engine since T-112.5 (D-025). Editor and game targets both build; **seven** TerrainCore tests green |
+| **UE 5.8** | ✅ **5.8.2** at `C:\Program Files\Epic Games\UE_5.8` — the build/test engine since T-112.5 (D-025). Editor and game targets both build; **24** TerrainCore tests green at CP-014 |
 | UE 5.7 | ✅ 5.7.4 at `C:\Program Files\Epic Games\UE_5.7` — **kept deliberately** as the T-112.5 rollback path (D-030). Not the build engine |
 | Git + LFS | ✅ git-lfs 3.7.1, push credentials verified |
 | Claude Code | ✅ Installed, verified in-repo |

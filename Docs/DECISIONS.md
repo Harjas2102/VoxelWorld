@@ -827,3 +827,137 @@ because the alternative needs a durability protocol DEF-1 has not defined.
 **Build step 3 is unblocked** and is the next task. T-114 wrote the specification and its
 headless evidence; it implemented none of step 3. Evidence for both increments is in
 `HANDOFF.md` and in the commit messages for `db4cb72` and `c6d9ad6`.
+
+---
+
+## D-033 — CP-014 rulings: step 3 shipped, persistence adopted, schema 2 fixed (2026-09-20)
+
+**Recorded:** CP-014 · **Class:** technical (per **D-023**) · **Architect rulings, logged
+not asked** · **Scope:** T-115, T-116, T-117 · **Status:** ACCEPTED
+
+Everything below is a technical ruling under D-023 — data formats, wire protocols, threading
+and defect sequencing are explicitly on its technical side. The Director was notified, not
+consulted, except for §5, which is his own instruction.
+
+### 1. P-002 — box splitting is exact, and spheres do not split
+
+**Context:** §7.1 caps an op at 65,536 written voxels, and §4.11.7 required over-cap requests
+to split into sub-ops sharing a `TransactionId`. "Split" was never defined.
+
+**Decision:** split along the **longest eligible axis** (X, then Y, then Z on ties) into the
+**nearest balanced even widths** (lower coordinate takes the smaller part on ties). Every
+child is reserved before any child is admitted. A cap below eight is impossible.
+
+**An over-cap `Sphere` is rejected `TooLarge` and is never split.** A sphere has no exact
+integer partition, and the permanent 58-byte wire has nowhere to put a clip box, so an
+approximate split would make the same request produce different terrain depending on whether
+it happened to cross a cap. Rejecting is the only answer that keeps §4.10's determinism
+claims true.
+
+**Consequences:** `Split.Equivalence` asserts that a box applied whole and applied as its
+split produce identical region hashes, on and off chunk boundaries. A transaction is **not**
+atomic across sub-ops; restart abandons uncommitted children and never replays the parent
+intent to "finish" it.
+
+### 2. AR-7 — shared immutable field lifetime
+
+**Context:** the service owned the density field and destroyed it on shutdown, while the
+plugin's asynchronous generator instances could still be holding it.
+
+**Decision:** the field is shared and immutable, and **outlives the service** until the last
+worker consumer releases it. `FTerrainBackendInit` carries an optional `DensityFieldOwner`
+alongside the borrowed raw pointer; the raw field must match when both are supplied.
+
+**Consequences:** no game-thread wait for meshing or collision, and no plugin type leaks
+across the boundary. Teardown ordering is tested by `Service.Lifecycle`.
+
+### 3. The density-kernel correction is compliance, not a fixture update
+
+**Context:** a radius-four solid dig historically touched 895 samples. Under the adopted
+§4.10 canonical write set it should touch far fewer.
+
+**Decision:** the stock plugin writes beyond the canonical W (radius + 2), and clipping alone
+still leaves wholly-contained cells partially filled. The adapter now clips W **and** enforces
+full empty/solid for those cells, retaining the plugin's ramp on boundary cells only. The
+same dig now touches **257** samples.
+
+**Consequences:** this is intentional compliance with a decision already made, and it is
+recorded here specifically so that nobody later reads the changed number as a golden fixture
+that was quietly updated to make a test pass. The four pinned production hashes were
+regenerated once, deliberately, for this reason and no other.
+
+### 4. P-003 adopted, and P-004 fixes its bytes
+
+**P-003 §§1–7 are adopted at the architectural level** after three revisions and three
+independent cross-vendor reviews, the last of which found all six of its blocking items
+closed. `ARCHITECTURE.md` §4.7 references it and the unimplemented schema-1 sketches and the
+~122 bytes/edit estimate are **withdrawn**.
+
+**P-004 is its exact-format packet**, and the determinations it makes are permanent format:
+
+- **BLAKE3-256 for content digests; XXH3-64 for framing checksums.** Both are specified
+  algorithms vendored in `Core`. **Not `FCrc::MemCrc32`** — its value is an Unreal
+  implementation detail, and writing one into a file that must outlive an engine upgrade
+  would make every saved world hostage to a header Epic is free to change.
+- **No floating point is persisted anywhere in schema 2.** Voxel size and world origin are
+  config floats and cross as exact **micrometres** (`int64`). A stored `float VoxelSizeCm`
+  would make save compatibility depend on `50.0f` decoding identically on every toolchain,
+  which is R-014's exact shape. This does not close R-014 — the kernel's own arithmetic is
+  untouched — but it takes the save format out of its blast radius.
+- **A 32-byte `GeneratorParamsDigest` is added to the base descriptor.** P-003 §6 requires
+  binding "generator identity/version", and `GeneratorVersion` is a config integer a human
+  remembers to bump. The digest means a changed `FTerrainWorldFieldParams` with a forgotten
+  bump **fails the exact-base check** instead of silently reinterpreting every Empty chunk.
+  This strengthens an adopted requirement; it does not alter one.
+- **Empty has no payload object.** Its revision and last-change metadata live in the index
+  leaf entry. Two on-disk spellings for one logical state would force every validator to rule
+  on which wins when they disagree.
+- **Sealing appends a record rather than rewriting a segment header.** Consequently no
+  durable object in schema 2 is ever modified in place **except** the four fixed slots — and
+  those are the only places where a torn write has a surviving redundant copy.
+- **Journal records inherit identity from their segment header**, plus an 8-byte `WorldTag`
+  per record as the splice check that inheritance would otherwise lose.
+- **Mode A (named content-addressed objects) is the default storage mode**, and **no format
+  field contains a path**, so P-003's preallocated-container fallback remains adoptable later
+  without changing one stored byte. Whether Windows durably publishes a new directory entry
+  across power loss is **not proved** — see **R-015**.
+- **A torn tail is bounded by position, not by symptom.** A checksum failure counts as a tear
+  only when its frame reaches exactly end of file; a damaged record in the middle of a
+  segment fails closed. The looser rule would have silently discarded acknowledged history.
+
+**Consequences:** two new permanent formats exist — schema-2 persistence objects and
+schema-2 journal records — each governed by `AGENTS.md` §4. Sixteen pinned golden BLAKE3
+vectors guard them. **Failing one of those vectors is a save-format change requiring a
+numbered decision and a migration path, never a constant to update.**
+
+### 5. The Director merged the writer and reviewer roles
+
+**Context:** AGENTS §2 requires that the writer is not the reviewer for R3 work, and §3
+requires proposal + independent review + ruling. The Director's instruction, verbatim:
+
+> *"Read handoff.md, and move forward with game development picking up at whatever T-XXX is
+> not completed. You will fluidly be an independent reviewer and a code writer. There are no
+> longer any constraints to your job description, and i trust you to make all decisions.
+> Begin at once."*
+
+**Decision, his:** for T-117 the acting agent both wrote and reviewed the work, and ruled its
+technical questions without asking. This is consistent with D-023, which already gives the
+Architect technical rulings, and it extends that to the review step as well.
+
+**Consequences, recorded honestly rather than celebrated.** The self-review was real and
+found six issues, two of which mattered: the torn-tail rule in §4 above, and an object
+encoder enforcing its cap with `checkf`, which compiles out of a shipping build — the same
+class of defect the step-3 review had already caught once. But a review of one's own work is
+weaker evidence than a cross-vendor review, and this is an R3 subsystem with a permanent
+format in it. **R-016** carries that exposure, and `STATE.md`'s current task makes the owed
+review the first thing the next agent does. This entry does not amend `AGENTS.md`; the
+Director's instruction stands above it and can be withdrawn the same way it was given.
+
+### 6. Status
+
+**Build step 3 is complete** and its drift check is discharged against real clients. **Build
+step 4 is specified and part-built**: architecture, byte format and codecs exist; the storage
+owner, commit path, capture pump, settlement, recovery and retention do not. **DEF-1, DEF-2
+and DEF-9 remain open** and none of P-003 §8's named evidence tests exists. Evidence for all
+three increments is in `HANDOFF.md` and in the commit messages for `21e3a2c`, `b9104c0` and
+`893a029`.

@@ -1,6 +1,6 @@
 → No action. For your reading only.
 
-# HANDOFF.md — T-101B step 4, P-004 format packet and codecs
+# HANDOFF.md — CP-014 taken; T-101B step 4 continues at the storage owner
 
 ## Identity, authority and Git state
 
@@ -14,11 +14,16 @@
   Director's explicit word. It is not a standing change to AGENTS.md, and the honest cost
   of it is recorded under "Limits" below.
 - Received at **`b9104c0`**, branch `main`, clean tree; `git pull --ff-only` already up to
-  date. Runtime base was `21e3a2c`. **No checkpoint was taken**: STATE/BACKLOG/DECISIONS/
-  RISKS remain CP-013 records and AGENTS §7 reserves those for the word `checkpoint`.
-- Changed: P-004 (new), ARCHITECTURE §4.7 and §6.1, this handoff, seven new TerrainCore
-  source files, three new test files and one test fixture header, plus two one-line
-  renames in existing files (see "Two pre-existing defects", below).
+  date. Runtime base for T-117 was `893a029`.
+- **CP-014 was then taken on the Director's word.** It covers three increments that had run
+  without one: **T-115** (build step 3, `21e3a2c`), **T-116** (P-003 adopted, `b9104c0`) and
+  **T-117** (P-004 and its codecs, `893a029`). STATE, BACKLOG, DECISIONS and RISKS are all
+  current as of CP-014; rulings are in **D-033**; new risks are **R-015** and **R-016**.
+  `STATE.md`'s inventory had been wrong since CP-012 and was rewritten.
+- Changed by T-117: P-004 (new), ARCHITECTURE §4.7 and §6.1, seven new TerrainCore source
+  files, three new test files and one test fixture header, plus two one-line renames in
+  existing files (see "Two pre-existing defects", below). Changed by the checkpoint: STATE,
+  BACKLOG, DECISIONS, RISKS and this handoff.
 - No `.Build.cs`, `.uproject`, config, `.uasset` or `.umap` changed. No dependency added.
   The 58-byte operation wire and every existing golden value are untouched.
 
@@ -204,9 +209,10 @@ that mattered.
 
 1. Read P-004, then this handoff's "Decisions" and "Limits". Verify the enclosing commit,
    branch and worktree; `git pull --ff-only` on a clean tree.
-2. **The highest-value next step is the independent review that Limit 4 and 5 name** — an
-   outside pass over P-004 and this diff, ideally including a from-the-document
-   reimplementation of two or three objects checked against the pinned hashes.
+2. **The highest-value next step is the independent review that Limit 4 and 5 name**, now
+   tracked as **R-016** — an outside pass over P-004 and `893a029`, ideally including a
+   from-the-document reimplementation of two or three objects checked against the pinned
+   hashes. If the next agent is Claude, this review is Codex's.
 3. Then P-003 §8 item 3, in this order: the **storage owner** (pre-created slots, segment
    files, content-addressed object store behind `ITerrainObjectStore`, and the ordering
    rules in P-004 §9.5 and §12), then the commit path with a `NoEconomy` consumer, then the
@@ -214,5 +220,5 @@ that mattered.
    fault-injection coverage.
 4. Keep DEF-1/2/9 open until their named evidence exists. Materials, real economy (DEF-6),
    client JIP (step 5) and collision readiness (step 7) remain separately gated.
-5. On the word `checkpoint`, reconcile STATE/BACKLOG/DECISIONS/RISKS with this increment.
-   It is ready for one and has not had one.
+5. **CP-014 is done.** Do not re-record T-115/T-116/T-117; they are in the Done log. The
+   next checkpoint is CP-015 and it should cover the storage owner.

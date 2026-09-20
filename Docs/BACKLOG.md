@@ -47,11 +47,8 @@ through `UTerrainService::RequestEdit`. See the Done log and D-031.
 reported, "digging works as today" is asserted from `Terrain.SelfTest` and not from the
 game as played.
 
-**Next is T-101B**, the gate proper, which begins at build step 3. **Do not start step 3
-yet**: §9 binds it to DEF-4, DEF-5 and DEF-7, all open, and §14's rule is that a step may
-not start while an unresolved defect is bound to it. Closing those three is therefore the
-real next task, and it is R3 work — proposal, independent review, Director ruling — not
-implementation.
+**Superseded at CP-014.** Build step 3 shipped as T-115 and build step 4 is part-built as
+T-116 and T-117. See the Done log.
 
 ### T-101B — Terrain Feasibility Gate *(tiered)*
 
@@ -88,9 +85,12 @@ deliberately removing arbitrary terrain manipulation from Pillar 1).
 **Sub-steps:**
 
 - **1B** — `TerrainEditOp`, authoritative request path, revision IDs, 2–3 client
-  same-region test.
+  same-region test. — ✅ **DONE (CP-014, T-115)**
 - **1C** — Material field; soil/stone/ore query; **resource yield from removed material**.
 - **1D** — Persistence journal, snapshot + compaction prototype, restart test.
+  *(CP-014: architecture adopted (T-116), byte format fixed and codecs built (T-117). The
+  storage owner, commit path, capture pump, settlement and recovery are NOT built, and no
+  edit survives a restart yet. DEF-1/2/9 stay open.)*
 - **1E** — Join-in-progress, chunk relevancy, compression/batching only as needed.
 - **1F** — Stress profile, collision, foliage, nav, streaming → **decide the backend**.
 
@@ -219,6 +219,59 @@ T-101B sub-step 1D, which requires the multiplayer-capable version instead.
 
 ## Done
 
+- **T-117** *(CP-014)* **P-004: schema 2 is fixed, and its codecs exist.**
+  The exact-format packet P-003 §8 required before any codec. Every byte offset, width, cap,
+  ordering rule, checksum and digest; the canonical intent and record digests; journal
+  framing, sealing and dual anchors; the 96-bit chunk-key index; the file-naming rule; the
+  module boundary; and a 20-value error taxonomy so a corrupt fixture asserts **which**
+  defence fired rather than merely that something was rejected.
+  Code: `TerrainPersistenceFormat`, `TerrainPersistenceRecords`, `TerrainPersistenceIndex`,
+  `TerrainPersistenceDump` — all seven object types, both record types, the path-copied index
+  with an `ITerrainObjectStore` seam, and `Terrain.PersistDump`. `Core`-only; no file system,
+  no plugin, no `UObject`.
+  Determinations: BLAKE3-256 / XXH3-64 rather than `FCrc::MemCrc32`; **no floating point
+  persisted anywhere**; a `GeneratorParamsDigest` that catches a forgotten version bump;
+  Empty carried by the index leaf alone; sealing by appended record so only the four fixed
+  slots are ever rewritten; no path in any format field.
+  Measured: object header 96 B, slot 4096 B, Dense body 131,104 B, worst-case journal record
+  84,768 B against a 131,072 B cap, a radius-4 dig over 8 chunks 350 B, SparseDiff winning to
+  21,844 of 32,768 samples, and 64 index keys costing 147 pages against the 12·D bound of 768.
+  Verified: both targets build; **24 of 24** TerrainCore tests pass, exit 0; 16 pinned golden
+  BLAKE3 vectors; `Terrain.PersistDump` exercised in a real `-game` process; D-011 and D-025
+  scans clean. Self-review fixed six issues, two that mattered — a torn-tail rule that would
+  have discarded acknowledged history, and a cap enforced by `checkf`, which compiles out of
+  a shipping build.
+  **Build step 4 is NOT complete**: no storage owner, no commit path, no capture pump, no
+  settlement, no recovery, no retention. DEF-1/2/9 open. Rulings in **D-033** §4; new risks
+  **R-015** and **R-016**.
+- **T-116** *(CP-014)* **P-003 adopted: the persistence architecture.**
+  Three revisions and three independent cross-vendor reviews; the revision-3 review found all
+  six of its blocking items closed and the architecture adoptable. Journal commits terrain and
+  an idempotent entity ledger settles its economic effects; separate cursors G, W and H;
+  consistent global checkpoints via copy-before-write capture and two fixed root slots; dual
+  journal anchors with no silent head regression; entity-only restore prohibited.
+  `ARCHITECTURE.md` §4.7 now references it; the schema-1 sketches and the ~122 B/edit estimate
+  are withdrawn. **Design only — no runtime code, and it closed no defect evidence.**
+- **T-115** *(CP-014)* **Build step 3: authoritative edit replication.**
+  Owner-only RPC → server validation → bounded fair queue → one serialized backend apply →
+  broadcast to subscribed clients. `FTerrainEditQueue` (256 global / 16 per source, 64
+  receipts, reservations, commit-time revalidation, round-robin), `UTerrainStreamComponent`
+  (session checks, subscription acknowledgement, gap detection), and the service's
+  reach/tool/permission/bounds/residency/clearance checks.
+  **P-002** ruled exact box splitting — longest eligible axis, nearest balanced even widths —
+  and ruled that an over-cap **sphere is rejected, never split**, because a sphere has no
+  exact partition and the 58-byte wire has nowhere to put a clip box. **AR-7** gave the
+  density field shared immutable lifetime that outlives the service. The adapter's density
+  kernel was corrected to the canonical W with full empty/solid interior cells: a radius-four
+  dig touches **257** samples, not 895 — compliance with an adopted decision, not a quietly
+  updated fixture.
+  Verified: both targets build; **17** TerrainCore tests green; production density regression
+  PASS over 20 runs against four pinned hashes; **three 60-second multiplayer rounds with
+  three editing clients plus an observer, 426 / 428 / 426 commits, zero replay failures**,
+  across two non-seamless server travels. Two review findings were fixed before merge, one of
+  them mandatory work sitting inside `check(...)`.
+  Rulings in **D-033** §§1–3. **Clients joining after an edit still cannot reconstruct
+  modified chunks** — that is step 5.
 - **T-114** *(CP-013)* **DEF-4, DEF-5 and DEF-7 closed; build step 3 unblocked.**
   Specification and headless evidence only — no step-3 implementation.
   **DEF-4 → §4.5.1**: affinity/ownership table, five rules, a four-state shutdown machine

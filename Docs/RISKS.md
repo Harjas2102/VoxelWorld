@@ -57,6 +57,17 @@ Severity / probability scale: **High · Medium · Low**.
   that is build step 4 and is what this risk is actually about. If anything the generated
   world helps it: a pristine chunk regenerates and never needs a payload, so only edited
   chunks can grow the save.
+- **CP-014 evidence — the format now exists, and the numbers are computed rather than
+  guessed.** P-004 fixes schema 2 and its codecs are built and tested. The withdrawn
+  ~122 B/edit estimate is replaced by **computed** figures: a radius-4 dig over 8 chunks with
+  3 materials is **350 B** of journal; a Dense chunk object is **131,200 B**; the worst legal
+  journal record is **84,768 B**; SparseDiff beats Dense up to **21,844** of 32,768 changed
+  samples. Compaction's cost argument is now structural rather than hoped for: the
+  path-copied index rewrites at most 12·D pages for D changed keys regardless of how much
+  cold history exists, measured at 147 pages for 64 keys and exactly 12 for one later change.
+  **None of this is a measured save file.** Nothing writes to disk yet, so "hundreds to
+  thousands of edits, then measure growth" — the mitigation experiment this risk actually
+  names — has still not been run. Bytes/edit under the §7.1 workload remains open.
 - **Decision:** *open*
 
 ## R-004 — Material-yield accuracy
@@ -392,5 +403,61 @@ D-028 was written for. Keep writing the breadcrumb *before* the risky half, not 
   modes; then the same fixtures on a second toolchain, and on Linux when R-012's
   cross-platform work happens.
 - **Owner / task:** build step 3 (E-2), then §12.
+- **CP-014 note — the blast radius shrank; the risk did not close.** P-004 rule 1.2 persists
+  **no floating point at all**: voxel size and world origin cross as exact micrometres, and
+  every stored sample is an integer. A save file therefore cannot decode differently on
+  another toolchain. The residual is unchanged and is still the whole risk: the kernel's own
+  arithmetic when it *computes* those samples. `Adapter.Determinism` has still not been run.
 - **Result:** *open — specified, guarded by fixtures, not yet measured across platforms.*
 - **Decision:** *open*
+
+
+## R-015 — Durable name publication on Windows is unproved
+
+- **Severity:** High if it bites — the failure mode is a world that boots to a checkpoint
+  older than the one the server acknowledged, or, if the containment argument is wrong, a
+  root that references an object the filesystem has forgotten.
+- **Probability:** Low to Medium, and genuinely unmeasured. No in-process test can settle it.
+- **What it is.** UE 5.8 routes `IFileHandle::Flush` to `FlushFileBuffers`
+  (`WindowsPlatformFile.cpp:933`), which proves that a file's **contents** reach the device.
+  It proves nothing about the durability of a newly created **directory entry**, and Win32
+  exposes no directory-flush primitive at all. P-004 §12 states this rather than assuming it.
+- **What already guards it.** The four things that decide which state is current — two root
+  slots and two anchor slots — are **pre-created, fixed-size and overwritten in place**, so
+  they create no new names at runtime and do not depend on namespace durability. New names
+  are created only for immutable content-addressed objects, which are referenced only after a
+  slot naming them is published; if a crash loses such an entry, the slot's closure validation
+  fails on boot and the **previous** generation's root is used. That is a lost checkpoint, not
+  a corrupt world. **This is a containment argument, not a durability proof.**
+- **Why it costs little to be wrong about the mode.** No schema-2 field contains a path, so
+  adopting P-003's preallocated-container fallback changes the object addressing map and not
+  one stored byte.
+- **Mitigation experiment:** the `Restart.CrashMatrix` fault injection of §6.2 extended to
+  power-loss-class testing, or an explicit decision to adopt the container mode instead.
+- **Owner / task:** build step 4, before the storage owner carries a real edit.
+- **Result:** *open — argued and contained, not proved.*
+- **Decision:** *open*
+
+## R-016 — R3 work reviewed by its own author
+
+- **Severity:** Medium — it does not break anything by itself; it weakens the evidence that
+  nothing is broken, on a subsystem that contains a permanent save format.
+- **Probability:** N/A — this is a known exposure, not a hazard that may or may not occur.
+- **What it is.** `AGENTS.md` §2 requires that the writer is not the reviewer for R3 work.
+  The Director lifted that for T-117 (**D-033** §5), so P-004 and its codecs were written and
+  reviewed by the same agent. The self-review was real and found six issues, two of which
+  mattered — a torn-tail rule that would have discarded acknowledged history, and a cap
+  enforced by `checkf`, which compiles out of a shipping build. Finding two defects of that
+  size in one's own work is also evidence that a second reader would find more.
+- **The specific thing that is unproved.** The 16 golden vectors were produced by the same
+  implementation they now pin. They lock the format against future drift, which is their job.
+  They do **not** prove the code matches P-004's byte tables, because one author wrote both.
+- **Mitigation experiment:** a cross-vendor pass over P-004 and `893a029` that
+  **reimplements two or three objects from the document alone** and compares them against the
+  pinned hashes. That is the only cheap thing that proves document and code agree. It needs
+  BLAKE3 and XXH3 outside the engine; neither is installed on this machine.
+- **Owner / task:** the next agent, and the vendor that did not write T-117. `STATE.md` makes
+  it the first task of the next session.
+- **Result:** *open*
+- **Decision:** *open — the Director may also simply accept the exposure and move on, which
+  is his call to make and not a thing to re-litigate.*
