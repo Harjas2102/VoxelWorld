@@ -621,9 +621,14 @@ stated as something a reviewer can check by grep.
 Everything in this packet is implemented in **`TerrainCore`**, whose `Build.cs` depends on
 `Core`, `CoreUObject` and `Engine` and on nothing else. The codecs use only `Core`
 (`FBlake3`, `FXxHash64`, `TArray`, `TArrayView`) and compile and test headless with no engine
-world, no plugin and no file system. SQLite, file handles and the storage owner arrive in
-later increments as separate files behind a seam; **none of them may be included by the
-codec headers**, so the format stays testable in isolation. No plugin type, no `UObject` and
+world, no plugin and no file system.
+
+File handles live behind **`ITerrainStorageDevice`** in `TerrainStorage.h`, which the codec
+headers do not include — the format stays testable with no file system, and the device stays
+replaceable by an in-memory or fault-injecting implementation. Its surface is six mutating
+operations, deliberately small: every one of them is a place a crash can happen, and a
+smaller surface is a smaller crash matrix. SQLite and the world store arrive later, behind
+the same discipline. No plugin type, no `UObject` and
 no engine-asset type is ever persisted or crosses the adapter boundary (D-011, §4.1.0).
 
 ---
@@ -637,6 +642,31 @@ filesystem, and defines a preallocated-container fallback if it cannot be establ
 `FlushFileBuffers` (`WindowsPlatformFile.cpp:933`). That proves file **contents** reach the
 device for an open handle. It proves nothing about **directory-entry** durability for a newly
 created name, and Win32 exposes no directory-flush primitive at all.
+
+**A flush rule this packet fixes, found by reading both platform implementations.**
+`IFileHandle::Flush(bool bFullFlush = false)` documents `false` as letting "the operating/file
+system have more leeway about when the data actually gets written to disk". The two platforms
+this project targets do **not** treat the parameter the same way:
+
+| Platform | `Flush(false)` | `Flush(true)` |
+|---|---|---|
+| Windows (`WindowsPlatformFile.cpp:933`) | `FlushFileBuffers` — the parameter is **ignored** | `FlushFileBuffers` |
+| Unix (`UnixPlatformFile.cpp:323`) | `fdatasync` | `fsync` |
+
+`fdatasync` synchronises data but makes no promise about **metadata**, and a file's length is
+metadata. **Every object write and every journal append extends a file**, and D-002 makes a
+Linux dedicated server the shipping target. A defaulted `Flush()` would therefore be correct
+on the machine this is developed on and silently wrong on the machine it ships to — the worst
+shape a durability bug can have, because no amount of testing on Windows would find it.
+
+**Normative: every durable write in this store ends with `Flush(true)`**, and a failed flush
+is an I/O error, never a success. `ITerrainStorageDevice` is the only place that calls it.
+
+**A second rule, for the same reason.** A slot is published with an **in-place overwrite that
+does not truncate**: the handle is opened in append mode and seeked to zero, because opening
+for write with truncation makes the file briefly zero-length, and a slot that can be *absent*
+breaks the one property the two-slot protocol rests on. A length mismatch is refused rather
+than truncating to fit.
 
 **Ruling for this packet.** Schema 2 is specified so the question is *isolable and
 deferrable*, not so it is answered by assertion:

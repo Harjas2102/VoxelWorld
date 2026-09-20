@@ -1,6 +1,6 @@
 → No action. For your reading only.
 
-# HANDOFF.md — CP-014 taken, R-016 review run; next is the storage owner
+# HANDOFF.md — CP-014 taken, R-016 review run, storage device seam built
 
 ## Identity, authority and Git state
 
@@ -56,6 +56,48 @@ The reimplementation lives in the session scratchpad and is **not committed** �
 two pip packages and is evidence, not project code. Re-running it means recreating the venv
 and re-writing it from P-004, which is the point: if it needed to be kept, it would not be
 independent.
+
+## The storage device seam — built after the review
+
+P-003 §8 item 3's first half. `TerrainStorage.h/.cpp` adds `ITerrainStorageDevice` (six
+mutating operations, because every one is a place a crash can happen and a smaller surface is
+a smaller crash matrix), a real `FTerrainPlatformStorageDevice`, an in-memory one, a
+fault-injecting decorator that can **fail or tear** any chosen operation, the
+content-addressed `FTerrainFileObjectStore`, and `FTerrainSlotPair` — the publication
+primitive the whole store rests on.
+
+**Two findings came out of reading the engine rather than assuming it, and the second one
+would have shipped a bug.**
+
+1. **`OverwriteInPlace` must not truncate.** `OpenWrite(bAppend=false)` truncates, which would
+   make a slot briefly zero-length — and a slot that can be *absent* breaks the one property
+   the two-slot protocol rests on. The device opens in append mode and seeks to zero.
+2. **`Flush()`'s default argument is wrong for this project.** Windows ignores `bFullFlush`
+   and always calls `FlushFileBuffers`. **Unix does not**: `Flush(false)` is `fdatasync`,
+   `Flush(true)` is `fsync`, and `fdatasync` makes no promise about metadata — including a
+   file's length. Every object write and every journal append extends a file, and D-002 makes
+   a Linux dedicated server the shipping target. A defaulted `Flush()` would have been correct
+   on this machine and silently wrong on the shipping one, and no amount of Windows testing
+   would have found it. Both rules are now normative in P-004 §12 with the platform sources
+   cited.
+
+**A test-quality finding, recorded because it nearly passed for the wrong reason.** The first
+torn-slot fixture tore at byte 1000. A root slot body is 64 bytes of fields and 3,936 zeroes,
+so both the old and new images are identical past byte 160 and the "tear" reproduced a
+perfectly valid slot — the test passed nothing. It now tears at 104, leaving a slot whose
+**generation field says new while its content is old**, which is the exact state that would
+fool a reader that trusted the generation without validating the checksum.
+
+**Verified:** both targets build; **28 of 28** TerrainCore tests pass, exit 0
+(`Saved/Logs/Storage-2.log`). Four new cases: `Storage.Paths`, `Storage.ObjectStore`,
+`Storage.SlotPair`, `Storage.PlatformDevice`. The last runs against the real file system in
+`Saved/Automation/TerrainStorageTest` and cleans up after itself, because the two properties
+that matter most are properties of `IPlatformFile` and a fake device would agree with itself
+and prove nothing.
+
+**What is still missing above this seam:** the journal writer and segment rotation, anchor
+publication ordering, checkpoint publication, world create/open, recovery and retention. The
+device is ready for all of them and none of them exists.
 
 ## What this increment is
 
