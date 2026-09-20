@@ -758,10 +758,10 @@ able to deadlock against the plugin's own.
 this for player scoping; the affinity table extends it to machines and to admin tools. The
 service is the sole issuer and the sole owner.
 
-**Rule 5 — the density field outlives the backend.** `FTerrainBackendInit` *borrows* it (AR-2),
-so the service releases it strictly after `Shutdown` returns. Reversing that order is a
-use-after-free visible only when a mesher thread is still in flight, which is the hardest form of
-this bug to reproduce and therefore the one worth naming.
+**Rule 5 — the density field outlives every consumer.** The raw view is borrowed (AR-2);
+AR-7 additionally retains shared immutable ownership in asynchronous generator instances.
+The service releases its own reference strictly after backend shutdown. Outstanding plugin
+workers retain their independent owner until they finish, without a game-thread wait.
 
 #### The shutdown state machine
 
@@ -1310,7 +1310,9 @@ Reservations are released on exactly three events: commit, rejection, and Draini
   cannot starve another. Machines share the same queue at the same priority.
 - **No priority classes.** A priority class is a starvation bug that only appears under the load
   you cannot reproduce, and nothing in the design needs one: `MaxVoxelsPerOp` already bounds the
-  worst single op, so head-of-line blocking is bounded by the §7.1 budget of 8 ms.
+  worst single op, so the target for a single apply is the §7.1 budget of 8 ms. Contiguous
+  split transactions can delay another source by several slices, bounded by admission's
+  child-count limit (see the step-3 scheduling determination above).
 - **Queue age is measured, not assumed** (§7.1), and is the direct input to whether K4's
   game-thread ruling survives contact with 16–32 players.
 
