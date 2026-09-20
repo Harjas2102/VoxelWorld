@@ -16,6 +16,14 @@
 
 → No action. For your reading only.
 
+> **P-003 architectural adoption, 2026-09-20 (technical ruling, D-023/D-032).**
+> [P-003 revision 3](proposals/P-003-persistence-commit-and-recovery.md) §§1–7 is the
+> persistence architectural contract, after [independent cross-vendor review](reviews/P-003-review-claude-r3.md)
+> closed all R2 blockers. The amendment below supersedes conflicting historical sketches.
+> The exact-format/storage specification still requires independent review before code;
+> **DEF-1/2/9 remain open pending their named evidence**, including production fidelity.
+> No persistence implementation, performance pass or new dependency is claimed.
+
 > **Step-3 implementation determinations, 2026-09-17 (D-023; Director explicitly
 > delegated P-002 and completion of the active T-101B increment).** This current note
 > supersedes historical step-2 absence statements below; it does not close the full gate.
@@ -134,7 +142,7 @@
 > - **Reference volume:** `Occ = clamp((1-density)/2, 0, 1)`, accumulated by material
 >   before rounding to signed integer microlitres. Removal uses old material;
 >   placement uses requested material. This is not E-1 calibration or economic policy.
-> - **Step-1 transfer:** Dense uses §4.7's LE int16[N] then uint16[N], local index
+> - **Step-1 transfer:** Dense uses §4.2's LE int16[N] then uint16[N], local index
 >   `x + 32*y + 1024*z`, ValueConfig 0 for int16. Nonresident reads return Empty;
 >   SparseDiff/Empty restoration remains unsupported at this step. Rev/LastOpSeq are
 >   caller metadata, never assigned/bumped by the backend. No disk schema is added.
@@ -211,7 +219,7 @@
 >     separate bulk material read *and* the K9 table, both step 6 — and a plausible number
 >     derived from the current RGB config would be inventing the economy that §4.2 moved above
 >     the backend precisely to prevent. `ReadRegion`/`WriteRegion`/`HashRegion` move **density
->     only**, materials zero, in the §4.7 dense layout: a working convergence oracle, **not**
+>     only**, materials zero, in the §4.2 dense transfer layout: a working convergence oracle, **not**
 >     the snapshot format, which is step 4 under K3 and DEF-9. `FlushPendingWork` is a
 >     deliberate no-op, per §4.5's "rendering and collision updates remain the plugin's own
 >     async work and are explicitly not serialised by us".
@@ -509,7 +517,7 @@ struct FTerrainRegionData
     ETerrainRegionEncoding Encoding = ETerrainRegionEncoding::Empty;
     uint32                 GeneratorVersion = 0;
     uint8                  ValueConfig = 0;   // mirrors the plugin's value config flag
-    TArray<uint8>          Payload;           // see §4.7
+    TArray<uint8>          Payload;           // transfer layout below; disk framing §4.7
 };
 
 // ---- streaming interest (see §7.4 / DEF-10) -----------------------------
@@ -522,6 +530,12 @@ struct FTerrainStreamingInterest
     bool    bRender = false;  // false on a dedicated server
 };
 ```
+
+**Dense region transfer layout (unchanged by P-003 disk schema 2):** explicit LE
+`int16[32^3]` density samples followed by `uint16[32^3]` game material IDs, local index
+`x + 32*y + 1024*z`. This is the backend/replication payload layout, independent of
+versioned disk framing. SparseDiff/Empty are decoded to full samples before a backend
+that supports only Dense restoration is called.
 
 **`FTerrainEditResult::Removed` carries physical material only.** Tool efficiency, recovery
 factor and every other economic conversion happen in `UTerrainService`, above the backend.
@@ -656,10 +670,10 @@ input, camera trace
   |                                                                 | accumulate per-material
   |                                                                 |◄─ FTerrainEditResult
   |                                     ┌───────────────────────────┘
-  |                              assign OpSeq (monotonic)
-  |                              bump Rev for each affected chunk
-  |                              append journal record
-  |                              settle yield                 ← ordering is DEF-1
+  |                              choose provisional OpSeq
+  |                              capture before/after chunk revisions
+  |                              append + durably flush journal
+  |                              commit Rev/OpSeq; TerrainCommitted
   |                              for each subscriber of any affected chunk:
   |                                  ClientApplyOp(Op, PerChunkRev[])
   |◄────────────────────────────────────┘
@@ -670,9 +684,11 @@ non-contiguous Rev → request
 resync for that chunk
 ```
 
-**The relative ordering of journal append, yield settlement and client acknowledgement is not
-settled by this document.** It is DEF-1, bound to build step 4, and K5 must be ruled before that
-step starts. The diagram shows the steps, not their durability boundaries.
+**Ordering is now specified by §4.7 / P-003 §2.** After journal durability, commit
+metadata and broadcast terrain; later SQLite completion exposes inventory and Settled.
+The diagram is the terrain delivery path. Bounded settlement and capture workers follow
+the adopted contract; their byte-level storage packet and runtime evidence remain open.
+Current step-3 runtime has no journal/economy and does not claim these durability states.
 
 Notes:
 
@@ -803,8 +819,14 @@ partially applied at teardown.
 What *is* cancelled is the pending queue, at step 2 above. Cancellation is therefore a queue
 operation, not a plugin operation.
 
-**We never register a completion callback that can outlive the service.** The plugin's async
-tool overloads anchor completion to the issuing `UObject`; the authoritative path uses the
+**Plugin edit completion callbacks never outlive the service.** P-003 §2 adds a
+separate process-owned storage session: its workers hold immutable input, never service
+or backend pointers, and deliver completion only through weak identity/generation
+checks. Draining suppresses capture and never blocks on game-thread-dependent work;
+the exclusive store lease survives until outstanding I/O releases it. This is a storage
+lifetime extension, not asynchronous backend ApplyOp.
+
+For the plugin path, async tool overloads anchor completion to the issuing `UObject`; the authoritative path uses the
 synchronous overloads only, so there is no callback to cancel and no lifetime to police. The
 plugin's own meshing and collision work is anchored to the voxel world actor and dies with it —
 we do not cancel it, and we must not wait for it, because waiting on the game thread for a worker
@@ -894,86 +916,48 @@ a flat plane until T-108. That is now closed: the world is a pure function of po
 and needs no save file to come back. D-012's deterministic base names `GeneratorVersion` and the
 seed as its generation inputs; there are no authored stamps.
 
-### 4.7 Persistence schema
+### 4.7 Persistence contract — P-003 revision 3 adopted
 
-```text
-Saved/World/<WorldId>/
-  world.json                     # human-readable, versioned, small
-  chunks/<X>_<Y>_<Z>.chunk       # snapshot at revision R  (binary, versioned)
-  journal/<NNNNNN>.tjl           # append-only op log, size-segmented
-  entities.sqlite                # players, inventories, structures, machines, power grids
-                                 #   (D-012; grids per VISION pillar 3)
-Tests/Saves/                     # old-save fixtures, loaded by automation on every build
-```
+The normative architectural contract is [P-003 §§1–7](proposals/P-003-persistence-commit-and-recovery.md),
+adopted 2026-09-20 under D-023/D-032 after the [independent revision-3 review](reviews/P-003-review-claude-r3.md).
+Its exact-format/storage specification packet remains **unwritten and required before
+any codec/service implementation**. The former unimplemented schema-1 byte sketches
+and ~122-byte record estimate are withdrawn; new envelopes will be schema 2. The
+58-byte operation codec and the §4.2 Dense transfer layout are unchanged.
 
-**`world.json`** — the one file a human opens first:
+- **Commit:** journal append + durable flush precedes terrain broadcast and
+  TerrainCommitted; SQLite settlement follows, with idempotent `(WorldId, OpSeq)`
+  ledger and independent W cursor. N=32 pending settlements, batches up to 16.
+  Inventory is exposed only after durable settlement. NoEconomy prototype does not
+  invent yield, placement costs or an inventory system. Entities remain in one SQLite
+  database: players, inventories, structures, machines and power grids (D-012).
+- **Identity:** every durable object carries WorldId, StoreEpoch and recorded base
+  identity. Session protocol 2 uses connection-bound admission tokens; persist a
+  digest for diagnosis, never the live token. No automatic cross-session retry.
+- **Checkpoint:** immutable chunk payloads (SparseDiff/Dense/Empty), a path-copied
+  96-bit key index, global cut G and two fixed root slots. Copy-before-write fences
+  preserve G while other eligible transactions run; dirty data is residency-pinned.
+  Empty preserves revision/last-change metadata and requires exact material+density
+  equality against the recorded base, not a nonresident sentinel or plugin provenance.
+- **Recovery:** fresh backend, eager full closure verification, terrain replay `(G,H]`
+  and settlement `(W,H]` as separate passes. Require retained structural G <= W <= H.
+  Dual fixed journal anchors name the active segment; no silent head regression or
+  orphan promotion. All decoding and sequence restoration are validated before login.
+- **Retention/restore:** both root closures, older retained G, live W and explicit
+  pins constrain reclamation. Entity-only restore is prohibited; backup/restore is
+  coherent whole-world state. Offline repair/migration preserves source, validates
+  exact old base/kernel and publishes a new epoch. No op replay through a changed kernel.
+- **Compatibility:** record generator, backend/kernel, value/material configuration,
+  material catalog, origin/grid/bounds and authored stamps. Unknown formats/base
+  mismatch fail closed; `.bak` does not substitute for a decoder. World status JSON
+  is advisory; roots/journal own sequence authority. Tests/Saves carries versioned
+  fixtures, including malformed input and migration cases.
 
-```json
-{
-  "schema": 1,
-  "worldId": "…guid…",
-  "seed": 1234567,
-  "generatorVersion": 3,
-  "voxelSizeCm": 50,
-  "chunkSizeVoxels": 32,
-  "valueConfig": "int16",
-  "materialConfig": "SingleIndex",
-  "materialCatalogVersion": 1,
-  "backendId": "VPLegacy",
-  "backendVersion": "v432/e9648b302",
-  "latestOpSeq": 918273,
-  "journalBaseOpSeq": 900000,
-  "createdUtc": "…", "updatedUtc": "…"
-}
-```
-
-`backendVersion` and `materialCatalogVersion` are here because the plugin's compile-time config
-macros are source-level edits to a gitignored tree — the repo cannot tell us what a save was
-written under, so the save must tell us itself.
-
-**Chunk snapshot** (`.chunk`) — header then payload, all little-endian:
-
-| Field | Bytes | Notes |
-|---|---|---|
-| magic `TCHK` | 4 | |
-| schemaVersion | 4 | migration entry point |
-| chunkKey X, Y, Z | 12 | |
-| rev | 4 | |
-| lastOpSeq | 8 | ops with `OpSeq <= lastOpSeq` are baked in |
-| generatorVersion | 4 | K3 correctness gate |
-| valueConfig, materialConfig, encoding, reserved | 4 | |
-| payloadBytes, payloadCrc32 | 8 | torn-write detection |
-| payload | n | **Dense:** `int16[N]` values then `uint16[N]` materials. **SparseDiff:** `uint32 count`, then `count × {uint32 localIndex, int16 value, uint16 material}`, relative to generator output. **Empty:** zero bytes |
-
-**Snapshot metadata survives payload deletion.** A chunk that reverts to natural shape keeps a
-zero-payload `Empty` record carrying its rev and lastOpSeq, rather than being deleted outright.
-Deleting the record would discard monotonic revision history and let the chunk return as
-revision zero (DEF-9).
-
-**Journal record** (`.tjl`) — fixed prefix, variable lists, all little-endian:
-
-| Field | Bytes |
-|---|---|
-| magic `TJOP`, schemaVersion | 8 |
-| `FTerrainOp` encoded body (§4.2) | 58 |
-| serverUtcMillis | 8 |
-| yield entry count, then `{matId u16, microLitres i64}` × count | 2 + 10n |
-| affected chunk count, then `{key 12 B, newRev 4 B}` × count | 2 + 16n |
-| crc32 | 4 |
-
-Typical record, one material, two chunks: **~122 bytes per edit.** A million-edit server-year is
-~122 MB before compaction.
-
-**Compaction.** Per chunk, when `opsSinceSnapshot > 256`, or `journalBytesForChunk > 64 KB`, or
-the chunk has been idle 5 minutes, or at shutdown: re-read the region, write a new `.chunk` at
-the current rev, update `lastOpSeq`. **Journal segment retention is dependency-aware**: a segment
-is deletable only when every consumer has advanced past it — terrain snapshots *and* the entity
-store's settlement watermark. The naive "min lastOpSeq across chunk files" rule is insufficient
-in both directions and is part of DEF-9.
-
-**Migration.** Every format carries `schemaVersion` in its own header. A load of version <
-current runs a registered migration chain with a `.bak` written first. `Tests/Saves/` fixtures
-load on every build, which turns "we have a migration path" from a claim into a check.
+The format packet fixes all byte tables, lengths, checksums, caps, storage/module
+ownership, journal rotation and OS publication primitives. If durable new filenames
+cannot be established, P-003 defines the preallocated-container fallback. Eager boot
+cost, game-thread journal flush, capture throughput/delay, pinned memory and production
+material transfer are explicit gates, not assumed successes. §14 defects remain open.
 
 ### 4.8 Relevancy and join-in-progress
 
@@ -1185,6 +1169,11 @@ weaker claim than the one §10 could be read as making.
 
 #### 4.10.6 Version compatibility rules
 
+**P-003 precedence:** ordinary boot requires the exact recorded base/kernel. The
+regeneration/payload cases below describe offline migration outcomes after coherent
+source recovery; they do not authorize mixing a changed generator into a live store.
+Materialize every history-bearing chunk, including Empty, against the old base first.
+
 Three versions travel with saved data (§4.7): `generatorVersion`, `backendVersion`, and the
 journal/snapshot format version. They answer different questions and are not interchangeable.
 
@@ -1263,20 +1252,24 @@ the edge of every protected zone in the game, and it is invisible until someone 
 
 #### 4.11.3 Request identity and retry dedup
 
-- `FTerrainEditRequest` carries a `RequestId`, unique and monotonic **within a connection**. The
-  identity of a request is the pair `(SourceId, RequestId)`; a client cannot forge another
-  client's identity because it does not supply `SourceId`.
-- The server keeps, per connection, a bounded ring of recently **resolved** request identities and
-  their receipts — 64 entries, which at the §7.1 rate limits is several seconds of history.
-- **A repeat of a resolved identity returns the stored receipt and mutates nothing.** It is not a
-  new op, does not consume an `OpSeq`, and does not settle yield a second time.
-- A repeat of an identity that is still *queued* is dropped, and the original resolves normally.
-- An identity older than the ring is rejected `StaleRequest` rather than executed. Executing it
-  would be the mining-twice bug the ring exists to prevent, and rejecting a very old retry is
-  always safe: the client can ask again with a new id.
+P-003 §1 supplies the adopted persistence-safe retry boundary. The implemented step-3
+protocol remains connection-local until the reviewed protocol-2 packet is implemented.
 
-Reliable RPCs are re-sent across reconnects and seamless travel. Without this, a re-sent dig
-mines the same rock twice and credits the ore twice.
+- Server issues a fresh connection-bound AdmissionToken at every stream registration,
+  restart/reconnect and replacement after travel. Protocol 2 handshake, requests and
+  receipts carry it; a stale/missing token is refused before admission. SourceId remains
+  server-derived and cannot identify a durable inventory owner.
+- `(AdmissionToken, RequestId)` is the transient request identity; RequestId is positive
+  and monotonic within that token. Keep the bounded 64-receipt ring and high-water mark.
+  Identical resolved retries return the receipt, queued retries do not enqueue twice,
+  and changed intent under the same identity rejects.
+- An evicted identity is StaleRequest, never executed again. StaleSession/StaleRequest
+  do not establish whether the old action committed. Clear automatic retransmission
+  and held-input continuation on token changes; never re-key an unresolved old action.
+  A fresh player input is a new intent. Split recovery never replays the parent to
+  finish uncommitted children. Machine job/status semantics remain a future integration.
+- Reliable RPC delivery does not itself define durable application retry across a new
+  connection. The previous blanket reconnect-resend claim is withdrawn.
 
 #### 4.11.4 Reservation and revalidation — the two-phase rule
 
@@ -1301,6 +1294,11 @@ rollback and does not need one.
 Reservations are released on exactly three events: commit, rejection, and Draining (§4.5.1 step
 3). A disconnect is not a fourth event; it is detected at revalidation.
 
+**P-003 settlement extension:** the rule above describes the step-3 queue reservations.
+Economic reservations for a journal-committed operation remain held until durable
+settlement, including across requester disconnect. Draining releases unexecuted work's
+reservations; it must not expose committed-but-unsettled resources for spending.
+
 #### 4.11.5 Queue limits and fairness
 
 - **Bounded, twice.** A global depth cap and a per-source depth cap. Exceeding either rejects the
@@ -1318,7 +1316,9 @@ Reservations are released on exactly three events: commit, rejection, and Draini
 
 #### 4.11.6 The no-change-or-committed-result invariant
 
-**For every request, exactly one of two outcomes occurs. There is no third.**
+**For every fully resolved request, the outcome is no-change rejection or committed
+result. P-003 additionally defines uncertain storage-fault handling, never disguised
+as a no-change rejection; recovery determines its durable result.**
 
 | Rejected | Committed |
 |---|---|
@@ -1326,9 +1326,9 @@ Reservations are released on exactly three events: commit, rejection, and Draini
 | No `OpSeq` assigned | `OpSeq` assigned, monotonic |
 | No journal record | Journal record appended |
 | No client broadcast | Broadcast to every subscriber of every affected chunk |
-| No yield settled | Yield settled |
+| No yield settled | Yield settles after journal durability; Settled follows entity durability |
 | No chunk revision moved | Every affected chunk's revision bumped **exactly once** |
-| A receipt with a reason | A receipt with the result |
+| A receipt with a reason | TerrainCommitted and later Settled as defined by P-003 |
 
 Two consequences follow, and both are changes to what the document previously allowed:
 
@@ -1377,7 +1377,8 @@ Split rules:
 2. **One `TransactionId`, many `OpSeq`.** Sub-ops share the transaction id and each receives its
    own `OpSeq`, increasing, contiguous within the transaction.
 3. **The transaction is NOT atomic.** Each sub-op commits independently and satisfies 4.11.6
-   independently. A snapshot taken between two sub-ops is legal, a client may observe a partly
+   independently. The per-op contract permits snapshots between sub-ops, but P-003 starts its
+   copy-before-write cuts only between transactions. A client may observe a partly
    excavated region, and a crash between sub-ops leaves the completed ones committed. This is
    stated rather than assumed because the alternative — a cross-op transaction — would need a
    durability protocol that DEF-1 has not yet defined and step 4 has not yet built.
@@ -1393,14 +1394,16 @@ boundary and when it does not.
 
 #### 4.11.8 New rejection reasons
 
-`ETerrainEditRejection` gains four values. Each exists because a client that cannot tell it from
+`ETerrainEditRejection` gained four values at T-114; P-003 specifies a fifth for
+protocol 2. Each exists because a client that cannot tell it from
 its neighbour will do the wrong thing:
 
 | Reason | Meaning | What a client should do |
 |---|---|---|
 | `ShuttingDown` | The world is going away (§4.5.1) | Stop. Do not retry |
 | `QueueFull` | Global or per-source depth cap hit | Back off, retry later |
-| `StaleRequest` | Identity older than the dedup ring | Retry with a **new** `RequestId` |
+| `StaleRequest` | Identity older than the dedup ring; prior outcome may be unknown | Do not automatically re-key the unresolved action |
+| `StaleSession` (protocol 2 packet) | Token does not match this registration | Clear old retransmission; do not reinterpret as rejection of the original action |
 | `Revalidation` | Passed admission, failed at commit | Re-check local state, then retry with a new id |
 
 ---
@@ -1455,6 +1458,13 @@ Run against `FMemoryTerrainBackend`. Seconds, on every build.
 | `Migration.Fixtures` | Every fixture in `Tests/Saves/` loads and produces its expected region hash |
 | `Query.Point` | `QueryPoint` returns the material and density sign the region was written with, at chunk interiors and at all eight chunk corners; reports `bResident` false outside loaded regions; never returns a stale sample after `ApplyOp` or `WriteRegion` |
 | `Backend.Conformance` | A shared suite run against **both** `FMemoryTerrainBackend` and `FVPLegacyBackend`, covering all eleven methods, `QueryPoint` included, plus: off-game-thread calls are refused (§4.5.1); the state machine rejects with the right reason per state; a failed `ApplyOp` leaves the region hash unchanged (§4.11.6). It asserts the **contract**, never equality of densities between two backends (§4.10.4c). Any future backend must pass it. **This is the operational meaning of "replaceable"** |
+
+P-003 additionally requires `Persistence.CommitCrash`, `Persistence.SettlementReplay`,
+`Persistence.RetryFence`, `Persistence.CaptureFence`, `Persistence.RootPublication`,
+`Persistence.JournalAnchor`, `Persistence.RetentionPins`, `Persistence.CoherentRestore`
+and `Persistence.Migration`. These names define pending evidence, **not implemented
+or passing tests**. Keep production Restart.Identity/Restart.CrashMatrix and material
+fidelity gates separate from memory fixtures.
 
 **Test identifiers are prefixed `TerrainCore.` in code.** `Automation RunTests` does a
 substring match (`AutomationCommandline.cpp`), so the bare names in this table match
@@ -1687,6 +1697,8 @@ production tasks only by a later ruling.
 Adopted from `Docs/reviews/P-001-review-astra_proposal_reviewed_by_claude.md` per D-017. Each defect is bound to the earliest
 build step that depends on it. **A build step may not start while an unresolved defect is bound to
 it.** Closing a defect requires a written resolution in this document plus its named evidence.
+P-003 (§4.7) now supplies the reviewed **architectural** resolution of DEF-1/2/9;
+all three remain open for the exact-format/storage packet and their named evidence.
 
 | # | Defect | Bound | Status |
 |---|---|---|---|

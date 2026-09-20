@@ -1,83 +1,82 @@
 → No action. For your reading only.
 
-# HANDOFF.md - T-101B step 4 persistence proposal and review
+# HANDOFF.md — T-101B step 4, P-003 revision 3
 
 ## Identity, authority and Git state
 
-- Updated **2026-09-20**. Outgoing **Codex**, implementation author and P-003 proposal
-  author; independent P-003 reviewer **Claude Opus**. Incoming **either**.
-  One active Implementer per workspace (D-028).
-- Director's latest request: **"commit, push, write the handoff"**. This wrap-up is
-  **R0 documentation/Git work**, limited to this handoff. No checkpoint was requested;
-  STATE, BACKLOG, DECISIONS and RISKS remain checkpoint records at **CP-013**.
-- Verified base: **`4c8c4269d30a026856735e90dfd7908f3be310f9`**, branch `main`.
-  Incoming worktree was clean; `git pull --ff-only` reported already up to date.
-  This handoff belongs to its enclosing documentation commit. Verify that commit and
-  worktree on receipt; no other uncommitted work was present during preparation.
-- Active continuation: **T-101B build step 4 prerequisite design, P-003**, **R3**.
-  The proposal is **not adopted**; DEF-1/2/9 remain open. No persistence implementation
-  or new dependency has been introduced. Step 3 implementation/data-convergence work
-  is committed; the full T-101B adoption gate is still open.
-- No implementation, test or reviewer process remains running. Authentication is resolved;
-  there is no pending Director action for sign-in. No technical ruling is requested by
-  this handoff. Follow the existing D-023/D-032 authority and review boundaries.
+- Updated **2026-09-20**. Outgoing **Codex**, proposal author; independent reviewer
+  **Claude Opus**. Incoming **either**. One active Implementer per workspace (D-028).
+- Director: **Start the next step/"T-XXX" phase.** The next safe increment is
+  **T-101B build step 4 prerequisite design, P-003**, R3. D-023/D-032 govern technical
+  rulings; independent cross-vendor review is required. No runtime persistence code.
+- Latest Director instruction: **"commit and push so that the other agent can continue."**
+  This is an authorized documentation/Git wrap-up, not a new checkpoint.
+- Received at **`b72a663`**, branch `main`, clean tree; `git pull --ff-only` was already
+  up to date. That commit encloses the earlier handoff based on `4c8c426`. Runtime
+  base remains `21e3a2c`. This handoff belongs to its enclosing documentation commit;
+  verify that commit, remote synchronization and worktree state on receipt.
+  STATE/BACKLOG/DECISIONS/RISKS remain CP-013 checkpoint records.
+- Changed: P-003, ARCHITECTURE, this handoff and new independent reviews for
+  revisions 2 and 3. No assets, runtime source, config or dependency changes.
 
-## Saved work and current blocker
+## Current result and review boundary
 
-| Commit | Saved result |
-|---|---|
-| `52ccee9` | P-002 representable box partitions and step-3 contracts |
-| `21e3a2c` | Step-3 authoritative edit replication and validation evidence |
-| `9a8dd7b` | Reconciled older lifetime/fairness text with adopted step-3 contracts |
-| `b1b93e4` | P-003 persistence commit/recovery proposal draft |
-| `4c8c426` | Independent P-003 review and authentication resolution |
+- Read [P-003](proposals/P-003-persistence-commit-and-recovery.md) and the
+  [revision-2 independent review](reviews/P-003-review-claude-r2.md). The original
+  [revision-1 review](reviews/P-003-review-claude.md) is preserved unchanged.
+- Revision 2 addressed all original B1-B6 according to the reviewer, who also corrected
+  the earlier automatic-reconnect-RPC premise. Actual code has connection-local IDs,
+  no application resend/outbox, and no incarnation token. Proposed protocol 2 fences
+  stale sessions without inventing a durable reconnect retry service.
+- Review R2-B1–R2-B6 then identified boot-validation ambiguity, global capture stalls,
+  missing dirty residency pins, N=1 settlement throughput, entity-store rollback checks,
+  and missing durable journal discovery. **Revision 3 closed all six in the
+  independent reviewer's verdict: adoptable at architecture level, no blockers.**
+- Current mechanism: explicit eager boot verification; immutable path-copied chunk index;
+  copy-before-write capture at global G with transaction preflight and residency pins;
+  two dirty banks bounded at 4,096 keys each (up to 1 GiB raw samples plus backend costs);
+  N=32 unsettled records, SQLite batches up to 16; W at least the highest structurally
+  valid retained checkpoint G; dual fixed journal anchors; preallocated-container
+  fallback if durable new-name publication cannot be established.
+- Added the author-found capture sentinel guard: memory ReadRegion returns successful
+  default Empty when nonresident, while VPLegacy returns false. Neither is evidence of
+  pristine equality. Capture requires residency, successful full samples and exact base
+  comparison before emitting Empty. No raw live admission token is persisted.
+- Read the [revision-3 review](reviews/P-003-review-claude-r3.md). Technical ruling
+  under D-023/D-032 recorded in ARCHITECTURE and P-003: **adopt §§1–7 at architecture
+  level**, incorporating requested throughput, fairness, read/write-footprint, offline
+  repair and measurement clarifications. Replaced obsolete §4.7 schema-1 sketch;
+  preserved/re-homed Dense transfer layout and amended ordering/retry/lifetime rules.
+  No Director programming ruling is pending. No numbered decision/checkpoint changed.
+- Exact bytes/storage module boundaries, OS durability proof, performance, material
+  fidelity and integration remain future work. **DEF-1/2/9 and full T-101B remain open.**
+  No runtime crash, save, inventory or production performance claim follows from docs.
 
-All five commits were pushed to `origin/main`. The runtime base remains `21e3a2c`.
-The evidence and file map below describe that runtime increment, not new work in this wrap-up.
+## Evidence and processes for this increment
 
-Read [P-003](proposals/P-003-persistence-commit-and-recovery.md) and its
-[independent review](reviews/P-003-review-claude.md) before continuing.
-
-- Proposal: durable journal commit authority, idempotent SQLite settlement, complete global
-  checkpoint manifests with reusable chunk payloads, two roots, retained recovery tails,
-  exact base identity and coherent offline migration. The existing 58-byte operation stays
-  unchanged; the persistence envelope's exact byte layout and storage packet are still needed.
-- Author audit forbids snapshotting provisional mutations during storage-fault teardown;
-  otherwise shutdown could publish RAM ahead of the durable journal. The completed review
-  considered this safeguard and agreed with it.
-- **Independent verdict: not ready for adoption, B1-B6.** Reconcile the actual counterexamples
-  before revising the proposal; reviewer findings are not automatically adopted requirements:
-  1. Durable request/retry identity across reconnect or restart, beyond connection-local IDs.
-  2. Separate terrain recovery and settlement cursors, avoiding replay over baked terrain.
-  3. Coherent entity-store restore and retention rules for older database backups.
-  4. Bounded manifest size and checkpoint capture cost as edited history grows.
-  5. Explicit replacement/amendment of ARCHITECTURE section 4.7's schema and world identity.
-  6. Broadcast ordering and the cost of two durability barriers against the 8 ms target.
-- Additional review ambiguities: game-thread capture versus I/O/flush work; generation of
-  pristine chunks from the recorded base during replay; failed settlement capacity or deleted
-  inventory handling (DEF-6). Review polish includes fixed-size root files, validating both
-  roots before deletion, and manifest count/byte limits. Read the review for exact severity.
-- This is an independent **P-003 proposal review**. It does not supply an independent review
-  of P-002 or the step-3 code. No such code review or Director interactive acceptance is claimed.
-
-## Review execution and platform evidence
-
-- The initial installed Claude CLI attempt failed with HTTP 401 because an inherited
-  `ANTHROPIC_API_KEY` overrode the valid Claude subscription login. A wrapper console-encoding
-  failure followed; neither changed source. Initial evidence: `Saved/P003-review-output.txt`.
-- Removing `ANTHROPIC_API_KEY` **only from the reviewer child-process environment** produced
-  `AUTH_OK`, exit 0, using the existing subscription. No machine/user setting or credential
-  changed. Do not ask the Director to sign in again for this resolved failure.
-- Independent review then completed, exit 0, using installed
-  `C:/Users/harja/.local/bin/claude.exe`, `-p --model opus --tools Read,Glob,Grep
-  --allowedTools Read,Glob,Grep --strict-mcp-config --no-session-persistence --output-format text`.
-  The prompt required read-only independent review; the reviewer ran no tests and wrote no
-  files. Its response was saved verbatim to the tracked review file. Raw local output:
-  `Saved/P003-review-output-authenticated.txt`. Review base: `b1b93e4`.
-- Installed UE 5.8 `WindowsPlatformFile.cpp:933` implements `FFileHandleWindows::Flush`
-  with `FlushFileBuffers`; `OpenWrite` at line 1638 returns that handle. This verifies the
-  file-content primitive only. Namespace publication, crash recovery and power-loss behavior
-  still need verification; no fault-injection test has run.
+- Geometry bound audit enumerated **71,820** sorted even-width box triples within the
+  existing 65,536-sample cap: worst-aligned 32-voxel chunk coverage **2,052**; the sphere
+  read ceiling bounds coverage by **27**. Both fit the proposed single-bank capacity.
+  This is arithmetic/resource evidence, not measured ReadRegion or checkpoint latency.
+- `git diff --check` passes. Proposal local review links resolve. The r2 tracked review
+  matches the CLI's complete saved response verbatim. Engine content-flush path was
+  rechecked at `WindowsPlatformFile.cpp:933`; namespace/power-loss proof remains absent.
+- R2 Claude CLI exited **0**, reviewed proposal SHA256
+  `d2ad00de9396bfb82522688645e8bac6e6d4a216d7056c3e35cd6e65d0470d11`.
+  Wrapper console printing then failed on cp1252 **after** the review file was saved;
+  this did not invalidate the review. R3 wrapper prints ASCII status only.
+- Focused R3 review **completed, exit 0**, via `Saved/review_p003_r3.py`. Reviewed SHA256:
+  `acdeca2fd4f176f1ace53b244072d2809f495ef136bced38e4ed26cb75e31981`.
+  Output/stderr: `Saved/P003-review-r3-{output,stderr}.txt`; tracked complete response:
+  `Docs/reviews/P-003-review-claude-r3.md`. After review only adoption/status text and
+  its requested nonblocking clarifications were added. Both reviews are preserved
+  verbatim. **No reviewer or wrapper process remains running.**
+- Reviewer: installed `C:/Users/harja/.local/bin/claude.exe`, Opus, Read/Glob/Grep only,
+  strict empty MCP, no session persistence. Existing subscription works when inherited
+  ANTHROPIC_API_KEY is omitted **only from the child environment**. No machine/user
+  authentication setting changed and no sign-in request is pending.
+- No UE/build/test process launched in this documentation increment. Historical runtime
+  evidence below is from the committed step-3 increment, not newly rerun tests.
 
 ## Completed runtime increment - step 3
 
@@ -214,19 +213,18 @@ it launches. Reruns overwrite the named standalone/automation logs; MP logs are 
 
 ## Next safe actions
 
-1. Read AGENTS and STATE/VISION/ARCHITECTURE/RISKS plus this handoff under OPERATIONS
-   section 5.1. Verify the enclosing commit, branch, status and recent history. Sync only
-   a clean tree with `git pull --ff-only`; preserve any later work.
-2. Continue the **P-003 revision**, not save implementation. Read the actual review and
-   validate each counterexample against the contracts/code, especially reconnect/retry
-   semantics. Preserve already adopted P-002 and step-3 behavior.
-3. Revise P-003 to resolve B1-B6 and the additional ambiguities, then obtain independent
-   re-review under the existing R3 process. Update this rolling handoff after meaningful
-   findings. Do not treat the first review as approval or silently adopt new requirements.
-4. Only after the applicable R3 ruling and architecture update, plus a bounded exact-format
-   and storage packet, begin step 4 implementation. Follow D-023/D-032 for delegated
-   technical choices; escalate decisions outside that authority. DEF-1/2/9 remain open
-   until actually resolved. Later JIP/material/collision increments remain separate.
-5. On explicit `checkpoint`, reconcile checkpoint documents with the saved step-3 result,
-   proposal/review status and outstanding limits. This commit/push/handoff request does
-   not authorize claiming a new checkpoint or completing the full T-101B gate.
+1. Read the adopted P-003 and independent revision-3 review plus ARCHITECTURE §4.7.
+   Verify this handoff's enclosing commit, branch, recent history and worktree state.
+   On a clean tree use `git pull --ff-only`; preserve any later work. The five-file
+   documentation increment follows `b72a663`; no runtime change or checkpoint occurred.
+2. Next bounded increment: **exact format/storage specification packet**, independently
+   reviewed before codecs. Fix byte tables, counts/caps, checksums, protocol-2 receipt
+   fields, storage/module ownership, journal discovery/rotation, namespace mode and
+   offline repair. Reuse the adopted design; do not restart the architectural debate.
+3. Keep DEF-1/2/9 open until their named evidence exists. Benchmark bulk ReadRegion,
+   capture throughput/fence delay, settlement drain/commit rate, pinned RSS, eager boot
+   cost and durable storage primitives before claiming production readiness. Materials,
+   real economy/DEF-6, client JIP and collision remain separately gated.
+4. On explicit checkpoint, reconcile checkpoint records with step 3 and persistence
+   design status. This commit/push request does not authorize a new checkpoint or
+   claiming that persistence implementation and DEF-1/2/9 validation are complete.
