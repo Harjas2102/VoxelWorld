@@ -47,6 +47,20 @@ public:
 	void Cancel(const FTerrainQueueCallbacks& Cb);
 	int32 Depth() const { return PendingCount; }
 	FTerrainOpSeq NextSequence() const { return NextOpSeq; }
+
+	/**
+	 * Seeds the committed sequence from a recovered world (P-004 §7's "validated H+1 path").
+	 *
+	 * **The queue owns sequence assignment**, which is why this exists and why seeding any
+	 * other counter does nothing. A restored world continues its history at H+1; a queue left
+	 * at 1 would hand out sequences the journal has already used, and the journal would -- and
+	 * did, the first time this was wired -- refuse them as an OrderViolation.
+	 *
+	 * Refuses unless the queue is untouched: seeding one that has already committed, or that
+	 * has work in flight, would renumber operations mid-session. Refuses to move backwards for
+	 * the same reason. Call it before anything is admitted.
+	 */
+	bool SeedSequence(FTerrainOpSeq NextSequenceToAssign);
 	double MaxQueueAgeSeconds() const { return MaxObservedAge; }
 	double MaxApplySeconds() const { return MaxObservedApply; }
 	int32 GlobalLimit = 256, SourceLimit = 16;

@@ -1,6 +1,6 @@
 → No action. For your reading only.
 
-# HANDOFF.md — replay works; next is attaching a journal to a running world
+# HANDOFF.md — the world remembers; next is checkpoint capture
 
 ## Identity, authority and Git state
 
@@ -58,6 +58,81 @@ The reimplementation lives in the session scratchpad and is **not committed** �
 two pip packages and is evidence, not project code. Re-running it means recreating the venv
 and re-writing it from P-004, which is the point: if it needed to be kept, it would not be
 independent.
+
+## The world remembers — persistence is wired into the running game
+
+**Pillar 1 is true for the first time.** `UTerrainService` now opens or creates a world under
+`Saved/Worlds/<WorldStoreName>/` at `BeginPlay` on the authority, replays its journal onto the
+freshly initialised backend **before the queue can admit anything**, seeds the queue's
+sequence to H+1, and only then attaches the journal — so the first thing recorded is the first
+new edit.
+
+### The evidence, from the real game and not from a fixture
+
+Three consecutive sessions against the production `TerrainBackendVPLegacy`:
+
+| Run | On boot | `rev` at (0,0,0) | The same dig |
+|---|---|---|---|
+| 1 | new world created | 0 | **257 voxels** |
+| 2 | `restored: 2 edits replayed to OpSeq 2 in 0.004 s` | **2** | **33 voxels** |
+| 3 | `restored: 4 edits replayed to OpSeq 4 in 0.005 s` | **4** | **33 voxels** |
+
+The voxel count is the proof. The same operation at the same place does less work after a
+restart **because the earlier excavation is still there** — that is terrain coming back, not a
+record count being read.
+
+Then the multiplayer harness, unchanged: **`MP.Convergence: PASS clients=3 chunks=4
+committed=248`**, with all 248 commits durably journalled through the real file system, one
+`fsync` per append, on the same 30-second round that used to run without persistence at all.
+
+**Measured, not computed** — `Terrain.PersistDump` on the real file reports
+`segment=1 firstOpSeq=1 commits=248 lastOpSeq=248 sealed=no tornTail=no goodBytes=47228/47228`:
+
+- **190 bytes per edit** over 248 live multiplayer commits (47,228 journal bytes less the
+  168-byte header). That replaces the withdrawn ~122 B/edit estimate with a real figure; the
+  350 B in P-004 §10.1 remains correct for its worked eight-chunk example.
+- A world with 254 edits is **7 files, 64,046 bytes**.
+
+### The bug this found, which is the one P-004 predicted
+
+The first restart worked and then the first new dig was refused with `ShuttingDown`. Cause:
+**the queue owns sequence assignment**, and I had seeded only the service's mirror counter. The
+queue restarted at 1, handed out a sequence the journal had already used, and the journal
+correctly refused it as an `OrderViolation` — which storage-faulted the service exactly as
+designed.
+
+P-004 §7 says, in as many words: *"The packet must assign one recovered sequence owner (the
+queue currently owns committed assignment); remove the unused service counter and provide a
+validated H+1 seeding path before admitting work."* I wrote that sentence and then seeded the
+wrong counter. The fix is `FTerrainEditQueue::SeedSequence`, which refuses unless the queue is
+untouched, and the failure was caught by running the actual game rather than by any test.
+
+### The failure policy, chosen deliberately
+
+If anything goes wrong — the store will not open, the recorded base does not match this
+world's shape, replay fails, or the sequence cannot be seeded — **the world still runs, the
+journal is not attached, and the log says `THIS SESSION WILL NOT BE SAVED` at Error.** A server
+that runs without saving is a bad day; a server that will not start is worse; a server that
+quietly writes into the wrong world's history is the worst, and a base mismatch is the one
+case refused outright.
+
+### Limits
+
+- **No checkpoint capture.** G is always 0, so every startup replays every edit ever made.
+  254 edits replay in 5 ms; nothing here says what 250,000 will do, and a warning fires above
+  five seconds so the growth is noticed rather than discovered.
+- **No retention.** The journal only grows.
+- **No exclusive-writer lease** (P-003 §5). Two servers on one `WorldStoreName` is unsupported
+  and undetected.
+- **Server travel with persistence is untested.** The regression round used `-Rounds 1`, which
+  performs no travel; the three-round form does two non-seamless travels and has not been run
+  since this landed.
+- **`Restart.Identity` is still not satisfied** on the production backend: chunk-hash equality
+  across a restart is proven headlessly by `Persistence.Replay.Equivalence` and only implied
+  here by the voxel count.
+
+**Verified:** both targets build; **32 of 32** tests pass, exit 0; three real sessions; the
+multiplayer harness PASS; `Terrain.PersistDump` read the live journal.
 
 ## Replay — a world can now be rebuilt from its journal
 

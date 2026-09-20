@@ -32,6 +32,19 @@ void FTerrainEditQueue::Resolve(uint32 Id, FSource& S, FTerrainEditReceipt R, co
 	S.Recent.Add(R);
 	if (Cb.Receipt) Cb.Receipt(Id,R);
 }
+bool FTerrainEditQueue::SeedSequence(FTerrainOpSeq NextSequenceToAssign)
+{
+	check(IsInGameThread());
+	// Untouched means: nothing committed, nothing queued. Anything else and seeding would
+	// renumber operations that already exist or are already in flight.
+	if (NextOpSeq != 1 || PendingCount != 0 || NextSequenceToAssign < 1)
+	{
+		return false;
+	}
+	NextOpSeq = NextSequenceToAssign;
+	return true;
+}
+
 bool FTerrainEditQueue::Submit(uint32 Id, int64 RequestId, const FTerrainOp& Intent, double Now,
 	const FTerrainQueueCallbacks& Cb, FTerrainEditReceipt& R, int32 MaxWrites, ETerrainEditRejection AdmissionFailure)
 {

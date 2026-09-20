@@ -71,6 +71,15 @@ namespace TerrainStoragePaths
 	TERRAINCORE_API FString AnchorSlot(int32 SlotIndex);
 	/** journal/seg-%016llx.tjs */
 	TERRAINCORE_API FString JournalSegment(uint64 SegmentId);
+
+	/**
+	 * The inverse of JournalSegment, over a bare file name.
+	 *
+	 * Lives beside the function that PRODUCES the name, because a reader and a writer that
+	 * each keep their own idea of the name shape are two things that must agree and have no
+	 * mechanism to. Refuses anything that is not exactly `seg-` + 16 lowercase hex + `.tjs`.
+	 */
+	TERRAINCORE_API bool ParseJournalSegment(const FString& FileName, uint64& OutSegmentId);
 	/** objects/<first digest byte, lowercase hex>/<64 hex>.tobj -- a 256-way fan-out. */
 	TERRAINCORE_API FString Object(const FTerrainDigest& Digest);
 	/** The directory an object lives in, so a caller can create it before writing. */

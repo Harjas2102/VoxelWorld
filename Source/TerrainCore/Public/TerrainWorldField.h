@@ -5,6 +5,7 @@
 #include "CoreMinimal.h"
 #include "ITerrainDensityField.h"
 #include "TerrainMaterials.h"
+#include "TerrainPersistenceFormat.h"
 
 /**
  * The shape numbers for FTerrainWorldField, in VOXELS and voxel space.
@@ -108,6 +109,22 @@ struct FTerrainWorldFieldParams
 	 */
 	double MaxSlopeFactor = 24.0;
 };
+
+/**
+ * The canonical digest of a parameter set (P-004 section 4.1).
+ *
+ * Every persisted object binds to the base descriptor, and the base descriptor binds to this.
+ * `UTerrainSettings::GeneratorVersion` is an integer a human remembers to bump; this is what
+ * catches the time they forget. Changing any value in FTerrainWorldFieldParams changes this
+ * digest, and a saved world whose digest no longer matches refuses to be replayed rather than
+ * being silently reinterpreted by a different world's shape.
+ *
+ * Encoding: little-endian, field by field, in declaration order, with each `double` hashed as
+ * its IEEE-754 binary64 bit pattern. P-004 section 4.1 permits that here and nowhere else --
+ * the value is compared for equality and never used for arithmetic, which is exactly what
+ * makes a bit pattern safe to hash and unsafe to store as a coordinate.
+ */
+TERRAINCORE_API FTerrainDigest TerrainWorldFieldParamsDigest(const FTerrainWorldFieldParams& Params);
 
 /**
  * FTerrainWorldField — the game's world shape (T-108, ARCHITECTURE.md §4.6, build step 8).

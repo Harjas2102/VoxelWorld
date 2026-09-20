@@ -163,6 +163,12 @@ void UTerrainService::CreateBackend(UWorld& InWorld)
 	}
 
 	State = ETerrainServiceState::Ready;
+
+	// Before the queue can admit anything and before the tick starts: replay needs a backend
+	// that nothing has edited yet, and a client that connected mid-replay would be told about
+	// a world that was still being rebuilt.
+	OpenWorldStore(InWorld);
+
 	FTerrainSourceState Admin;
 	EditQueue.RegisterSource(1,Admin);
 	InWorld.GetTimerManager().SetTimer(ServiceTickHandle,this,&UTerrainService::TickService,0.01f,true);
@@ -200,6 +206,13 @@ void UTerrainService::DestroyBackend()
 	State = ETerrainServiceState::Draining;
 	TGuardValue<bool> DestroyGuard(bDestroyingBackend, true);
 	EditQueue.Cancel(QueueCallbacks());
+
+	// Detach before anything else is released: the commit path must not be able to reach a
+	// store that is going away. Ordinary teardown needs no final checkpoint -- the committed
+	// journal is already durable, which is the whole point of writing it before broadcasting
+	// (P-003 §2).
+	CloseWorldStore();
+
 	if (GetWorld()) GetWorld()->GetTimerManager().ClearTimer(ServiceTickHandle);
 	Streams.Reset();
 

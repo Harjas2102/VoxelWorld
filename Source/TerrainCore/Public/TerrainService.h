@@ -9,10 +9,10 @@
 #include "TerrainRevisionIndex.h"
 #include "TerrainEdit.h"
 #include "TerrainEditQueue.h"
+#include "TerrainCommitJournal.h"
 #include "TerrainStreamComponent.h"
 #include "TerrainService.generated.h"
 
-class ITerrainCommitJournal;
 class UTerrainSettings;
 
 /** World-lifetime states from ARCHITECTURE §4.5.1; transitions are game-thread only. */
@@ -121,6 +121,9 @@ private:
 
 	/** True once a commit could not be made durable. Admission is closed; restart to clear. */
 	bool IsStorageFaulted() const { return bStorageFaulted; }
+
+	/** The world store this session is recording into, or null when nothing is being saved. */
+	const FTerrainWorldStore* GetWorldStore() const { return WorldStore.Get(); }
 	ETerrainEditRejection QuantiseRequest(const FTerrainEditRequest& Request, FTerrainOp& Op) const;
 	/**
 	 * P-003 §2 steps 2 and 3: durably record the operation, THEN advance and broadcast.
@@ -187,6 +190,26 @@ private:
 	 * "authoritative and remembered"; not owning one is a valid configuration, not a bug.
 	 */
 	ITerrainCommitJournal* CommitJournal = nullptr;
+
+	/**
+	 * Opens or creates this world's durable history and replays it onto the fresh backend.
+	 *
+	 * Called once, immediately after the backend becomes Ready and before the queue can admit
+	 * anything, because replay requires a backend nothing has edited yet. Server only.
+	 *
+	 * Never prevents the world from running: every failure leaves the journal unattached and
+	 * says so at Error. A server that runs without saving is a bad day; a server that will not
+	 * start is worse; a server that quietly writes into the wrong world's history is the worst,
+	 * and that is the one case it refuses outright.
+	 */
+	void OpenWorldStore(UWorld& InWorld);
+
+	/** Detaches the journal and releases the store. Safe to call when nothing was opened. */
+	void CloseWorldStore();
+
+	TUniquePtr<FTerrainPlatformStorageDevice> StorageDevice;
+	TUniquePtr<FTerrainWorldStore>            WorldStore;
+	TUniquePtr<FTerrainWorldStoreJournal>     WorldJournal;
 
 	/**
 	 * Set when a commit could not be made durable after the backend had already mutated.

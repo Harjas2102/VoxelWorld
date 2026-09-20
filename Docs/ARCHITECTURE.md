@@ -938,12 +938,17 @@ broadcasting it, and closes admission with `ShuttingDown` if it cannot — and *
 fresh backend plus a journal reproduces the world that was shut down, proven by chunk-hash
 equality over overlapping edits.
 
-**What does not exist.** Nothing attaches a journal to a running game: the service's
-`CommitJournal` is null unless something sets it, and no bootstrap creates a world store for
-a real session. **No edit survives a restart of the actual game** — the machinery that would
-make it survive is built and tested, and nothing calls it. Also absent: checkpoint capture
-(so G is always 0 and replay cost grows with every edit ever made), settlement, SQLite,
-retention, and the crash matrix. Build step 4 is not complete and DEF-1/2/9 remain open.
+**Edits now survive a restart.** `UTerrainService` opens or creates a world under
+`Saved/Worlds/<WorldStoreName>/` at `BeginPlay` on the authority, replays its journal onto the
+fresh backend **before the queue can admit anything**, seeds the queue's sequence to H+1, and
+then attaches the journal. Measured on the production backend: the same dig touched **257
+voxels on a fresh world and 33 after a restart**, because the earlier excavation was still
+there. `bPersistEdits` (default true) turns it off.
+
+**What does not exist.** Checkpoint capture — so G is always 0, startup replays every edit
+ever made, and that cost grows without bound. Also absent: settlement, SQLite, retention, the
+exclusive-writer lease P-003 §5 requires, and the crash matrix. Build step 4 is not complete
+and DEF-1/2/9 remain open.
 
 - **Commit:** journal append + durable flush precedes terrain broadcast and
   TerrainCommitted; SQLite settlement follows, with idempotent `(WorldId, OpSeq)`
@@ -1525,7 +1530,7 @@ nothing on the command line. The table names the assertion; the prefix names the
 | `Adapter.Determinism` | Same op sequence, same seed, same `HashRegion` over 20 runs, across both threading modes | R-001 |
 | `Yield.Volume` | Remove r = 2 m in homogeneous stone; `Σ Δocc × V` within tolerance of `4/3 π r³` | R-004 |
 | `Yield.MixedGeology` | Partial, overlapping and strata-boundary digs account correctly | R-004 |
-| `Restart.Identity` | Dig, shut down, boot, compare every chunk hash | R-003 |
+| `Restart.Identity` | Dig, shut down, boot, compare every chunk hash. **Partial evidence at CP-016**: three consecutive real sessions on one world restored correctly and the same dig did less work each time (257 → 33 voxels), and `Persistence.Replay.Equivalence` proves chunk-hash equality headlessly. What is still missing is chunk-hash equality across a restart **on the production backend** | R-003 |
 | `Restart.CrashMatrix` | Crash injected before and after every durable boundary; no duplicated or missing payout, no durable ore without durable removal | R-003, DEF-1 |
 | `Save.Growth` | 1,000 scripted edits; bytes/edit, snapshot size after compaction, compaction wall time | R-003 |
 

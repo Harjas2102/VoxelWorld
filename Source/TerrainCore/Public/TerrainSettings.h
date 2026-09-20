@@ -74,6 +74,30 @@ public:
 	UPROPERTY(config, EditAnywhere, Category = "Terrain|Edit", meta = (ClampMin = "1"))
 	int32 MaxVoxelsPerOp = 65536;
 
+	/**
+	 * Whether the server durably records terrain edits and replays them at startup.
+	 *
+	 * **Default true: a world that does not remember is not this game** (Pillar 1). Turn it
+	 * off to run the pre-persistence behaviour, which is what every build through step 3 did.
+	 *
+	 * Known limits while DEF-1/2/9 are open, and they are real: there is no checkpoint
+	 * capture, so startup replays EVERY edit ever made and that cost grows without bound;
+	 * there is no retention, so the journal only grows; and the crash matrix has not been
+	 * run. Watch the replay time logged at startup.
+	 */
+	UPROPERTY(config, EditAnywhere, Category = "Terrain|Persistence")
+	bool bPersistEdits = true;
+
+	/**
+	 * The world directory under `Saved/Worlds/`. One name is one world's permanent history.
+	 *
+	 * Changing it starts a different world rather than migrating this one, and pointing two
+	 * running servers at one name is unsupported (P-003 section 5 requires exclusive writer
+	 * ownership, and the lease that would enforce it is not built).
+	 */
+	UPROPERTY(config, EditAnywhere, Category = "Terrain|Persistence")
+	FString WorldStoreName = TEXT("Default");
+
 	/** Default streaming interest radius for UTerrainStreamingComponent, in centimetres. */
 	UPROPERTY(config, EditAnywhere, Category = "Terrain|Streaming", meta = (ClampMin = "0"))
 	double DefaultInterestRadiusCm = 10000.0;

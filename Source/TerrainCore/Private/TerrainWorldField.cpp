@@ -318,3 +318,45 @@ FTerrainDensityRange FTerrainWorldField::SampleRange(const FTerrainBox& Box) con
 	}
 	return Out;
 }
+
+/**
+ * The canonical parameter digest (P-004 section 4.1).
+ *
+ * Declaration order, little-endian, doubles as their IEEE-754 binary64 bit patterns. Adding a
+ * parameter to FTerrainWorldFieldParams and forgetting to add it here would make two different
+ * worlds share a digest, which is the exact failure this function exists to prevent -- so the
+ * count is asserted against the encoded length rather than trusted.
+ */
+FTerrainDigest TerrainWorldFieldParamsDigest(const FTerrainWorldFieldParams& Params)
+{
+	TArray<uint8> Canonical;
+	FTerrainByteWriter Writer(Canonical);
+
+	Writer.WriteI32(Params.Seed);
+
+	const double Doubles[] = {
+		Params.PlainHeightVox,
+		Params.HillCentreXVox, Params.HillCentreYVox, Params.HillRadiusVox, Params.HillHeightVox,
+		Params.CliffPlaneXVox, Params.CliffShelfVox, Params.CliffBlendVox,
+		Params.BasinCentreXVox, Params.BasinCentreYVox, Params.BasinRadiusVox, Params.BasinDepthVox,
+		Params.RoughAmplitudeVox, Params.RoughFeatureVox,
+		Params.TopsoilThicknessVox, Params.DirtThicknessVox, Params.StoneThicknessVox,
+		Params.BedrockTopZVox,
+		Params.OreCentreXVox, Params.OreCentreYVox, Params.OreCentreZVox,
+		Params.OreRadiusXVox, Params.OreRadiusYVox, Params.OreRadiusZVox,
+		Params.SurfaceWidthVox, Params.MaxSlopeFactor,
+	};
+	for (const double Value : Doubles)
+	{
+		uint64 Bits = 0;
+		FMemory::Memcpy(&Bits, &Value, sizeof(Bits));
+		Writer.WriteU64(Bits);
+	}
+
+	Writer.WriteI32(Params.RoughOctaves);
+
+	// 4 (Seed) + 26 doubles + 4 (RoughOctaves). A parameter added above without a line here
+	// would leave this unchanged and two different worlds would share one digest.
+	check(Canonical.Num() == 4 + 26 * 8 + 4);
+	return TerrainPersistDigest(Canonical);
+}

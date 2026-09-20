@@ -12,31 +12,6 @@
 
 namespace
 {
-	/** journal/seg-%016llx.tjs, matching the writer's name shape exactly. */
-	bool ParseSegmentFileName(const FString& Name, uint64& OutSegmentId)
-	{
-		static const FString Prefix = TEXT("seg-");
-		static const FString Suffix = TEXT(".tjs");
-
-		if (!Name.StartsWith(Prefix) || !Name.EndsWith(Suffix)
-			|| Name.Len() - Prefix.Len() - Suffix.Len() != 16)
-		{
-			return false;
-		}
-
-		uint64 Value = 0;
-		for (int32 Index = 0; Index < 16; ++Index)
-		{
-			const TCHAR Char = Name[Prefix.Len() + Index];
-			uint64 Nibble;
-			if      (Char >= TEXT('0') && Char <= TEXT('9')) { Nibble = static_cast<uint64>(Char - TEXT('0')); }
-			else if (Char >= TEXT('a') && Char <= TEXT('f')) { Nibble = static_cast<uint64>(Char - TEXT('a') + 10); }
-			else { return false; }
-			Value = (Value << 4) | Nibble;
-		}
-		OutSegmentId = Value;
-		return true;
-	}
 
 	/** The interest id replay takes. Deliberately NOT released here -- see below. */
 	constexpr uint32 ReplayInterestId = TerrainReplayInterestId;
@@ -127,7 +102,7 @@ FTerrainStoreResult TerrainReplayJournal(
 	for (const FString& Name : Names)
 	{
 		uint64 SegmentId = 0;
-		if (ParseSegmentFileName(Name, SegmentId) && SegmentId <= ActiveSegmentId)
+		if (TerrainStoragePaths::ParseJournalSegment(Name, SegmentId) && SegmentId <= ActiveSegmentId)
 		{
 			OutStats.Segments.Add(SegmentId);
 		}

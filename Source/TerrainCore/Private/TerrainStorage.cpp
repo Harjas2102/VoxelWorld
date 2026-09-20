@@ -106,6 +106,31 @@ namespace TerrainStoragePaths
 		return FString::Printf(TEXT("%s/seg-%016llx.tjs"), JournalDirectory, SegmentId);
 	}
 
+	bool ParseJournalSegment(const FString& FileName, uint64& OutSegmentId)
+	{
+		static const FString SegmentPrefix = TEXT("seg-");
+		static const FString SegmentSuffix = TEXT(".tjs");
+
+		if (!FileName.StartsWith(SegmentPrefix) || !FileName.EndsWith(SegmentSuffix)
+			|| FileName.Len() - SegmentPrefix.Len() - SegmentSuffix.Len() != 16)
+		{
+			return false;
+		}
+
+		uint64 Value = 0;
+		for (int32 Index = 0; Index < 16; ++Index)
+		{
+			const TCHAR Char = FileName[SegmentPrefix.Len() + Index];
+			uint64 Nibble;
+			if      (Char >= TEXT('0') && Char <= TEXT('9')) { Nibble = static_cast<uint64>(Char - TEXT('0')); }
+			else if (Char >= TEXT('a') && Char <= TEXT('f')) { Nibble = static_cast<uint64>(Char - TEXT('a') + 10); }
+			else { return false; }   // lowercase only, matching what JournalSegment writes
+			Value = (Value << 4) | Nibble;
+		}
+		OutSegmentId = Value;
+		return true;
+	}
+
 	FString ObjectDirectory(const FTerrainDigest& Digest)
 	{
 		// The first digest byte, lowercase hex: a 256-way fan-out so one directory never holds

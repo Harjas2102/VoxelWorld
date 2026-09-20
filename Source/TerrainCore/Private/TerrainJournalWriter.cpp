@@ -14,35 +14,6 @@
 
 namespace
 {
-	/** journal/seg-%016llx.tjs -- the only name shape the journal directory may hold. */
-	bool ParseSegmentFileName(const FString& Name, uint64& OutSegmentId)
-	{
-		static const FString Prefix = TEXT("seg-");
-		static const FString Suffix = TEXT(".tjs");
-
-		if (!Name.StartsWith(Prefix) || !Name.EndsWith(Suffix))
-		{
-			return false;
-		}
-		const int32 HexLength = Name.Len() - Prefix.Len() - Suffix.Len();
-		if (HexLength != 16)
-		{
-			return false;
-		}
-
-		uint64 Value = 0;
-		for (int32 Index = 0; Index < 16; ++Index)
-		{
-			const TCHAR Char = Name[Prefix.Len() + Index];
-			uint64 Nibble;
-			if      (Char >= TEXT('0') && Char <= TEXT('9')) { Nibble = static_cast<uint64>(Char - TEXT('0')); }
-			else if (Char >= TEXT('a') && Char <= TEXT('f')) { Nibble = static_cast<uint64>(Char - TEXT('a') + 10); }
-			else { return false; }   // lowercase only, matching the name this project writes
-			Value = (Value << 4) | Nibble;
-		}
-		OutSegmentId = Value;
-		return true;
-	}
 
 	/** A segment file holding only its header object -- created, never appended to. */
 	constexpr int64 EmptySegmentSize = TerrainPersistObjectHeaderSize + TerrainPersistSegmentHeaderBodySize;
@@ -155,7 +126,7 @@ FTerrainStoreResult FTerrainJournalWriter::ListSegments(TArray<uint64>& OutSegme
 	for (const FString& Name : Names)
 	{
 		uint64 SegmentId = 0;
-		if (ParseSegmentFileName(Name, SegmentId))
+		if (TerrainStoragePaths::ParseJournalSegment(Name, SegmentId))
 		{
 			OutSegmentIds.Add(SegmentId);
 		}
