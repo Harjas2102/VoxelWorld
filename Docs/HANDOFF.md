@@ -35,10 +35,29 @@ evidence than a cross-vendor review.
 - **Migration:** a real pre-P-005 world migrated through the collector with identical hashes.
 - **Not re-run:** `Terrain.SelfTest` and `Adapter.DensityContract`. Neither touches this code.
 
+## T-128 breadcrumb (post-CP-018, not yet checkpointed)
+
+**T-128 is implemented, tested and committed. The next `checkpoint` records it.** The spec, its
+evidence and the self-review are in `Docs/proposals/P-007-exclusive-writer-lease.md`.
+- The lease is an OS lock on `writer.lock` (Windows `LockFileEx`, Unix `flock`). It lives in the
+  device seam, the store holds it for its whole life, and the service takes it before it checks
+  whether the world exists. If the lease is held elsewhere, the service logs `StoreBusy` and
+  closes terrain access.
+- Evidence: **38/38** automation. The new `WriterLease` case was mutation-tested: with the lock
+  removed, it fails. `Tools/Test-TerrainLease.py` passes with real processes: a second server is
+  refused and changes no byte of the save, and after the first server is killed hard a third
+  opens the world and passes SelfTest. `Test-TerrainCheckpoint.py` and one-round
+  `MP.Convergence -CheckpointCapture` also pass.
+- **New defect found, predating T-128:** after a server travel on a persisted world, clients
+  apply none of the server's edits. The multi-round `MP.Convergence` fails in round 2. I
+  reproduced it on `614201d` with the T-128 work stashed. This is **T-129**, next.
+- Writer and reviewer were the same agent.
+
 ## What is NOT done, stated plainly
 
-- **T-128, the exclusive-writer lease** (P-003 §5). Nothing stops two servers from opening the
-  same `WorldStoreName` and writing side by side. This is next.
+- **T-129, terrain after server travel.** Round 2 of a multi-round `MP.Convergence` fails on a
+  persisted world: the server commits, and the clients apply 0. Reproduce with
+  `Tools/Test-TerrainMultiplayer.ps1 -Rounds 2 -DurationSeconds 20 -CheckpointCapture`.
 - **Journal trimming.** The journal grows forever: about 49 KB per checkpoint interval. It needs
   a pre-created segment ring, because `Rotate` creates a name (P-005 §8).
 - **Retention pins.** No backup, migration or sync consumer exists. When one does, its pin must
@@ -51,10 +70,9 @@ evidence than a cross-vendor review.
 
 ## Next safe action
 
-**T-128 — the exclusive-writer lease.** Before the store admits anything, it should take an
-exclusive OS-level lock on a pre-created lock file in the world directory, held for the life of
-the store. A second server opening the same world must be refused, with a clear log line and
-terrain access closed — never allowed to write. Keep the rule from P-005: the lock file is
-created at bootstrap, not at runtime. On Windows the lock is a share-mode-exclusive handle; on
-Unix it is `flock`. Afterwards, Phase 1's gate items 1C (material yield) and 1E
-(join-in-progress) are what remain before the backend decision.
+**T-129: clients receive no terrain after a server travel on a persisted world.** Start with the
+round-2 server and client logs from the reproduction above. The server reopens the store at
+G>0 with nonzero chunk revisions. Suspect the client subscription and pristine acknowledgement
+path, which was last proved across travel at CP-014, before persistence existed. After that,
+Phase 1's gate items 1C (material yield) and 1E (join-in-progress) remain before the backend
+decision.

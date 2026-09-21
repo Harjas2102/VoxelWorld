@@ -27,15 +27,16 @@
  *   1. only the authority persists -- a client that wrote a journal would be writing fiction;
  *   2. describe the world exactly (base descriptor) BEFORE opening anything, because the
  *      descriptor is the identity every stored object is checked against;
+ *  2b. take the exclusive writer lease, or refuse -- a second server never writes beside the first;
  *   3. open the store, or create it if the directory is new;
  *   4. if it already existed, REFUSE it unless its recorded base matches the one this process
  *      would produce -- a mismatch means these edits belong to a different world;
  *   5. replay the journal onto the fresh backend, before a single client can connect;
  *   6. only then attach the journal, so the first thing recorded is the first NEW edit.
  *
- * THE FAILURE POLICY, and it is not the one this file started with. If the store will not
- * open, the recorded base is not this world's, restore fails, replay fails or the sequence
- * cannot be seeded, **terrain access is closed** -- the world boots and terrain refuses edits
+ * THE FAILURE POLICY, and it is not the one this file started with. If the lease is held
+ * elsewhere, the store will not open, the recorded base is not this world's, restore fails,
+ * replay fails or the sequence cannot be seeded, **terrain access is closed** -- the world boots and terrain refuses edits
  * with `ShuttingDown`.
  *
  * The earlier policy was to run unsaved, on the reasoning that a server which will not start
@@ -136,6 +137,33 @@ void UTerrainService::OpenWorldStore(UWorld& InWorld)
 
 	StorageDevice = MakeUnique<FTerrainPlatformStorageDevice>(Directory);
 	WorldStore    = MakeUnique<FTerrainWorldStore>(*StorageDevice);
+
+	// 2b. The exclusive writer lease, BEFORE asking whether the world exists (P-003 §5). Two
+	//     servers that both looked first could both see "no world" and both create one. A
+	//     refusal has read nothing and written nothing, so the other server's world is exactly
+	//     as it was.
+	const FTerrainStoreResult Leased = WorldStore->AcquireWriterLease();
+	if (!Leased.IsOk())
+	{
+		if (Leased.Storage == ETerrainStorageResult::Busy)
+		{
+			UE_LOG(LogTerrainCore, Error,
+				TEXT("Terrain world at '%s' is already open for writing by another server (StoreBusy). ")
+				TEXT("Two writers would corrupt it, so this server leaves it untouched and TERRAIN ACCESS ")
+				TEXT("IS CLOSED. Stop the other server, or start this one with a different WorldStoreName."),
+				*Directory);
+		}
+		else
+		{
+			UE_LOG(LogTerrainCore, Error,
+				TEXT("Terrain world at '%s': the writer lease could not be taken (%s). TERRAIN ACCESS ")
+				TEXT("IS CLOSED; restart after repairing the save directory."),
+				*Directory, *Leased.ToString());
+		}
+		CloseWorldStore();
+		bStorageFaulted = true;
+		return;
+	}
 
 	const bool bExisting = StorageDevice->Exists(TerrainStoragePaths::BaseDescriptor);
 

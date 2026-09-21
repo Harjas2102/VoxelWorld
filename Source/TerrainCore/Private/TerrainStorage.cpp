@@ -11,7 +11,10 @@
 #if PLATFORM_WINDOWS
 #include "Windows/WindowsHWrapper.h"
 #elif PLATFORM_UNIX
+#include <errno.h>
 #include <fcntl.h>
+#include <sys/file.h>
+#include <sys/stat.h>
 #include <unistd.h>
 #endif
 
@@ -39,6 +42,7 @@ const TCHAR* TerrainStorageResultName(ETerrainStorageResult Result)
 	case ETerrainStorageResult::BadPath:       return TEXT("BadPath");
 	case ETerrainStorageResult::WrongSize:     return TEXT("WrongSize");
 	case ETerrainStorageResult::IoError:       return TEXT("IoError");
+	case ETerrainStorageResult::Busy:          return TEXT("StoreBusy");
 	}
 	return TEXT("Unknown");
 }
@@ -533,6 +537,114 @@ ETerrainStorageResult FTerrainPlatformStorageDevice::SyncDirectory(const FString
 #endif
 }
 
+// ---- the writer lease (P-003 §5, T-128) ---------------------------------
+
+namespace
+{
+	/** Holds the OS lock for as long as it lives. Closing the handle is what releases it. */
+	class FTerrainPlatformStorageLease final : public ITerrainStorageLease
+	{
+	public:
+#if PLATFORM_WINDOWS
+		explicit FTerrainPlatformStorageLease(HANDLE InHandle) : Handle(InHandle) {}
+		virtual ~FTerrainPlatformStorageLease() override { ::CloseHandle(Handle); }
+	private:
+		HANDLE Handle;
+#elif PLATFORM_UNIX
+		explicit FTerrainPlatformStorageLease(int InDescriptor) : Descriptor(InDescriptor) {}
+		virtual ~FTerrainPlatformStorageLease() override { ::close(Descriptor); }
+	private:
+		int Descriptor;
+#endif
+	};
+}
+
+ETerrainStorageResult FTerrainPlatformStorageDevice::AcquireExclusiveLease(
+	const FString& RelativePath, TUniquePtr<ITerrainStorageLease>& OutLease, bool& bOutCreated)
+{
+	OutLease.Reset();
+	bOutCreated = false;
+
+	FString Absolute = Resolve(RelativePath);
+	if (Absolute.IsEmpty())
+	{
+		return ETerrainStorageResult::BadPath;
+	}
+	Absolute = FPaths::ConvertRelativePathToFull(Absolute);
+
+	// The lease is taken before a new world exists, so its directory may not exist either.
+	IPlatformFile& File = FPlatformFileManager::Get().GetPlatformFile();
+	if (!File.DirectoryExists(*Root) && !File.CreateDirectoryTree(*Root))
+	{
+		return ETerrainStorageResult::IoError;
+	}
+
+#if PLATFORM_WINDOWS
+	FPaths::MakePlatformFilename(Absolute);
+	// Share read/write so a scanner's brief open never collides with us; withhold delete so the
+	// file cannot be removed or renamed while held. Exclusion comes from LockFileEx below.
+	HANDLE Handle = ::CreateFileW(*Absolute, GENERIC_READ | GENERIC_WRITE,
+		FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+	if (Handle == INVALID_HANDLE_VALUE)
+	{
+		const uint32 OpenError = ::GetLastError();
+		// A sharing violation means someone opened it without read/write sharing -- not a lease
+		// holder of ours, but still someone we must not write beside.
+		return OpenError == ERROR_SHARING_VIOLATION
+			? ETerrainStorageResult::Busy : ETerrainStorageResult::IoError;
+	}
+	// OPEN_ALWAYS reports ERROR_ALREADY_EXISTS when it opened rather than created.
+	bOutCreated = ::GetLastError() != ERROR_ALREADY_EXISTS;
+
+	OVERLAPPED Overlapped = {};
+	if (!::LockFileEx(Handle, LOCKFILE_EXCLUSIVE_LOCK | LOCKFILE_FAIL_IMMEDIATELY,
+	                  0, /*LowBytes=*/1, /*HighBytes=*/0, &Overlapped))
+	{
+		const uint32 LockError = ::GetLastError();
+		::CloseHandle(Handle);
+		return (LockError == ERROR_LOCK_VIOLATION || LockError == ERROR_IO_PENDING)
+			? ETerrainStorageResult::Busy : ETerrainStorageResult::IoError;
+	}
+	OutLease = MakeUnique<FTerrainPlatformStorageLease>(Handle);
+	return ETerrainStorageResult::Ok;
+#elif PLATFORM_UNIX
+	const FTCHARToUTF8 Path(*Absolute);
+	int Descriptor = ::open(Path.Get(), O_RDWR | O_CREAT | O_EXCL | O_CLOEXEC, 0644);
+	bOutCreated = Descriptor >= 0;
+	if (Descriptor < 0 && errno == EEXIST)
+	{
+		Descriptor = ::open(Path.Get(), O_RDWR | O_CLOEXEC);
+	}
+	if (Descriptor < 0)
+	{
+		return ETerrainStorageResult::IoError;
+	}
+	if (::flock(Descriptor, LOCK_EX | LOCK_NB) != 0)
+	{
+		const int LockError = errno;
+		::close(Descriptor);
+		return LockError == EWOULDBLOCK ? ETerrainStorageResult::Busy : ETerrainStorageResult::IoError;
+	}
+	// flock locks an inode, not a name. If the name was unlinked or replaced between our open and
+	// our lock, the lock protects nothing another server can see -- refuse rather than hold it.
+	struct stat Held;
+	struct stat Named;
+	if (::fstat(Descriptor, &Held) != 0 || ::stat(Path.Get(), &Named) != 0
+		|| Held.st_ino != Named.st_ino || Held.st_dev != Named.st_dev)
+	{
+		::close(Descriptor);
+		return ETerrainStorageResult::Busy;
+	}
+	OutLease = MakeUnique<FTerrainPlatformStorageLease>(Descriptor);
+	return ETerrainStorageResult::Ok;
+#else
+	// No lock primitive has been written for this platform. Refusing is the only answer that
+	// keeps P-003 §5's exclusivity true; there is no shipping target here.
+	UE_LOG(LogTerrainCore, Error, TEXT("AcquireExclusiveLease: no lease primitive on this platform."));
+	return ETerrainStorageResult::IoError;
+#endif
+}
+
 // ---- the memory device --------------------------------------------------
 
 ETerrainStorageResult FTerrainMemoryStorageDevice::EnsureDirectory(const FString& RelativePath)
@@ -706,6 +818,42 @@ ETerrainStorageResult FTerrainMemoryStorageDevice::SyncDirectory(const FString& 
 	// Nothing in memory is more or less durable than anything else.
 	return RelativeDirectory.IsEmpty() || TerrainStorageIsSafeRelativePath(RelativeDirectory)
 		? ETerrainStorageResult::Ok : ETerrainStorageResult::BadPath;
+}
+
+/** Removes its path from the device's held set when released. The device must outlive it. */
+class FTerrainMemoryStorageLease final : public ITerrainStorageLease
+{
+public:
+	FTerrainMemoryStorageLease(FTerrainMemoryStorageDevice& InDevice, const FString& InPath)
+		: Device(InDevice), Path(InPath) {}
+	virtual ~FTerrainMemoryStorageLease() override { Device.HeldLeases.Remove(Path); }
+
+private:
+	FTerrainMemoryStorageDevice& Device;
+	FString Path;
+};
+
+ETerrainStorageResult FTerrainMemoryStorageDevice::AcquireExclusiveLease(
+	const FString& RelativePath, TUniquePtr<ITerrainStorageLease>& OutLease, bool& bOutCreated)
+{
+	OutLease.Reset();
+	bOutCreated = false;
+	if (!TerrainStorageIsSafeRelativePath(RelativePath))
+	{
+		return ETerrainStorageResult::BadPath;
+	}
+	if (HeldLeases.Contains(RelativePath))
+	{
+		return ETerrainStorageResult::Busy;
+	}
+	if (!Files.Contains(RelativePath))
+	{
+		Files.Add(RelativePath);   // the disk device creates the file; so does this one
+		bOutCreated = true;
+	}
+	HeldLeases.Add(RelativePath);
+	OutLease = MakeUnique<FTerrainMemoryStorageLease>(*this, RelativePath);
+	return ETerrainStorageResult::Ok;
 }
 
 // ---- fault injection ----------------------------------------------------
@@ -908,6 +1056,22 @@ ETerrainStorageResult FTerrainFaultDevice::SyncDirectory(const FString& Relative
 		return ETerrainStorageResult::IoError;
 	}
 	return Inner.SyncDirectory(RelativeDirectory);
+}
+
+ETerrainStorageResult FTerrainFaultDevice::AcquireExclusiveLease(
+	const FString& RelativePath, TUniquePtr<ITerrainStorageLease>& OutLease, bool& bOutCreated)
+{
+	// Not a mutation: it is outside FailAtMutation's sequence, so the crash matrix's indices mean
+	// what they meant before T-128. The lease belongs to the inner device, so two fault devices
+	// over one memory device contend exactly as two processes over one disk would.
+	int32 Tear = -1;
+	if (ShouldFail(ETerrainStorageOp::AcquireLease, RelativePath, Tear))
+	{
+		OutLease.Reset();
+		bOutCreated = false;
+		return ETerrainStorageResult::IoError;
+	}
+	return Inner.AcquireExclusiveLease(RelativePath, OutLease, bOutCreated);
 }
 
 // ---- the object store ---------------------------------------------------

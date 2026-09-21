@@ -49,6 +49,37 @@ FTerrainStoreResult FTerrainWorldStore::StoreCheckpointObject(
 	return FTerrainStoreResult::Ok();
 }
 
+FTerrainStoreResult FTerrainWorldStore::AcquireWriterLease()
+{
+	if (Lease.IsValid())
+	{
+		return FTerrainStoreResult::Ok();
+	}
+
+	bool bCreated = false;
+	const ETerrainStorageResult Result =
+		Device.AcquireExclusiveLease(TerrainStoragePaths::WriterLock, Lease, bCreated);
+	if (Result != ETerrainStorageResult::Ok)
+	{
+		Lease.Reset();
+		return FTerrainStoreResult::Io(Result);
+	}
+
+	if (bCreated)
+	{
+		// A new name, created before anything is admitted -- bootstrap, like the container pool
+		// for a pre-P-005 world. The lock is correct whether or not the name survives a power
+		// cut (a lost file is recreated next boot); the sync is for tidiness, not safety.
+		const ETerrainStorageResult Synced = Device.SyncDirectory(TEXT(""));
+		if (Synced != ETerrainStorageResult::Ok)
+		{
+			Lease.Reset();
+			return FTerrainStoreResult::Io(Synced);
+		}
+	}
+	return FTerrainStoreResult::Ok();
+}
+
 FTerrainStoreResult FTerrainWorldStore::SyncBootstrapDirectories()
 {
 	// The world directory itself holds base.tobj and the top-level directories; each of these

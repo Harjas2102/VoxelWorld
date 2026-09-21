@@ -39,6 +39,11 @@ enum class ETerrainStorageResult : uint8
 	BadPath,
 	WrongSize,
 	IoError,
+	/**
+	 * Another holder has the exclusive writer lease (P-003 §2: "refuse with a diagnosable
+	 * StoreBusy error"). Not an I/O failure: the disk is fine, the world is simply in use.
+	 */
+	Busy,
 };
 
 TERRAINCORE_API const TCHAR* TerrainStorageResultName(ETerrainStorageResult Result);
@@ -66,6 +71,13 @@ namespace TerrainStoragePaths
 	inline constexpr const TCHAR* ObjectsDirectory = TEXT("objects");
 	inline constexpr const TCHAR* PacksDirectory   = TEXT("packs");
 	inline constexpr const TCHAR* ContainersDirectory = TEXT("containers");
+
+	/**
+	 * The exclusive-writer lease file (P-003 §5, T-128). Its contents are never read or written;
+	 * only the OS lock held on it means anything. Created before the world is opened, never at
+	 * runtime, so P-005's "an open world creates no names" still holds.
+	 */
+	inline constexpr const TCHAR* WriterLock = TEXT("writer.lock");
 
 	/**
 	 * The fixed container pool (P-005 §4). Every object written after world creation goes into
@@ -108,6 +120,17 @@ namespace TerrainStoragePaths
 }
 
 // ---- the device seam ----------------------------------------------------
+
+/**
+ * A held exclusive lease. Destroying it releases the lease; so does the holding process dying,
+ * which is why the lease is an OS lock and not a marker file -- a crashed server must never
+ * leave a world that no later server may open.
+ */
+class TERRAINCORE_API ITerrainStorageLease
+{
+public:
+	virtual ~ITerrainStorageLease() = default;
+};
 
 /**
  * The whole durable-write surface of the terrain store. Seven mutating operations, on purpose:
@@ -209,6 +232,24 @@ public:
 	 * guarantee, so a failure is logged and reported as Ok rather than refusing to create worlds.
 	 */
 	virtual ETerrainStorageResult SyncDirectory(const FString& RelativeDirectory) = 0;
+
+	/**
+	 * Takes an exclusive lease on RelativePath, creating the file (and the device root) if absent.
+	 * **Non-blocking**: a lease held by anyone else -- another process, or another holder in this
+	 * one -- is Busy at once, never a wait (P-003 §2).
+	 *
+	 * Windows: `LockFileEx` on byte 0 through a handle that shares read/write but not delete.
+	 * A byte-range lock rather than a share-mode-exclusive open, because a virus scanner or
+	 * indexer briefly opening the file must not make a server refuse its own world; and no
+	 * FILE_SHARE_DELETE, so the file cannot be deleted or renamed out from under the holder.
+	 * Unix: `flock(LOCK_EX | LOCK_NB)`, which conflicts between separate opens even within one
+	 * process, then a check that the locked inode is still the one the name points at -- a lock
+	 * on an unlinked file protects nothing.
+	 *
+	 * bOutCreated says whether the file was new, so a caller can make the name durable.
+	 */
+	virtual ETerrainStorageResult AcquireExclusiveLease(const FString& RelativePath,
+		TUniquePtr<ITerrainStorageLease>& OutLease, bool& bOutCreated) = 0;
 };
 
 /** The real device. Rooted at an absolute directory; nothing it does can escape that root. */
@@ -229,6 +270,8 @@ public:
 	virtual ETerrainStorageResult ReadRange(const FString& RelativePath, int64 Offset, int64 Length, TArray<uint8>& OutBytes) const override;
 	virtual ETerrainStorageResult Truncate(const FString& RelativePath, int64 NewSize) override;
 	virtual ETerrainStorageResult SyncDirectory(const FString& RelativeDirectory) override;
+	virtual ETerrainStorageResult AcquireExclusiveLease(const FString& RelativePath,
+		TUniquePtr<ITerrainStorageLease>& OutLease, bool& bOutCreated) override;
 
 	const FString& GetRoot() const { return Root; }
 
@@ -255,6 +298,8 @@ public:
 	virtual ETerrainStorageResult ReadRange(const FString& RelativePath, int64 Offset, int64 Length, TArray<uint8>& OutBytes) const override;
 	virtual ETerrainStorageResult Truncate(const FString& RelativePath, int64 NewSize) override;
 	virtual ETerrainStorageResult SyncDirectory(const FString& RelativeDirectory) override;
+	virtual ETerrainStorageResult AcquireExclusiveLease(const FString& RelativePath,
+		TUniquePtr<ITerrainStorageLease>& OutLease, bool& bOutCreated) override;
 
 	int32 NumFiles() const { return Files.Num(); }
 	void  GetPaths(TArray<FString>& Out) const { Files.GetKeys(Out); }
@@ -270,9 +315,14 @@ public:
 	/** Direct access, for a test that needs to damage a file the way a disk would. */
 	TArray<uint8>* Find(const FString& RelativePath) { return Files.Find(RelativePath); }
 
+	bool IsLeaseHeld(const FString& RelativePath) const { return HeldLeases.Contains(RelativePath); }
+
 private:
+	friend class FTerrainMemoryStorageLease;
+
 	TMap<FString, TArray<uint8>> Files;
 	TSet<FString> Directories;
+	TSet<FString> HeldLeases;
 };
 
 // ---- fault injection (P-003 §8, "mandatory injected failures") ----------
@@ -289,6 +339,7 @@ enum class ETerrainStorageOp : uint8
 	Delete,
 	Truncate,
 	SyncDirectory,
+	AcquireLease,
 	Count,
 };
 
@@ -344,6 +395,8 @@ public:
 	virtual ETerrainStorageResult ReadRange(const FString& RelativePath, int64 Offset, int64 Length, TArray<uint8>& OutBytes) const override;
 	virtual ETerrainStorageResult Truncate(const FString& RelativePath, int64 NewSize) override;
 	virtual ETerrainStorageResult SyncDirectory(const FString& RelativeDirectory) override;
+	virtual ETerrainStorageResult AcquireExclusiveLease(const FString& RelativePath,
+		TUniquePtr<ITerrainStorageLease>& OutLease, bool& bOutCreated) override;
 
 private:
 	struct FFault

@@ -53,9 +53,15 @@ struct FTerrainWorldStoreState
  * One world directory.
  *
  * Holds the journal writer, so a caller that has a store has exactly one journal and cannot
- * accidentally open a second one over the same files. Exclusive writer ownership is P-003 §5's
- * requirement; this class is where it will be enforced when the store gains a lease, and the
- * fact that it does not have one yet is stated in its Limits rather than implied away.
+ * accidentally open a second one over the same files.
+ *
+ * EXCLUSIVE WRITER (P-003 §5, T-128). A store holds the world's writer lease for as long as it
+ * lives, and releases it only on destruction -- after its owner has joined every worker that
+ * reads through it. The lease is taken by AcquireWriterLease, which the owner of a storage
+ * session calls BEFORE deciding whether the world exists, so two servers cannot both conclude
+ * "new world" and create side by side. Open and Create do not take it themselves: headless
+ * tests model a restart by opening a second store over the same device while the first is
+ * still in scope, and that is a test convenience, not a second writer.
  */
 class TERRAINCORE_API FTerrainWorldStore
 {
@@ -98,6 +104,16 @@ public:
 	 */
 	FTerrainStoreResult PublishCheckpoint(const FTerrainCheckpointDescriptor& Checkpoint, int64 UtcMillis);
 
+	/**
+	 * Takes the exclusive writer lease on this world directory (TerrainStoragePaths::WriterLock).
+	 *
+	 * Non-blocking: if another server -- or another store in this process -- holds it, this
+	 * returns StoreBusy at once and has written nothing, created nothing but (at most) the world
+	 * directory and its lock file, and read nothing. Idempotent once held.
+	 */
+	FTerrainStoreResult AcquireWriterLease();
+	bool HoldsWriterLease() const { return Lease.IsValid(); }
+
 	bool IsOpen() const { return bOpen; }
 
 	/**
@@ -125,6 +141,11 @@ private:
 	                                          FTerrainDigest& OutDigest, uint32& OutLength);
 
 	ITerrainStorageDevice&  Device;
+
+	// Declared before everything that writes, so it is destroyed after all of it: the lease is
+	// the last thing a closing store lets go of.
+	TUniquePtr<ITerrainStorageLease> Lease;
+
 	FTerrainFileObjectStore Objects;
 	FTerrainSlotPair        RootSlots;
 
