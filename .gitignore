@@ -13,3 +13,6 @@ _incoming/
 Tools/downloads/
 *.env
 **/secrets*
+
+# Session transfer transcripts, not project files
+*paste.txt

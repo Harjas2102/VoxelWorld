@@ -12,6 +12,8 @@
 #include "Modules/ModuleManager.h"
 #include "TimerManager.h"
 #include "Containers/Ticker.h"
+#include "Misc/CommandLine.h"
+#include "Misc/Parse.h"
 
 namespace
 {
@@ -433,6 +435,37 @@ static FAutoConsoleCommandWithWorldAndArgs GTerrainEditCommand(
 			Receipt.OpSeq, Receipt.ChunksAffected, Receipt.VoxelsTouched);
 	}));
 
+// Shared coordinates for the mutation workload and its read-only restart verification.
+static FIntVector TerrainStressCentre(const UTerrainSettings& Settings, int32 Index)
+{
+	const FTerrainBox Bounds = Settings.GetWorldBoundsVox();
+	const int32 MinChunk = FMath::DivideAndRoundUp(Bounds.Min.X, TerrainChunkSizeVox);
+	const int32 MaxChunk = Bounds.Max.X / TerrainChunkSizeVox;
+	const int32 Span = FMath::Max(1, MaxChunk - MinChunk);
+	return FIntVector(
+		(MinChunk + (Index % Span)) * TerrainChunkSizeVox + TerrainChunkSizeVox / 2,
+		(MinChunk + ((Index / Span) % Span)) * TerrainChunkSizeVox + TerrainChunkSizeVox / 2,
+		TerrainChunkSizeVox / 2);
+}
+
+static FAutoConsoleCommandWithWorld GTerrainStressCaptureHashesCommand(
+	TEXT("Terrain.StressCaptureHashes"),
+	TEXT("Report hashes at the stress workload's chunk coordinates without editing terrain."),
+	FConsoleCommandWithWorldDelegate::CreateLambda([](UWorld* World)
+	{
+		UTerrainService* Service = FindTerrainServiceForCommand(World);
+		if (!Service) { return; }
+		const UTerrainSettings* Settings = GetDefault<UTerrainSettings>();
+		const int32 Count = FMath::Clamp(Settings->CheckpointDirtyChunkTrigger, 1, TerrainCheckpointDirtyHardBound);
+		for (int32 Index = 0; Index < Count; ++Index)
+		{
+			const FIntVector Centre = TerrainStressCentre(*Settings, Index);
+			const FTerrainChunkKey Key = TerrainChunkKeyForVoxel(Centre);
+			UE_LOG(LogTerrainCore, Display, TEXT("Terrain.StressCapture.Hash %d=%016llx"),
+				Index, Service->HashChunk(Key));
+		}
+	}));
+
 // `Terrain.StressCapture` exists because two increments in a row optimised the checkpoint on
 // the strength of a projection, and both projections were wrong (D-035, D-036). The capture
 // trigger is 256 dirty chunks; every harness we had dirties four or eight. Extrapolating the
@@ -508,23 +541,13 @@ static FAutoConsoleCommandWithWorld GTerrainStressCaptureCommand(
 				const double  VoxelCm = double(Config->VoxelSizeCm);
 				const FVector Origin  = Config->TerrainOriginWorld;
 
-				const FTerrainBox Bounds = Config->GetWorldBoundsVox();
-				const int32 MinChunk = FMath::DivideAndRoundUp(Bounds.Min.X, TerrainChunkSizeVox);
-				const int32 MaxChunk = Bounds.Max.X / TerrainChunkSizeVox;
-				const int32 Span     = FMath::Max(1, MaxChunk - MinChunk);
+				const FIntVector CentreVox = TerrainStressCentre(*Config, State->Next);
 
-				const int32 Index = State->Next;
-				const FIntVector CentreVox(
-					(MinChunk + (Index % Span)) * TerrainChunkSizeVox + TerrainChunkSizeVox / 2,
-					(MinChunk + ((Index / Span) % Span)) * TerrainChunkSizeVox + TerrainChunkSizeVox / 2,
-					TerrainChunkSizeVox / 2);
-
-				// **Add, not Remove, and that matters.** A Remove in empty air modifies nothing,
-				// so the backend reports no affected chunks, so nothing is marked dirty and the
-				// capture never fires -- which is precisely what the first run of this did.
-				// Adding into air always modifies voxels, so every edit dirties its chunk.
+				// Repeating Add is idempotent and creates no new dirty generation. The retention
+				// harness alternates Add/Remove across restarts using this explicit test flag.
 				FTerrainEditRequest Request;
-				Request.Kind          = ETerrainEditKind::Add;
+				Request.Kind = FParse::Param(FCommandLine::Get(), TEXT("TerrainStressRemove"))
+					? ETerrainEditKind::Remove : ETerrainEditKind::Add;
 				Request.RadiusCm      = State->RadiusCm;
 				Request.WorldLocation = Origin + FVector(
 					(double(CentreVox.X) + 0.5) * VoxelCm,
@@ -575,6 +598,27 @@ static FAutoConsoleCommandWithWorld GTerrainStressCaptureCommand(
 					FPlatformTime::Seconds() - State->Started);
 				return false;
 			}));
+	}));
+
+// `Terrain.Reclaim` -- run retention by hand, and say what it found (P-004 §8, DEF-9).
+//
+// **It is a command rather than something the server does on its own, and that is a decision
+// to revisit with a number, not a shrug.** The mark walks the whole index and compaction can
+// rewrite whole packs, so its cost scales with the store rather than with anything bounded.
+// Running it automatically before it has been measured on a real world is how you turn a disk
+// saving into a startup hitch nobody asked for. Measure with this first; then choose when.
+static FAutoConsoleCommandWithWorld GTerrainReclaimCommand(
+	TEXT("Terrain.Reclaim"),
+	TEXT("Terrain.Reclaim  -- delete stored objects no live checkpoint refers to, and compact "
+		 "partly dead packs."),
+	FConsoleCommandWithWorldDelegate::CreateLambda([](UWorld* World)
+	{
+		UTerrainService* Service = FindTerrainServiceForCommand(World);
+		if (!Service)
+		{
+			return;
+		}
+		Service->ReclaimStore();
 	}));
 
 static FAutoConsoleCommandWithWorldAndArgs GTerrainStatusCommand(

@@ -1,88 +1,97 @@
+→ No action. For your reading only.
+
 # HANDOFF
 
-**Last session:** CP-015 · T-123 · 2026-09-20 · Claude (Opus 5)
-**Branch:** `main` · **Tests:** 35/35 TerrainCore automation, `Test-TerrainCheckpoint.py` PASS,
-`MP.Convergence` PASS (3 clients, 244 commits, 15 captures, 0 stalls), `Terrain.StressCapture`
-at the real trigger.
+**Last session:** CP-015 · T-124 · 2026-09-21 · Claude (Opus 5) implementing, Codex reviewing
+and repairing (**D-028**)
+**Branch:** `main` · **Tests:** 36/36 TerrainCore automation (verified independently after the
+transfer, not inherited), production retention harness PASS.
 
 ---
 
-## What shipped: the incremental capture pump (DEF-2 closed)
+## What shipped: object retention, gated off (D-039)
 
-Capture was one synchronous call — every dirty chunk read, encoded and buffered while the game
-thread waited, 0.162 s at the real trigger. The pump takes the cut once at G, then reads and
-encodes a few chunks per frame under a budget (`CheckpointPumpMillisPerFrame`, default 2 ms).
-Edits keep being admitted, committed and broadcast throughout.
+A mark-and-sweep over the object store behind `Terrain.Reclaim`. It marks from **both on-disk
+root slots, re-read every pass**, walking each checkpoint with the same `TerrainIndexEnumerate`
+traversal restore uses — so the live set is by construction *what a restore would need* — and
+loading and decoding every payload rather than merely naming it. Unreachable loose objects are
+deleted; partly dead packs are rewritten without their garbage.
 
-| | synchronous | pumped |
-|---|---|---|
-| 256-chunk capture, game thread | **0.162 s in one frame** | 0.135 s over 0.444 s wall |
-| longest unbroken step | 0.162 s | **0.035 s** (index 0.014 + publish 0.021) |
-| stall warnings | fired | none |
+### Measured, on a real world
 
-### Copy-before-write, without the copy
+`Tools/Test-TerrainRetention.py` builds three genuinely distinct generations (Add / Remove /
+Add, 539,904 / 538,368 / 538,368 voxels changed, cuts at G=256, G=512, G=768), verifying 256
+chunk hashes across a restart after each.
 
-P-003 §4 specifies stashing a copy of a chunk before an edit touches it — dirty banks, a fence,
-a reconciliation step. **None of it is needed.** When an edit is about to modify a chunk the
-capture still owes, the pump captures *that chunk immediately, out of order*, and drops it from
-the pending set. The pre-edit state is encoded before the backend can change it — the same
-property the banks existed to provide, with no second copy of a 131 KB payload and nothing to
-reconcile. The cost is one chunk read inside that edit, bounded by its own validated footprint.
+| | |
+|---|---|
+| store before / after | **101,658,408 → 67,823,838 bytes** |
+| reclaimed | **33,834,570 bytes** — one full dead generation |
+| packs | 1 of 3 deleted, 1 loose object deleted |
+| terrain | **all 256 hashes survive reclamation and restart** |
+| second sweep | 0 bytes — correctly idempotent |
 
-The hook is in `Cb.Apply`, immediately before `Backend->ApplyOp`.
+Two costs this exposes, both worth carrying:
 
-**Why the cut is still consistent:** a chunk the pump reaches on its own cannot have been edited
-since G (any edit would have taken it first); a chunk an edit touches is encoded before
-`ApplyOp`; and revisions agree, because the hook runs before the revision index advances. Edits
-after G go into a fresh dirty set, so a chunk edited mid-capture is in both — this checkpoint
-records its state at G, the next records what the edit made of it.
+- **The pass takes ~16.8 s, synchronous on the game thread, whether or not it reclaims
+  anything** (the idempotent second sweep cost the same as the first). The expense is the
+  *mark*, not the sweep — so making retention production-grade means making the walk
+  incremental, not just the deletion.
+- **Restore is 13.1 s for 256 chunks.** Replay is zero, which is what checkpointing bought, but
+  the restore that replaced it is not free and has never been optimised.
 
-### Two things worth knowing before touching it
+### Why the unit test needs compaction and the production run did not
 
-- **The synchronous entry point is now the pump with an unlimited budget.** One code path, so
-  they cannot drift, and every existing capture test exercises the pump. That refactor landed
-  green at 34/34 *before* any new behaviour was added, which is what made it safe.
-- **`Advance` always captures at least one chunk, whatever the budget.** A pump that can make
-  zero progress can never finish — a budget below one chunk's cost would starve the capture
-  forever. Found by the test asserting a zero budget still progresses; the first implementation
-  checked the deadline before doing any work.
+In the harness every generation re-edits the *same* 256 chunks, so each one supersedes the last
+completely and the oldest pack becomes entirely dead — a whole-pack delete. In the unit test the
+generations touch *different* chunks, so index path-copying shares subtrees and no pack ever
+becomes fully dead: before compaction that world freed **176 bytes and stranded 757 KB**; with
+compaction, **666 KB, nothing stranded**. Both shapes are real and both are covered.
 
-### Evidence
+## Why it is gated off, and it should stay that way
 
-`Persistence.Capture.Pump` interleaves edits with a part-finished capture and asserts the
-restored checkpoint is the world **at G**, not as it is now — *and* the converse, that the live
-world really has moved on, so the match cannot pass vacuously. It also asserts copy-before-write
-actually fired, because a test that meant to interleave and did not would pass while proving
-nothing.
+`Terrain.Reclaim` does nothing unless the process carries `-TerrainRetentionExperiment`.
 
-In production: a 30-second three-client round with captures every 16 ops took 15 checkpoints and
-**2 chunks by copy-before-write**, with no stalls.
+Compaction removes the original pack **after** writing a replacement, and a replacement can hold
+objects shared by *both* roots. If the replacement's directory entry is not durable across power
+loss — **R-015**, which P-004 §12 leaves unproven on Windows — that one loss defeats both
+retained generations at once. Every other failure in this system leaves a fallback; this is the
+only one that would not. Content addressing makes a *process* crash harmless here, which is a
+different and weaker claim than the one originally written down.
 
-## What is still synchronous
+**Lifting the gate means discharging R-015 first.** That is the next thing worth doing if
+retention matters; until then the store grows and that is the safer trade.
 
-Publication — index path-copy, descriptor, the single pack write, root slot — is one step at the
-end, 0.035 s at the trigger. Spreading it means interleaving a path-copy with edits changing the
-very set being indexed: a much harder problem, not worth it until the number says so. The stall
-warning now measures exactly that unspread part, at a 0.5 s threshold.
+## The review, and what it says about how we work
 
-The 4,096-chunk tail is **reduced, not gone**. Chunk work is spread, so what remains at that
-size is publication — roughly sixteen times 0.035 s. Admission now also counts the capture's
-outstanding set toward the hard bound, which it previously did not; without that a world could
-hold up to twice the bound it advertises.
+The first pass was mine; Codex reviewed and repaired it
+(`Docs/reviews/P-004-review-codex-retention.md`). Six defects, all real. Two are worth
+remembering for their shape rather than their content:
+
+- the mark **added** payload digests to the live set instead of **loading** them, so a
+  checkpoint with a missing payload marked clean and reclamation proceeded;
+- the fallback test **computed** `HashesAtG8` and never **compared** it.
+
+Both looked like checks. Neither was. A seventh finding invalidated a result I had already
+reported: repeating `Add` on solid terrain is idempotent, so my earlier production runs changed
+`voxels=0` and never built the generations they claimed to measure. This is exactly the failure
+mode **R-016** names, and the reason **D-028** alternates implementation between agents.
 
 ## Remaining queue
 
-1. ~~Bulk adapter `ReadRegion`~~ (T-120, D-035) · ~~index write amplification / packs~~ (T-121,
-   D-036) · ~~measure at the real trigger, default on~~ (T-122, D-037) · ~~incremental pump~~
-   (T-123, D-038).
-2. **Retention / GC (DEF-9)** — next. The store only grows, and packs make it harder in a
-   specific way: reclamation can delete a loose object individually but **cannot delete one
-   object out of a pack** (P-004 §13.6). A pack is reclaimable only when nothing live refers to
-   anything in it; reclaiming partially dead packs needs a compaction pass that does not exist.
-3. Crash matrix.
+1. ~~Bulk `ReadRegion`~~ (D-035) · ~~packs~~ (D-036) · ~~measure at the real trigger, default
+   on~~ (D-037) · ~~incremental capture pump, DEF-2~~ (D-038) · ~~object retention, gated~~
+   (D-039).
+2. **The crash matrix** — next, and the last structural piece of build step 4.
+3. **R-015 namespace durability** — the gate on letting retention run for real.
+4. Production retention: incremental, off-thread, with P-003 §5's pins and epoch protocol.
+   **DEF-9 is not closed.**
+5. Journal trimming — correctly deprioritised at ~49 KB per checkpoint interval against 33 MB
+   of payloads.
 
 ## Standing note
 
-Four increments, four measurements, three projections proved wrong before they could be acted
-on. The phase times are logged on every capture and `Terrain.StressCapture` reproduces the
-trigger run in ~80 seconds. Measure before building, and measure again after.
+Five increments, five measurements. Three projections were proved wrong before they could be
+acted on, and this increment added a fourth kind of error: a measurement that ran, passed, and
+measured nothing, because the workload was idempotent. A number is only evidence once you have
+checked that the thing you were varying actually varied.

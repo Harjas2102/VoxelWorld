@@ -847,15 +847,40 @@ never finish — found by the test asserting a zero budget still progresses.
 Copy-before-write is exercised in production, not just in tests: a 30-second three-client round
 with captures every 16 ops took 15 checkpoints, 2 chunks by copy-before-write, and no stalls.
 
-**Next: retention and GC (DEF-9).** The store still only grows, and packs make it harder in a
-specific way — reclamation can delete a loose object individually but **cannot delete one object
-out of a pack** (P-004 §13.6). A pack is reclaimable only when nothing live refers to anything
-in it; reclaiming partially dead packs needs a compaction pass that does not exist. After that,
-the crash matrix.
+**T-124 — object retention, built, reviewed by the other agent, and gated off (D-039).**
+Implemented by Claude, reviewed and repaired by Codex per **D-028**; review in
+`Docs/reviews/P-004-review-codex-retention.md`.
 
-Still unspread: publication, one step at 0.035 s at the trigger. The 4,096-chunk tail is
-**reduced, not gone** — chunk work is spread, so what remains at that size is publication, about
-sixteen times 0.035 s. DEF-1 and DEF-9 remain open.
+A mark-and-sweep over the object store behind `Terrain.Reclaim`. It marks from both on-disk root
+slots, re-read every pass rather than cached, walking each checkpoint with the same
+`TerrainIndexEnumerate` traversal restore uses — so the live set is by construction *what a
+restore would need*, and payloads are loaded and decoded rather than merely named.
+
+**Compaction was the difference between working and decorative.** Index path-copying shares
+pages between generations, so an old pack almost never becomes entirely dead: before compaction
+a three-generation world freed **176 bytes and stranded 757 KB**. Rewriting partly dead packs
+without their garbage freed **666 KB — 25% of the store — with nothing stranded.**
+
+**The review found six defects in the first pass, and they were real.** Two are worth carrying
+forward because of their shape: the mark added payload digests to a set instead of loading them
+(so a missing payload marked clean), and the fallback test computed `HashesAtG8` and never
+compared it. Both *looked* like checks. A seventh finding invalidated a result already reported:
+repeating `Add` on solid terrain is idempotent, so the earlier production runs changed
+`voxels=0` and never built the generations they were measuring.
+
+**It is gated off.** `Terrain.Reclaim` does nothing without `-TerrainRetentionExperiment`.
+Compaction removes the original pack after writing a replacement, and a replacement can hold
+objects shared by *both* roots — so if the new name is not durable across power loss (**R-015**,
+which P-004 §12 leaves unproven on Windows) that single loss defeats both retained generations.
+Every other failure here preserves a fallback; this is the only one that would not.
+
+**DEF-9 is not closed.** What exists is synchronous, on the game thread, and scheduled by hand.
+P-003 §5 specifies an incremental off-thread collector with retention pins and an epoch
+protocol, and none of that is built. Journal trimming is untouched and was correctly
+deprioritised — about 49 KB per checkpoint interval against 33 MB of payloads.
+
+**Next: the crash matrix**, then R-015 namespace durability (which is what would let retention
+off its leash), then journal trimming. DEF-1 and DEF-9 remain open.
 
 ## Drift checks (VISION.md, run at CP-015)
 

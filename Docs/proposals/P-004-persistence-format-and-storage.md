@@ -832,8 +832,31 @@ survived.
 Reclamation (§8) can delete a loose object individually. **It cannot delete one object out of a
 pack.** A pack is reclaimable only when nothing reachable from a live root refers to *any*
 object in it, and reclaiming partially used packs requires rewriting a pack without its dead
-objects and republishing — a compaction pass that does not exist. Retention is not built yet
-(DEF-9), and this is now part of what it has to handle.
+objects and republishing. That compaction pass was absent at the original pack increment;
+the experimental implementation and its remaining acceptance gates are described below.
+
+**Implementation note, retention continuation after T-123:** an experimental object/pack
+pass now exists in `TerrainRetention`, exposed by `Terrain.Reclaim` only when the process
+has `-TerrainRetentionExperiment`. The following is the current prototype boundary,
+not a change to P-003's production design.
+
+The pass reads both root slots again, validates both descriptor/index/payload closures, then
+sweeps unreachable loose objects and compacts partially live packs. The replacement is
+written and flushed, and its live objects are read back, before the original pack is removed.
+A failed validation makes no changes; a later I/O failure may leave a partially completed
+sweep and extra files. Torn replacement files consume their IDs even before a restart.
+
+**This does not discharge §12.** Compaction may relocate objects shared by both roots, so
+losing a replacement's directory entry after removing the original can defeat both fallback
+generations. Production compaction requires namespace-durability acceptance or the container
+alternative. The diagnostic is synchronous, uses the existing whole-pack I/O, has no retention
+handles, and is not P-003 §5's incremental off-thread collector. No backup/migration/sync
+consumer may rely on it until the specified pin/epoch and storage-owner protocol exists.
+
+`TerrainCore.Persistence.Retention` exercises real restoration of both retained generations,
+bad-slot and bad-closure refusal, interrupted replacement/deletion and in-process retry.
+`Tools/Test-TerrainRetention.py` measures three distinct captures on a unique test world and
+checks terrain hashes across reclamation/restart. Journal retention and DEF-9 remain open.
 
 ## 14. Validation and test plan
 

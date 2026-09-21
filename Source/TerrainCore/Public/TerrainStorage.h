@@ -209,6 +209,14 @@ public:
 	int32 NumFiles() const { return Files.Num(); }
 	void  GetPaths(TArray<FString>& Out) const { Files.GetKeys(Out); }
 
+	/** Every byte the device holds. How a test says "the store actually got smaller". */
+	int64 TotalBytes() const
+	{
+		int64 Total = 0;
+		for (const TPair<FString, TArray<uint8>>& File : Files) { Total += File.Value.Num(); }
+		return Total;
+	}
+
 	/** Direct access, for a test that needs to damage a file the way a disk would. */
 	TArray<uint8>* Find(const FString& RelativePath) { return Files.Find(RelativePath); }
 
@@ -357,6 +365,59 @@ public:
 	ETerrainStorageResult LoadPacks();
 
 	int32 NumPackedObjects() const { return PackMap.Num(); }
+
+	/** Last consumed pack id; use immediately after a successful CommitBatch/CompactPack. */
+	uint64 NewestPackId() const { return NextPackId > 0 ? NextPackId - 1 : 0; }
+
+	// ---- what reclamation needs to see (P-004 §8) -------------------------------------
+
+	/**
+	 * Every loose object currently on the device, by digest.
+	 *
+	 * Walks the 256-way fan-out, so it is O(directories) and is a reclamation-time operation,
+	 * not something to call on a frame. A file whose name is not a valid digest is skipped
+	 * rather than guessed at: reclamation deleting a file it could not name would be deleting
+	 * something it does not understand.
+	 */
+	ETerrainStorageResult ListLooseObjects(TArray<FTerrainDigest>& OutDigests) const;
+
+	/** Every pack id on the device, ascending, whether or not its contents were readable. */
+	ETerrainStorageResult ListPacks(TArray<uint64>& OutPackIds) const;
+
+	/** Digests currently resolved through this pack; duplicate copies in other packs are omitted. */
+	void GetPackContents(uint64 PackId, TArray<FTerrainDigest>& OutDigests) const;
+
+	int64 PackSize(uint64 PackId) const;
+
+	/**
+	 * Removes a whole pack and forgets everything it held.
+	 *
+	 * **There is no way to remove one object from a pack**, which is the cost packs charge for
+	 * turning 59 durable writes into 2 (P-004 §13.6). A pack is removable only when nothing
+	 * live refers to ANY object in it; retention decides that, this only performs it.
+	 */
+	ETerrainStorageResult DeletePack(uint64 PackId);
+
+	/**
+	 * Rewrites a pack with only the objects in `Live`, then removes the original.
+	 *
+	 * **Without this, reclamation barely works.** A pack is removable only when nothing in it
+	 * is live, and index path-copying shares pages between generations by design -- so every
+	 * old pack keeps at least one page the current checkpoint still references, and no pack is
+	 * ever fully dead. Measured on a three-generation world: 0 of 3 packs removable, 176 bytes
+	 * reclaimed, 757 KB stranded. Compaction is what turns that into real space.
+	 *
+	 * Under the device durability contract, the new pack is written and flushed
+	 * BEFORE the old one is deleted. A crash in between leaves both, holding byte-identical
+	 * copies of the live objects under the same digests -- a duplicate, not a contradiction,
+	 * and `LoadPacks` resolves it deterministically by keeping the earlier pack. A crash before
+	 * the new pack is durable changes nothing at all. Namespace durability is still R-015:
+	 * losing the new name after deleting the old one can affect both retained roots.
+	 *
+	 * Refuses while a batch is open. Returns Ok and does nothing when there is nothing to drop.
+	 */
+	ETerrainStorageResult CompactPack(
+		uint64 PackId, const TSet<FTerrainDigest>& Live, int32& OutKept, int32& OutDropped);
 
 private:
 	struct FPackLocation

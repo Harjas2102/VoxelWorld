@@ -1352,3 +1352,113 @@ publication at that size, which is roughly sixteen times 0.035 s. That is still 
 and is now the only part that scales badly. Admission also now counts the capture's outstanding
 set toward the hard bound — previously only today's dirty set was counted, which would have let
 a world hold up to twice the bound it advertises.
+
+---
+
+## D-039 — Object retention exists, is gated off, and DEF-9 stays open (2026-09-21)
+
+**Recorded:** CP-015 · **Class:** technical (per **D-023**) · **Architect ruling, logged
+not asked** · **Scope:** T-124 · **Status:** ACCEPTED
+**Implementation:** Claude (first pass) and Codex (review and repair), per **D-028**.
+
+### 1. What was built
+
+A mark-and-sweep over the object store, reachable through `Terrain.Reclaim`. It marks from both
+root slots, deletes unreachable loose objects, and **compacts partly dead packs** by rewriting
+them without their garbage.
+
+Compaction is not optional, and the number says why. A pack is removable only when nothing in it
+is live, but index path-copying **shares** pages between generations by design, so an old pack
+keeps at least one live page essentially forever. Measured on a three-generation world: **0 of 3
+packs removable, 176 bytes reclaimed, 757 KB stranded** out of 2.68 MB. With compaction the same
+world reclaimed **666 KB — 25% of the store — and stranded nothing.**
+
+### 2. The review found six defects in the first pass, and they were real
+
+The first implementation was mine; the review was Codex's, which is what **R-016** asks for and
+what the author of a piece of work cannot do for it. Recorded in
+`Docs/reviews/P-004-review-codex-retention.md`. The findings that mattered:
+
+1. **The mark named payloads without reading them.** A hand-rolled page walker added each leaf's
+   payload digest to the live set without loading it, so a checkpoint with a *missing* payload
+   marked clean and reclamation proceeded. Marking now uses `TerrainIndexEnumerate` — the same
+   traversal restore uses — through a tracking store that records what it actually loaded, so
+   the live set is by construction **what a restore would need**. This is the better design and
+   it is not a detail: a mark that can disagree with restore is a mark that can delete a world.
+2. **Root validity was cached.** I refreshed the slot pair after publication, which does not
+   cover damage or failed publication afterwards. Every pass now re-reads both on-disk slots.
+3. **Compaction trusted the bytes it copied.** Survivors are now BLAKE3-verified before writing
+   and read back through the ordinary content-addressed path before the original is removed.
+4. **A torn replacement poisoned the next pack id until restart.** A failed write that still left
+   a file made every later capture retry the occupied name. A failed write that leaves a file now
+   consumes its id.
+5. **The fallback assertion was theatre.** My test computed `HashesAtG8` and never compared it.
+   The replacement damages the newer slot on a device copy, restores through the ordinary path,
+   and compares the older generation's terrain hashes.
+6. **Failure reporting was false after partial work.** The console said "Nothing was deleted" for
+   every failure, including I/O failures that stop mid-sweep. It now reports what completed.
+
+A seventh finding was about my measurement rather than my code, and it invalidated a result I had
+already reported: **repeating `Add` on solid terrain is idempotent.** My two production runs
+changed `voxels=0` and therefore never created the extra generations the measurement needed. The
+harness now alternates Add/Remove/Add and refuses to measure unless voxels actually changed.
+
+### 3. Ruling: the pass is gated off pending R-015
+
+`Terrain.Reclaim` does nothing unless the process carries `-TerrainRetentionExperiment`.
+
+I had written that "crash safety comes free from content addressing". That is true for a process
+crash and false for power loss, and the difference is the whole ruling. Compaction removes the
+original pack **after** writing a replacement, and a replacement can hold objects shared by
+*both* roots. If the replacement's directory entry is not durable — which **P-004 §12 leaves
+unproven on Windows (R-015)** — that one loss defeats both retained generations simultaneously.
+
+Every other failure path in this system preserves a fallback: a failed capture leaves the
+previous root, a torn pack is unreferenced garbage, a failed publication leaves the other slot.
+This is the only operation that can take both. It does not get to run on a player's world on the
+strength of a readback in the same process.
+
+### 4. DEF-9 is **not** closed
+
+What exists is a synchronous diagnostic on the game thread, scheduled by hand. P-003 §5 specifies
+an incremental, off-thread, bounded-buffer collector with retention pins and an epoch protocol,
+and none of that is built. Journal trimming is untouched — worth about 49 KB per checkpoint
+interval against 33 MB of payloads, so it was correctly deprioritised, not done. Generator
+migration and the broader crash matrix remain separate work.
+
+Backup, migration and sync consumers must not be enabled alongside this pass until the pin/epoch
+and exclusive-writer protocols exist.
+
+### 5. Measured on a real world
+
+`Tools/Test-TerrainRetention.py` builds three genuinely distinct generations (Add / Remove /
+Add; 539,904 / 538,368 / 538,368 voxels changed; cuts at G=256, G=512, G=768) and verifies 256
+chunk hashes across a restart after each.
+
+| | |
+|---|---|
+| store before / after | **101,658,408 → 67,823,838 bytes** |
+| reclaimed | **33,834,570 bytes** — one full dead generation |
+| terrain | **all 256 hashes survive reclamation and restart** |
+| second sweep | 0 bytes — correctly idempotent |
+
+Two costs fall out of this that were not previously known, and both argue the same way:
+
+- **The pass costs ~16.8 s on the game thread whether or not it reclaims anything** — the
+  idempotent second sweep cost as much as the first. The expense is the **mark**, not the
+  sweep, so production retention means making the *walk* incremental, not just the deletion.
+- **Restore is 13.1 s for 256 chunks.** Checkpointing drove replay to zero; the restore that
+  replaced it is not free and has never been looked at.
+
+Note also that the production run deleted a whole pack and compacted none, while the unit test
+compacts and deletes none. Both are correct and both are needed: the harness re-edits the *same*
+chunks each generation so the oldest pack dies entirely, while the unit test touches *different*
+chunks so path-copying shares subtrees and nothing ever dies whole.
+
+### 6. Consequence worth keeping
+
+Two of the six findings were places where my code *looked* like it checked something and did not
+— a payload digest added to a set instead of loaded, a hash computed instead of compared. Both
+would have passed review by their author, because their author already believed the thing they
+were supposed to prove. That is precisely the shape R-016 names, and it is the argument for
+alternating implementation between agents (**D-028**) rather than treating it as scheduling.

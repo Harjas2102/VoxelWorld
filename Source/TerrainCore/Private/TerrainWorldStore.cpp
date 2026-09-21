@@ -360,5 +360,31 @@ FTerrainStoreResult FTerrainWorldStore::PublishCheckpoint(
 
 	State.Root       = Root;
 	State.Checkpoint = ToPublish;
+
+	// **Re-read both slots, do not assume what they now hold.** Publication wrote the inactive
+	// slot, so the pair has changed: the slot that was current is now the previous generation,
+	// and the one just written is current. `State.RootSlots` was previously filled only by
+	// Open(), which meant that after any capture it described the world as it was at startup.
+	//
+	// Keep diagnostic state current. Retention also reads the disk slots independently before
+	// each pass, because later damage or a failed publication can invalidate this cache.
+	int32 BestIndex = INDEX_NONE;
+	const ETerrainStorageResult Reread =
+		RootSlots.Read(State.Identity, State.RootSlots[0], State.RootSlots[1], BestIndex);
+	if (Reread == ETerrainStorageResult::Ok)
+	{
+		State.bRootRedundancyIntact = State.RootSlots[0].bValid && State.RootSlots[1].bValid;
+	}
+	else
+	{
+		// The checkpoint IS published and durable; only our picture of the slots is uncertain.
+		// Stop claiming redundancy; reclamation must validate the actual pair (P-004 §8).
+		State.bRootRedundancyIntact = false;
+		UE_LOG(LogTerrainCore, Warning,
+			TEXT("World store: root generation %llu published, but the slot pair could not be ")
+			TEXT("re-read (%s). Reclamation must revalidate both on-disk slots before deletion."),
+			Root.Generation, TerrainStorageResultName(Reread));
+	}
+
 	return FTerrainStoreResult::Ok();
 }

@@ -94,6 +94,9 @@ public:
 	/** Read-only access for gameplay questions a collision trace cannot answer (§4.3). */
 	bool QueryPoint(const FIntVector& VoxelPos, FTerrainPointSample& OutSample) const;
 
+	/** Manual retention diagnostic; synchronous, and refused during checkpoint capture. */
+	void ReclaimStore();
+
 private:
 	/** Creates and initializes the configured backend. Idempotent; logs every failure path. */
 	void CreateBackend(UWorld& InWorld);

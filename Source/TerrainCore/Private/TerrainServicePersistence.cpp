@@ -4,9 +4,12 @@
 #include "TerrainCommitJournal.h"
 #include "TerrainJournalReplay.h"
 #include "TerrainCheckpoint.h"
+#include "TerrainRetention.h"
 #include "TerrainWorldField.h"
 #include "TerrainSettings.h"
 #include "TerrainCore.h"
+#include "Misc/CommandLine.h"
+#include "Misc/Parse.h"
 
 #include "Engine/World.h"
 #include "Misc/DateTime.h"
@@ -294,6 +297,55 @@ void UTerrainService::CloseWorldStore()
 	DirtyChunks.Reset();
 	LivePersistencePins.Reset();
 	bCheckpointDisabled = false;
+}
+
+void UTerrainService::ReclaimStore()
+{
+	check(IsInGameThread());
+	// P-004 section 12 still gates production use on namespace-durability evidence.
+	// Compaction can move objects shared by BOTH roots, so fallback alone cannot cover
+	// loss of a replacement pack's name after the original was deleted (R-015).
+	if (!FParse::Param(FCommandLine::Get(), TEXT("TerrainRetentionExperiment")))
+	{
+		UE_LOG(LogTerrainCore, Warning,
+			TEXT("Terrain.Reclaim: disabled pending R-015 durability acceptance. ")
+			TEXT("Isolated test worlds may opt in with -TerrainRetentionExperiment."));
+		return;
+	}
+
+	if (WorldStore == nullptr || !WorldStore->IsOpen())
+	{
+		UE_LOG(LogTerrainCore, Warning, TEXT("Terrain.Reclaim: this world has no open store."));
+		return;
+	}
+	if (CapturePump.IsActive())
+	{
+		// Retention would refuse anyway; saying so here is clearer than reporting its error.
+		UE_LOG(LogTerrainCore, Warning,
+			TEXT("Terrain.Reclaim: a checkpoint capture is in flight. Try again once it lands."));
+		return;
+	}
+
+	FTerrainRetentionStats Stats;
+	const FTerrainStoreResult Result = TerrainReclaimStore(*WorldStore, Stats);
+	if (!Result.IsOk())
+	{
+		// A validation failure precedes deletion, but an I/O failure can follow a partial
+		// sweep. Report the completed work instead of claiming the device is unchanged.
+		UE_LOG(LogTerrainCore, Warning,
+			TEXT("Terrain.Reclaim: stopped (%s); completed %d loose deletions, %d pack deletions, ")
+			TEXT("%d compactions. Recovery dependencies are retained."), *Result.ToString(),
+			Stats.LooseDeleted, Stats.PacksDeleted, Stats.PacksCompacted);
+		return;
+	}
+
+	UE_LOG(LogTerrainCore, Display,
+		TEXT("**** Terrain.Reclaim: %d live objects; %d/%d loose deleted; of %d packs %d deleted, ")
+		TEXT("%d compacted (%d dead objects dropped); %lld bytes reclaimed, ")
+		TEXT("in %.3f s. ****"),
+		Stats.LiveObjects, Stats.LooseDeleted, Stats.LooseScanned, Stats.PacksScanned,
+		Stats.PacksDeleted, Stats.PacksCompacted, Stats.ObjectsDroppedFromPacks,
+		Stats.BytesReclaimed, Stats.Seconds);
 }
 
 void UTerrainService::MaybeCaptureCheckpoint()

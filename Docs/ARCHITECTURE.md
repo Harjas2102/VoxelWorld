@@ -1016,11 +1016,28 @@ chunk work is spread, so what remains at that size is publication, about sixteen
 Admission now counts the capture's outstanding set toward the hard bound, which it previously
 did not.
 
-**What does not exist.** Spread publication (still one step, 0.035 s at the trigger),
-Empty/SparseDiff compaction (P-003 §6 rules it out until a backend can state its own base),
-settlement, SQLite, retention or GC — **the store only grows, and packs cannot be reclaimed
-object by object** — the exclusive-writer lease P-003 §5 requires, and the crash matrix. Build
-step 4 is not complete and DEF-1/2/9 remain open.
+**Object retention exists as an experiment, and is gated off (D-039).** A mark-and-sweep over
+the object store, reachable through `Terrain.Reclaim` **only** when the process carries
+`-TerrainRetentionExperiment`. It marks from both on-disk root slots — re-read every pass, not
+cached — walking each checkpoint with the same `TerrainIndexEnumerate` traversal restore uses,
+so the live set is by construction *what a restore would need*. Payloads are loaded and decoded,
+not merely named. Partly dead packs are rewritten without their garbage, because path-copying
+shares index pages between generations and a pack therefore almost never becomes entirely dead:
+before compaction, a three-generation world freed 176 bytes and stranded 757 KB.
+
+**It is gated because of R-015, and the reason is specific.** Compaction removes the original
+pack after writing a replacement, and a replacement can hold objects shared by *both* roots. If
+the new name is not durable across power loss — which P-004 §12 leaves unproven on Windows —
+that single loss defeats both retained generations at once. Every other failure in this system
+leaves a fallback; this one would not. Content addressing makes a *process* crash harmless here,
+and that is not the same claim.
+
+**What does not exist.** Production retention — the pass is synchronous on the game thread,
+scheduled by hand, and is not P-003 §5's incremental off-thread collector with pins and epochs;
+journal trimming; spread publication (still one step, 0.035 s at the trigger); Empty/SparseDiff
+compaction (P-003 §6 rules it out until a backend can state its own base); settlement; SQLite;
+the exclusive-writer lease P-003 §5 requires; and the crash matrix. Build step 4 is not complete
+and DEF-1/9 remain open — **DEF-9 is not closed by this increment.**
 
 - **Commit:** journal append + durable flush precedes terrain broadcast and
   TerrainCommitted; SQLite settlement follows, with idempotent `(WorldId, OpSeq)`
@@ -1556,6 +1573,7 @@ Run against `FMemoryTerrainBackend`. Seconds, on every build.
 | `Persistence.Storage.PlatformDevice` | **Implemented, passing.** Against the real file system: an in-place overwrite **does not truncate**, a wrong-length overwrite is refused with the file intact, an append lands at the end, and an escaping path is refused before it reaches the disk |
 | `Persistence.Checkpoint.Equivalence` | **Implemented, passing — the cut that bounds replay.** Six edits, a capture at G=6, then a restart that restores the cut and replays **none** of them; three more edits and a second restart that replays **exactly three**. Every case ends in chunk-hash equality, because a checkpoint that bounded replay while losing terrain would be worse than none. Also covers a second capture after a replay-restart (the case where a chunk edited before the restart must still reach the next cut), and P-003 §4's sentinel trap: a dirty chunk that is not resident fails the capture rather than being published as unchanged |
 | `Persistence.Capture.Pump` | **Implemented, passing.** A checkpoint taken while the world keeps changing: a part-finished capture is interleaved with edits that hit chunks it still owes, and the restored checkpoint is the world **at G**, not as it is now. The interleaving is asserted rather than assumed — copy-before-write must actually have fired, and the live world must actually have moved on, so the match cannot pass vacuously. Also: a zero budget still makes progress, and an abandoned capture publishes nothing and leaves no open batch |
+| `Persistence.Retention` | **Implemented, passing.** Mark-and-sweep with the safety cases that matter: a damaged root slot after Open cannot authorise deletion from a stale healthy cache; a missing payload reference and a wrong root-page length each refuse with **every device byte unchanged**; a failed replacement write, a torn replacement and a failed original deletion are each injected, after which **both** retained generations still restore through the ordinary path and reclamation retries successfully in the same open store. The older generation's terrain is compared by hash, not merely computed |
 | `Persistence.Commit.Journal` | **Implemented, passing.** What a committed operation becomes as a record: `NoEconomy`; `PhysicalAvailability = Unavailable` with an **empty** list even when the backend reported volumes, because the production adapter's materials are zero and P-003 §2 forbids encoding unknown as a measured zero; changed keys sorted into index-key order rather than footprint order; every changed revision advancing by exactly one; a zero token digest, because protocol 2 does not exist. Also that the queue treats the sequence as **provisional** and does not consume it when a commit is refused, and that a storage-faulted service closes admission with `ShuttingDown`. **Does not cover `CommitOp`'s internal ordering** — see the note below the table |
 | `Persistence.Journal.Writer` | **Implemented, passing.** Create, append, seal and rotate, with every claim about the written bytes checked by the **scanner** rather than by the writer's own state. Covers: state recovered across a reopen; a sequence gap, a repeat and a foreign `WorldTag` all refused; rotation sealing its predecessor and carrying continuity evidence at both ends; a **torn append** closing the writer and still refusing to append after a reopen; an interrupted rotation leaving an ignorable **orphan** with no acknowledged record lost; a newer unanchored **non-empty** segment refusing boot; a named-but-**missing** segment refusing boot rather than reporting an empty journal |
 | `Persistence.WorldStore.Lifecycle` | **Implemented, passing.** Create → open → append → publish checkpoint → reopen, on one directory. A fresh world is **7 files**. Covers: the base descriptor's self-referential digest; root generation advancing; a **torn root publication** leaving the previous checkpoint current with redundancy reported broken, then repaired by republishing; a checkpoint beyond the journal head refusing to open; a cross-wired world (this world's base in front of another world's roots) refused with `WorldMismatch` |

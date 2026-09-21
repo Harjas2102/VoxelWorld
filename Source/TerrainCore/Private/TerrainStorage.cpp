@@ -839,6 +839,9 @@ ETerrainStorageResult FTerrainFileObjectStore::CommitBatch()
 	const ETerrainStorageResult Result = Device.WriteNew(PackPath, Image);
 	if (Result != ETerrainStorageResult::Ok)
 	{
+		// A failed write may still leave a torn immutable file. Do not make every later
+		// capture retry that occupied name until the process restarts.
+		if (Device.Exists(PackPath)) { ++NextPackId; }
 		AbandonBatch();
 		return Result;
 	}
@@ -870,6 +873,198 @@ bool FTerrainFileObjectStore::LoadFromPack(const FPackLocation& Where, TArray<ui
 	OutBytes.Reset();
 	OutBytes.Append(Image.GetData() + Where.Offset, Where.Length);
 	return true;
+}
+
+ETerrainStorageResult FTerrainFileObjectStore::ListLooseObjects(TArray<FTerrainDigest>& OutDigests) const
+{
+	OutDigests.Reset();
+
+	static const FString Suffix = TEXT(".tobj");
+	for (int32 Prefix = 0; Prefix < 256; ++Prefix)
+	{
+		const FString Directory = FString::Printf(
+			TEXT("%s/%02x"), TerrainStoragePaths::ObjectsDirectory, Prefix);
+
+		TArray<FString> Names;
+		const ETerrainStorageResult Listed = Device.ListFiles(Directory, Names);
+		if (Listed == ETerrainStorageResult::NotFound)
+		{
+			continue;   // a fan-out directory that was never created
+		}
+		if (Listed != ETerrainStorageResult::Ok)
+		{
+			return Listed;
+		}
+
+		for (const FString& Name : Names)
+		{
+			if (!Name.EndsWith(Suffix, ESearchCase::CaseSensitive))
+			{
+				continue;
+			}
+			FTerrainDigest Digest;
+			if (TerrainPersistDigestFromHex(Name.LeftChop(Suffix.Len()), Digest))
+			{
+				OutDigests.Add(Digest);
+			}
+			// A file whose name is not a digest is left alone. Reclamation deleting something
+			// it could not name would be deleting something it does not understand.
+		}
+	}
+	return ETerrainStorageResult::Ok;
+}
+
+ETerrainStorageResult FTerrainFileObjectStore::ListPacks(TArray<uint64>& OutPackIds) const
+{
+	OutPackIds.Reset();
+
+	TArray<FString> Names;
+	const ETerrainStorageResult Listed =
+		Device.ListFiles(TerrainStoragePaths::PacksDirectory, Names);
+	if (Listed == ETerrainStorageResult::NotFound)
+	{
+		return ETerrainStorageResult::Ok;
+	}
+	if (Listed != ETerrainStorageResult::Ok)
+	{
+		return Listed;
+	}
+
+	for (const FString& Name : Names)
+	{
+		uint64 PackId = 0;
+		if (TerrainStoragePaths::ParsePack(Name, PackId))
+		{
+			OutPackIds.Add(PackId);
+		}
+	}
+	OutPackIds.Sort();
+	return ETerrainStorageResult::Ok;
+}
+
+void FTerrainFileObjectStore::GetPackContents(uint64 PackId, TArray<FTerrainDigest>& OutDigests) const
+{
+	OutDigests.Reset();
+	for (const TPair<FTerrainDigest, FPackLocation>& Entry : PackMap)
+	{
+		if (Entry.Value.PackId == PackId)
+		{
+			OutDigests.Add(Entry.Key);
+		}
+	}
+}
+
+int64 FTerrainFileObjectStore::PackSize(uint64 PackId) const
+{
+	return Device.Size(TerrainStoragePaths::Pack(PackId));
+}
+
+ETerrainStorageResult FTerrainFileObjectStore::DeletePack(uint64 PackId)
+{
+	const ETerrainStorageResult Result = Device.Delete(TerrainStoragePaths::Pack(PackId));
+	if (Result != ETerrainStorageResult::Ok && Result != ETerrainStorageResult::NotFound)
+	{
+		return Result;
+	}
+
+	// Forget its contents, or a later read would resolve a digest into a file that is gone.
+	for (auto It = PackMap.CreateIterator(); It; ++It)
+	{
+		if (It.Value().PackId == PackId)
+		{
+			It.RemoveCurrent();
+		}
+	}
+	return ETerrainStorageResult::Ok;
+}
+
+ETerrainStorageResult FTerrainFileObjectStore::CompactPack(
+	uint64 PackId, const TSet<FTerrainDigest>& Live, int32& OutKept, int32& OutDropped)
+{
+	OutKept = 0;
+	OutDropped = 0;
+
+	if (bBatchOpen)
+	{
+		return ETerrainStorageResult::IoError;
+	}
+
+	// What this pack holds, split into what survives and what does not.
+	TArray<FTerrainDigest> Contents;
+	GetPackContents(PackId, Contents);
+	if (Contents.Num() == 0)
+	{
+		return ETerrainStorageResult::Ok;   // unreadable or already empty; not ours to rewrite
+	}
+
+	TArray<FTerrainDigest> Survivors;
+	for (const FTerrainDigest& Digest : Contents)
+	{
+		if (Live.Contains(Digest)) { Survivors.Add(Digest); } else { ++OutDropped; }
+	}
+	OutKept = Survivors.Num();
+
+	if (OutDropped == 0 || OutKept == 0)
+	{
+		// Nothing to drop, or nothing to keep -- the latter is a whole-pack delete, which is
+		// the caller's decision and a different operation.
+		return ETerrainStorageResult::Ok;
+	}
+
+	TArray<uint8> Image;
+	if (Device.Read(TerrainStoragePaths::Pack(PackId), Image) != ETerrainStorageResult::Ok)
+	{
+		return ETerrainStorageResult::IoError;
+	}
+
+	// Re-buffer the survivors as a new batch, so the pack is written by exactly the code that
+	// writes every other pack -- one file, one flush, one format.
+	bBatchOpen = true;
+	BatchBuffer.Reset();
+	BatchEntries.Reset();
+
+	for (const FTerrainDigest& Digest : Survivors)
+	{
+		const FPackLocation* Where = PackMap.Find(Digest);
+		if (Where == nullptr || Where->PackId != PackId
+			|| Where->Offset < 0 || Where->Length < 0
+			|| Where->Offset + Where->Length > Image.Num())
+		{
+			AbandonBatch();
+			return ETerrainStorageResult::IoError;
+		}
+
+		FPackLocation Moved;
+		const TArrayView<const uint8> Survivor(Image.GetData() + Where->Offset, Where->Length);
+		if (TerrainPersistDigest(Survivor) != Digest)
+		{
+			AbandonBatch();
+			return ETerrainStorageResult::IoError;
+		}
+		Moved.Offset = BatchBuffer.Num();
+		Moved.Length = Where->Length;
+		BatchBuffer.Append(Image.GetData() + Where->Offset, Where->Length);
+		BatchEntries.Add(Digest, Moved);
+	}
+
+	// Durable first. Until this returns Ok the original is the only copy, and it is untouched.
+	const ETerrainStorageResult Written = CommitBatch();
+	if (Written != ETerrainStorageResult::Ok)
+	{
+		return Written;   // CommitBatch already abandoned the batch
+	}
+	// Verify the replacement through the normal content-addressed read path before
+	// removing the original. Namespace durability across power loss remains R-015.
+	for (const FTerrainDigest& Digest : Survivors)
+	{
+		TArray<uint8> Verified;
+		if (!LoadObject(Digest, Verified)) { return ETerrainStorageResult::IoError; }
+	}
+
+	// CommitBatch has repointed every survivor at the new pack, so what still names the old one
+	// is exactly the garbage. Deleting the file now is safe; a crash before this point leaves a
+	// harmless duplicate rather than a loss.
+	return DeletePack(PackId);
 }
 
 ETerrainStorageResult FTerrainFileObjectStore::LoadPacks()
