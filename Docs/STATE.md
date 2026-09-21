@@ -5,8 +5,50 @@
 
 ---
 
-**Checkpoint:** CP-015 · **Date:** 2026-09-20
+**Checkpoint:** CP-016 · **Date:** 2026-09-21
 **Phase:** 1 — Terrain Feasibility
+**Expected next agent:** either (D-028 — whichever is available; this checkpoint alternated
+mid-increment and that worked, see D-039)
+
+## What happened at CP-016
+
+**Checkpoint capture went from unaffordable to on by default, and the persistence stack got its
+crash evidence.** Six increments, each gated on a measurement, and three of them overturned a
+prediction that had been written down and believed.
+
+| | |
+|---|---|
+| **T-120** (D-035) | Bulk adapter `ReadRegion` — one lock and one accelerator per chunk instead of 32,768 locked octree traversals. Identical reads (`Adapter.DensityContract` 20/20, fixture hashes unchanged). **P-003 §4 had named this as the cause of the capture stall; it was 1.5% of it.** |
+| **T-121** (D-036) | Objects are written in **packs** — one file, one flush per capture instead of 59. An `fsync` costs ~3 ms *regardless of size*, so the cost was never *when* the store syncs but *how many files*. D-035's own preferred fix (a deferred flush barrier) was measured first and is **4 ms slower**. Capture 0.197 s → 0.010 s. |
+| **T-122** (D-037) | Measured capture at its **real 256-chunk trigger**: 0.162 s, not the 1.5 s that had been extrapolated. `bCheckpointCapture` now defaults **true**. |
+| **T-123** (D-038) | The **incremental capture pump** — DEF-2 closed. Copy-before-write needs no copy: a chunk an edit is about to change is captured *immediately, out of order*, from its pre-edit state. Longest unbroken step 0.162 s → **0.035 s**. |
+| **T-124** (D-039) | **Object retention**, built by Claude, reviewed and repaired by Codex. 33.8 MB reclaimed on a real world, all 256 hashes surviving. **Gated off** pending R-015. |
+| **T-125** (D-040) | **The crash matrix** — every mutating write failed in turn, hard and torn; every recovery matched the reference world at its own OpSeq. |
+
+**The persistence stack is complete enough to trust with a player's world**, with two named
+exceptions carried below. Terrain survives restart, replay is bounded by a checkpoint, capture
+no longer stalls the game, the store can be reclaimed, and the recovery protocol has been
+attacked at every write point rather than at the points someone thought of.
+
+### What this checkpoint learned about its own process
+
+Three predictions were acted on and wrong before being measured (P-003 §4 on where capture time
+went, D-035 on the fsync barrier, D-036 on the trigger cost). Then a measurement **ran, passed,
+and measured nothing**, because repeating `Add` on solid terrain is idempotent — caught by
+Codex, not by me. Then the crash matrix showed the last form: a test asserting only that
+recovery *succeeds* would have passed on a world that came back wrong.
+
+The rule that covers all four: **assert the state, not the absence of an error, and check that
+the thing you varied actually varied.**
+
+### Evidence
+
+37/37 TerrainCore automation. `Terrain.SelfTest` PASS, `Adapter.DensityContract` 20/20,
+`Test-TerrainCheckpoint.py` PASS (four launches, eight hashes identical, wrong-base boot closes
+access with every save byte-unchanged), `MP.Convergence` PASS (3 clients, 244 commits, 15
+captures, 2 chunks taken by copy-before-write, 0 stalls), `Test-TerrainRetention.py` PASS
+(101,658,408 → 67,823,838 bytes, all 256 hashes surviving reclamation and restart),
+`Terrain.StressCapture` at the real trigger.
 
 ## What happened at CP-015
 
@@ -912,6 +954,36 @@ that is **R-015**, and no in-process injection can speak to it.
 retention running for real, and the crash matrix's claims extending from lost writes to power
 loss. After that: production retention (incremental, off-thread, P-003 §5's pins and epochs) and
 journal trimming. DEF-1 and DEF-9 remain open.
+
+## Drift checks (VISION.md, run at CP-016)
+
+**NO FLAG MOVED, and the one that has been half true for three checkpoints is now true.**
+
+- [x] **The world is malleable and persistent — NOW TRUE, and this is the checkpoint that
+      earns it.** CP-015 recorded that Pillar 1's *"the server remembers everything at next
+      login"* was still false, and warned that two checkpoints with that sentence false was
+      acceptable only while the work was real. It was. The production harness launches the game
+      four times and every affected chunk hash is identical across all four; a restart restores
+      the checkpoint and replays zero edits; a three-generation world survives reclamation and
+      restart with all 256 hashes intact. **The server remembers.**
+- [x] **Every gameplay system is server-authoritative — CLEARED, untouched.** Persistence runs
+      on the authority only; a client replaying a journal is refused by construction.
+- [x] **The terrain backend remains replaceable — CLEARED, and tested harder than before.**
+      T-120 rewrote `ReadRegion` inside `TerrainBackendVPLegacy` using plugin types; nothing
+      moved across the D-011 boundary, `Build.cs` is unchanged, and `Adapter.DensityContract`
+      proves the new path returns the same bytes as the old one.
+- [x] **Voxels are still invisible to the player (D-015).** Nothing at CP-016 is player facing
+      — with one honest caveat: `bCheckpointCapture` now defaults on, so a player *could* feel
+      a 0.035 s publication step. That is measured, bounded and below the gate, and it is the
+      first time persistence has been able to affect a frame at all.
+- [x] Terrain is smooth-voxel and player-deformable · tech path still leads to electricity ·
+      one planet, 16–32 players · incremental, Minecraft-alpha style · the same five
+      inspiration games.
+
+**What would re-flag these.** Any gameplay code or asset that calls the plugin again; any edit
+path that bypasses `RequestEdit`; a `Build.cs` gaining a plugin dependency; a client applying
+an edit it was not told about; persistence storing an engine or plugin type; or a checkpoint
+stall growing back past the half-second warning threshold.
 
 ## Drift checks (VISION.md, run at CP-015)
 

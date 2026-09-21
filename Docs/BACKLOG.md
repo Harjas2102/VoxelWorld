@@ -87,11 +87,14 @@ deliberately removing arbitrary terrain manipulation from Pillar 1).
 - **1B** — `TerrainEditOp`, authoritative request path, revision IDs, 2–3 client
   same-region test. — ✅ **DONE (CP-014, T-115)**
 - **1C** — Material field; soil/stone/ore query; **resource yield from removed material**.
-- **1D** — Persistence journal, snapshot + compaction prototype, restart test.
-  *(CP-015: architecture adopted (T-116), byte format fixed and independently verified
-  (T-117, T-118), codecs and the storage device built (T-117, T-119). The journal writer,
-  world store, commit path, capture pump, settlement and recovery are NOT built, nothing is
-  written to disk, and no edit survives a restart. DEF-1/2/9 stay open.)*
+- **1D** — Persistence journal, snapshot + compaction prototype, restart test. — ✅ **DONE
+  for terrain (CP-016, T-116…T-125)**. Edits are journalled durably before broadcast, a
+  checkpoint bounds replay, capture is incremental and on by default, the store can be
+  reclaimed, and every mutating write has been crash-injected with recovery landing on an
+  exact point in real history. **The server remembers.**
+  *Not done: settlement and its SQLite ledger (build step 6, which is what DEF-1 needs);
+  production retention — the pass is synchronous and gated off pending R-015 (DEF-9);
+  journal trimming; and R-015 itself, which is the gate on both.*
 - **1E** — Join-in-progress, chunk relevancy, compression/batching only as needed.
 - **1F** — Stress profile, collision, foliage, nav, streaming → **decide the backend**.
 
@@ -220,6 +223,43 @@ T-101B sub-step 1D, which requires the multiplayer-capable version instead.
 
 ## Done
 
+- **T-125** *(CP-016)* **The crash matrix.** P-003 §8's *"inject at every write"*, taken
+  literally: a scripted session of nine edits and two checkpoints replayed **once per mutating
+  write**, failing that write and only that write, hard and torn. `FTerrainFaultDevice` gained
+  `FailAtMutation`, treating every mutating operation as one ordered sequence — a crash is a
+  *moment*, and the per-op-type faults could only express a *kind*. The assertion is the work:
+  each recovery must equal a reference world **at its own OpSeq** by chunk hash, because a
+  world that comes back holding a state it was never in is worse than one that refuses.
+  28 of 40 injections recovered exactly, 12 refused and **all of those were crashes during
+  world creation**, 0 landed on a state that never existed. `Restart.CrashMatrix`'s terrain
+  half is satisfied; the payout half needs settlement. **D-040.**
+- **T-124** *(CP-016)* **Object retention and pack compaction.** Mark-and-sweep from both
+  on-disk root slots, marking through the same traversal restore uses so the live set is by
+  construction what a restore would need. Compaction is not optional: path-copying shares index
+  pages, so a pack almost never dies whole — before compaction a three-generation world freed
+  176 bytes and stranded 757 KB. Measured on a real world: **101,658,408 → 67,823,838 bytes**,
+  all 256 hashes surviving reclamation and restart. **Gated behind
+  `-TerrainRetentionExperiment` pending R-015**, because compaction can relocate objects shared
+  by both roots. Written by Claude, reviewed and repaired by Codex — six defects found.
+  **D-039**, review in `Docs/reviews/P-004-review-codex-retention.md`.
+- **T-123** *(CP-016)* **The incremental capture pump — DEF-2 closed.** The cut is taken once;
+  chunks are read and encoded a few per frame while edits keep flowing. **Copy-before-write
+  needs no copy**: a chunk an edit is about to change is captured immediately, out of order,
+  from its pre-edit state — the property P-003 §4's dirty banks existed to provide, without a
+  second copy or anything to reconcile. Longest unbroken step 0.162 s → **0.035 s**. **D-038.**
+- **T-122** *(CP-016)* **Capture measured at its real trigger; the default flipped.**
+  `Terrain.StressCapture` dirties exactly `CheckpointDirtyChunkTrigger` chunks through the real
+  edit path. 256 chunks in **0.162 s**, not the 1.5 s that had been extrapolated.
+  `bCheckpointCapture` now defaults **true**. **D-037.**
+- **T-121** *(CP-016)* **Objects are written in packs.** An `fsync` costs ~3 ms *regardless of
+  size*, so the cost was never *when* the store syncs but **how many files**. The obvious fix —
+  a deferred flush barrier — was measured first and is **4 ms slower**. One file and one flush
+  per capture instead of 59: **0.197 s → 0.010 s**. P-004 §13. **D-036.**
+- **T-120** *(CP-016)* **Bulk adapter `ReadRegion`.** One read lock and one
+  `FVoxelConstDataAccelerator` per chunk instead of 32,768 locked octree traversals, reading
+  identically (`Adapter.DensityContract` 20/20, fixture hashes unchanged). **P-003 §4 had named
+  this as the cause of the capture stall; it was 1.5% of it** — which is why the phase
+  breakdown is now permanent. **D-035.**
 - **T-119** *(CP-015)* **The storage device seam, the object store and the slot pair.**
   `ITerrainStorageDevice` — six mutating operations, because every one is a place a crash can
   happen and a smaller surface is a smaller crash matrix — with a real platform device, an

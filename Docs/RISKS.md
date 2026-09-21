@@ -457,10 +457,27 @@ D-028 was written for. Keep writing the breadcrumb *before* the risky half, not 
   than touching the good one. That is the *containment* half of P-004 §12's argument,
   demonstrated rather than asserted. It is **not** the durability half: a fault injected in
   process is not a power loss, and nothing here tests whether a directory entry survives one.
-- **Mitigation experiment:** the `Restart.CrashMatrix` fault injection of §6.2 extended to
-  power-loss-class testing, or an explicit decision to adopt the container mode instead.
-- **Owner / task:** build step 4, before the storage owner carries a real edit.
-- **Result:** *open — containment now demonstrated, durability still unproved.*
+- **CP-016 — containment is now demonstrated exhaustively, and this risk became the gate on
+  two separate things.** `Persistence.CrashMatrix` (**D-040**) fails **every** mutating write
+  of a scripted session in turn, hard and torn, and every recovery matched the reference world
+  at its own OpSeq; all 40 injections are accounted for, and no established world was made
+  unopenable. That is the containment argument proved across the whole write sequence rather
+  than at chosen points. **It is still not power loss.** A fault injected in process models a
+  *lost write*; nothing in it can say whether a directory entry survives a power cut.
+- **And retention raised the stakes (D-039).** Pack compaction removes the original file after
+  writing a replacement, and a replacement can hold objects shared by **both** roots — so
+  losing that one new name defeats both retained generations at once. Every other failure in
+  this system leaves a fallback; this is the only one that would not. `Terrain.Reclaim` is
+  therefore gated behind `-TerrainRetentionExperiment` until this risk is settled.
+- **Mitigation experiment:** power-loss-class testing of name creation (an external harness, a
+  VM with host-level power control, or an equivalent), or an explicit decision to adopt
+  P-003's preallocated-container mode instead. The latter costs no stored bytes, which is why
+  it stays the cheap escape.
+- **Owner / task:** build step 4. **This is now the highest-value open item in the persistence
+  stack**: it blocks retention running for real, and it is what would extend the crash
+  matrix's claims from lost writes to power loss.
+- **Result:** *open — containment demonstrated exhaustively at CP-016; durability still
+  unproved, and now gating two features rather than one.*
 - **Decision:** *open*
 
 ## R-016 — R3 work reviewed by its own author
@@ -507,8 +524,29 @@ D-028 was written for. Keep writing the breadcrumb *before* the risky half, not 
   **segment scanner's torn-tail logic** — the three places where behaviour is more than a
   byte layout. And no reimplementation can review a **design**: whether schema 2 is the right
   format is still a judgement only a second reader can second.
+- **CP-016 — the residual was attacked by the other agent, and it was right to be.** T-124's
+  retention pass was written by Claude and reviewed by Codex (**D-039**), which is the first
+  R3 increment this project has put through a genuine second reader. It found **six defects**,
+  and the two that mattered have a shape worth recording because neither would ever have been
+  caught by its author:
+  - the mark **added** payload digests to the live set instead of **loading** them, so a
+    checkpoint with a missing payload marked clean and reclamation proceeded;
+  - the fallback test **computed** its comparison hashes and never **compared** them.
+
+  Both *looked* like checks. Their author already believed the thing they were supposed to
+  prove, which is exactly why he wrote them that way and exactly why he would have read past
+  them again. A seventh finding invalidated a result already reported to the Director: a
+  workload repeating `Add` on solid terrain is idempotent, so two "production" runs changed
+  zero voxels and measured nothing.
+- **What that does to this risk.** It does not close it — P-004 and its codecs are still
+  single-author, and that is what this risk names. But it converts the argument from a
+  plausible worry into a measured hit rate: **one increment, six real defects, two of them
+  recovery-critical.** The case for alternating authorship (**D-028**) is no longer a process
+  preference; it is the only reason those two defects are not in the save format today.
 - **Owner / task:** residual is a design read by the vendor that did not write T-117.
-- **Result:** *substantially mitigated — the byte-level claim is proved; decoder behaviour,
-  the index algorithm and the design judgement remain single-author work.*
+- **Result:** *substantially mitigated on the byte-level claim, and newly evidenced on the
+  general one: cross-agent review of R3 work found six defects in a single increment.
+  P-004's decoder behaviour, the index algorithm and the design judgement remain
+  single-author work.*
 - **Decision:** *open, and now cheap to close either way. The Director may accept the residual
   and move on; that is his call and not a thing to re-litigate.*

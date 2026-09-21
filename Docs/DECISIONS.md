@@ -1036,7 +1036,7 @@ messages for `af67b6f` and `30105b5`.
 
 ## D-035 — The checkpoint stall is index write amplification, not reading (2026-09-20)
 
-**Recorded:** CP-015 · **Class:** technical (per **D-023**) · **Architect ruling, logged
+**Recorded:** CP-016 · **Class:** technical (per **D-023**) · **Architect ruling, logged
 not asked** · **Scope:** T-120 and the increment after it · **Status:** ACCEPTED
 
 ### 1. Context
@@ -1101,7 +1101,7 @@ next claim about where the time goes is checkable rather than inherited.
 
 ## D-036 — Objects are written in packs; the cost was the number of files (2026-09-20)
 
-**Recorded:** CP-015 · **Class:** technical (per **D-023**) · **Architect ruling, logged
+**Recorded:** CP-016 · **Class:** technical (per **D-023**) · **Architect ruling, logged
 not asked** · **Scope:** T-121 · **Status:** ACCEPTED
 
 ### 1. The candidate I ruled for in D-035 was wrong, and measuring said so first
@@ -1184,7 +1184,7 @@ minutes to price it.
 
 ## D-037 — Checkpoint capture is on by default, measured at its real trigger (2026-09-20)
 
-**Recorded:** CP-015 · **Class:** technical, but with a player-visible consequence · **Architect
+**Recorded:** CP-016 · **Class:** technical, but with a player-visible consequence · **Architect
 ruling, logged not asked** · **Scope:** T-122 · **Status:** ACCEPTED
 
 ### 1. The measurement that had not been taken
@@ -1267,7 +1267,7 @@ at 55% of capture.
 
 ## D-038 — The incremental capture pump, and copy-before-write without the copy (2026-09-20)
 
-**Recorded:** CP-015 · **Class:** technical (per **D-023**) · **Architect ruling, logged
+**Recorded:** CP-016 · **Class:** technical (per **D-023**) · **Architect ruling, logged
 not asked** · **Scope:** T-123, DEF-2 · **Status:** ACCEPTED
 
 ### 1. What changed
@@ -1357,7 +1357,7 @@ a world hold up to twice the bound it advertises.
 
 ## D-039 — Object retention exists, is gated off, and DEF-9 stays open (2026-09-21)
 
-**Recorded:** CP-015 · **Class:** technical (per **D-023**) · **Architect ruling, logged
+**Recorded:** CP-016 · **Class:** technical (per **D-023**) · **Architect ruling, logged
 not asked** · **Scope:** T-124 · **Status:** ACCEPTED
 **Implementation:** Claude (first pass) and Codex (review and repair), per **D-028**.
 
@@ -1467,7 +1467,7 @@ alternating implementation between agents (**D-028**) rather than treating it as
 
 ## D-040 — The crash matrix, taken literally (2026-09-21)
 
-**Recorded:** CP-015 · **Class:** technical (per **D-023**) · **Architect ruling, logged
+**Recorded:** CP-016 · **Class:** technical (per **D-023**) · **Architect ruling, logged
 not asked** · **Scope:** T-125 · **Status:** ACCEPTED
 
 ### 1. What "crash matrix" had to mean
