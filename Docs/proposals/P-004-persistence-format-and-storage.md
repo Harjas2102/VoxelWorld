@@ -645,6 +645,12 @@ no engine-asset type is ever persisted or crosses the adapter boundary (D-011, �
 
 ## 12. Durable publication on Windows — stated, not assumed
 
+> **Superseded in part by P-005 (2026-09-21).** The acceptance gate below is discharged by
+> selecting **Mode B**: objects are now written as frames in four pre-created containers
+> (`containers/c.0`–`c.3`), and an open world creates and removes no names. Every byte table in
+> this packet is unchanged — a frame's body is a §13.3 pack image. `objects/` and `packs/` are
+> read and migrated, never written. See `Docs/proposals/P-005-namespace-durability-containers.md`.
+
 P-003 §4 requires this packet to establish namespace-durability ordering on the tested
 filesystem, and defines a preallocated-container fallback if it cannot be established.
 
@@ -846,7 +852,7 @@ written and flushed, and its live objects are read back, before the original pac
 A failed validation makes no changes; a later I/O failure may leave a partially completed
 sweep and extra files. Torn replacement files consume their IDs even before a restart.
 
-**This does not discharge §12.** Compaction may relocate objects shared by both roots, so
+**This does not discharge §12** *(P-005 does: compaction now copies into a container and truncates, creating no name)*. Compaction may relocate objects shared by both roots, so
 losing a replacement's directory entry after removing the original can defeat both fallback
 generations. Production compaction requires namespace-durability acceptance or the container
 alternative. The diagnostic is synchronous, uses the existing whole-pack I/O, has no retention

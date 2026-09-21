@@ -141,6 +141,12 @@ public:
 	 * overwrites a file it cannot prove is its own -- but it does mean segment IDs are
 	 * consumed by failed attempts, and a caller that keeps retrying one ID makes no progress.
 	 * Reclaiming an orphan's ID is the retention path's job and is not built.
+	 *
+	 * **Not for a production path as written (P-005 §8).** Rotation creates a segment file, and
+	 * an open world must create no names: whether a new directory entry survives a power cut is
+	 * exactly what R-015 could not prove. Production never rotates today. Journal trimming, when
+	 * built, must rotate within a pre-created ring of segment files reset by truncation -- the
+	 * container pattern -- rather than call this.
 	 */
 	FTerrainStoreResult Rotate(uint64 NewSegmentId, int64 UtcMillis);
 

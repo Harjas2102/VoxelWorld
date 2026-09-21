@@ -479,7 +479,8 @@ bool FTerrainCheckpointTest::RunTest(const FString& Parameters)
 		Backend.ClearStreamingInterest(1);
 		for (const auto& Entry : Dirty) TestTrue(TEXT("Dirty pin survives player departure"), Backend.IsRegionResident(Entry.Key));
 
-		Faults.FailAfter(ETerrainStorageOp::WriteNew, 0);
+		// A capture's payloads are one frame appended to the active container (P-005); fail it.
+		Faults.FailAfter(ETerrainStorageOp::Append, 0, TerrainStoragePaths::Container(0));
 		FTerrainCheckpointStats Stats;
 		TestFalse(TEXT("Payload write fault refuses capture"), TerrainCaptureCheckpoint(Store, Backend, Revisions, Dirty, 1, 0, Stats).IsOk());
 		TestEqual(TEXT("Failed capture does not advance cut"), Store.GetState().Checkpoint.G, FTerrainOpSeq(0));

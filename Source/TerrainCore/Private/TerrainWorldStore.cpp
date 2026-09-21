@@ -49,6 +49,24 @@ FTerrainStoreResult FTerrainWorldStore::StoreCheckpointObject(
 	return FTerrainStoreResult::Ok();
 }
 
+FTerrainStoreResult FTerrainWorldStore::SyncBootstrapDirectories()
+{
+	// The world directory itself holds base.tobj and the top-level directories; each of these
+	// holds the fixed files bootstrap created. Nothing else in a world is ever a new name.
+	for (const TCHAR* Directory : { TEXT(""),
+	                                TerrainStoragePaths::RootsDirectory,
+	                                TerrainStoragePaths::JournalDirectory,
+	                                TerrainStoragePaths::ContainersDirectory })
+	{
+		const ETerrainStorageResult Result = Device.SyncDirectory(Directory);
+		if (Result != ETerrainStorageResult::Ok)
+		{
+			return FTerrainStoreResult::Io(Result);
+		}
+	}
+	return FTerrainStoreResult::Ok();
+}
+
 FTerrainStoreResult FTerrainWorldStore::Create(
 	const FTerrainBaseDescriptor& Base,
 	const FTerrainWorldId& World,
@@ -62,8 +80,7 @@ FTerrainStoreResult FTerrainWorldStore::Create(
 		return FTerrainStoreResult::Io(ETerrainStorageResult::AlreadyExists);
 	}
 
-	for (const TCHAR* Directory : { TerrainStoragePaths::ObjectsDirectory,
-	                                TerrainStoragePaths::RootsDirectory,
+	for (const TCHAR* Directory : { TerrainStoragePaths::RootsDirectory,
 	                                TerrainStoragePaths::JournalDirectory })
 	{
 		const ETerrainStorageResult Result = Device.EnsureDirectory(Directory);
@@ -71,6 +88,15 @@ FTerrainStoreResult FTerrainWorldStore::Create(
 		{
 			return FTerrainStoreResult::Io(Result);
 		}
+	}
+
+	// --- 0. the container pool, before any object exists to go in it (P-005 §4) ---------------
+	// Bootstrap: these are the last object-store names this world will ever create. Every
+	// object from here on -- starting with the G=0 descriptor below -- is a frame in one of them.
+	const ETerrainStorageResult LayoutResult = Objects.EnsureLayout();
+	if (LayoutResult != ETerrainStorageResult::Ok)
+	{
+		return FTerrainStoreResult::Io(LayoutResult);
 	}
 
 	// --- 1. the base descriptor, because everything else binds to its digest ---------------
@@ -146,6 +172,15 @@ FTerrainStoreResult FTerrainWorldStore::Create(
 		return JournalResult;
 	}
 
+	// --- 5. make the bootstrap names as durable as the platform allows (P-005 §6) ------------
+	// Everything above created a name, and nothing below will. On Unix this is fsync on each
+	// directory, which closes the window; on Windows it is best effort and says so in the log.
+	const FTerrainStoreResult Synced = SyncBootstrapDirectories();
+	if (!Synced.IsOk())
+	{
+		return Synced;
+	}
+
 	// Open rather than assume: creating a world and then reading it back through the ordinary
 	// path is the cheapest possible check that the two agree.
 	return Open();
@@ -173,9 +208,29 @@ FTerrainStoreResult FTerrainWorldStore::Open()
 		return FTerrainStoreResult::Bad(BaseError);
 	}
 
-	// --- packs, before anything can try to resolve an object ---------------------------------
-	// The descriptor and every index page a previous capture wrote may live inside a pack, so
-	// the location map has to exist before the first LoadObject, not after.
+	// --- the container pool: bootstrap for a world written before P-005 ----------------------
+	// A world created since P-005 already has all four and this creates nothing. An older world
+	// gets its pool here, before the store admits anything, which keeps the rule that an open
+	// world creates no names. Its loose objects and packs stay readable, and retention moves
+	// the live ones into containers.
+	bool bCreatedLayout = false;
+	const ETerrainStorageResult LayoutResult = Objects.EnsureLayout(&bCreatedLayout);
+	if (LayoutResult != ETerrainStorageResult::Ok)
+	{
+		return FTerrainStoreResult::Io(LayoutResult);
+	}
+	if (bCreatedLayout)
+	{
+		const FTerrainStoreResult Synced = SyncBootstrapDirectories();
+		if (!Synced.IsOk())
+		{
+			return Synced;
+		}
+	}
+
+	// --- containers and packs, before anything can try to resolve an object ------------------
+	// The descriptor and every index page a previous capture wrote live inside a frame (or, in
+	// an older world, a pack), so the location map has to exist before the first LoadObject.
 	const ETerrainStorageResult PackResult = Objects.LoadPacks();
 	if (PackResult != ETerrainStorageResult::Ok)
 	{

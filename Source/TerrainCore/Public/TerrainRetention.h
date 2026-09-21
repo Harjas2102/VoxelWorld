@@ -36,23 +36,26 @@
  *    batch and index pages written but not yet named by any root. They are unreachable by
  *    construction and a sweep would be right to delete them and wrong to have run at all.
  *
- * WHAT PACKS COST HERE, and why compaction is not optional (P-004 §13.6). A loose object is
- * deleted individually. **A packed object cannot be.** A pack is removable only when nothing
- * live refers to *any* object inside it -- and that essentially never happens, because index
- * path-copying **shares** pages between generations by design, so an old pack keeps at least one
- * page the current checkpoint still references.
+ * WHAT PACKS COST HERE, and why compaction is not optional (P-004 §13.6). A packed object
+ * cannot be deleted on its own, and index path-copying **shares** pages between generations by
+ * design, so old packs almost never become entirely dead. The first working sweep over a
+ * three-generation world reclaimed 176 bytes and stranded 757 KB. So partly dead storage is
+ * **rewritten without its garbage** rather than waited on.
  *
- * That is not a theory. The first working sweep over a three-generation world deleted **0 of 3
- * packs** and reclaimed 176 bytes while leaving 757 KB of garbage in a 2.68 MB store. Packs made
- * capture sixty-five times faster (D-036) and made reclamation ineffective in the same stroke.
+ * HOW IT IS REWRITTEN, since P-005. Objects live in a fixed pool of pre-created containers. A
+ * container holding dead bytes has its live objects copied into one frame in the active
+ * container, flushed and read back, and only then is it truncated to zero. No name is created
+ * or removed, so a power cut can at most undo the truncation and leave a duplicate -- which is
+ * what lifts the R-015 gate. Before P-005, compaction wrote a replacement pack under a new name
+ * and deleted the original; losing that new name could take objects both roots share.
  *
- * So a partly dead pack is **rewritten without its dead objects** rather than waiting for it to
- * become entirely dead. The new pack is durable before the old is removed, and because objects
- * are content-addressed a crash in between leaves a byte-identical duplicate rather than a
- * contradiction, provided the device's namespace durability contract holds (R-015 remains open).
- * This is a synchronous diagnostic, not the incremental off-thread collector specified in
- * P-003 section 5. Production use also requires storage ownership and retention pins before
- * enabling backup, migration or sync consumers. The service requires an explicit experiment flag.
+ * Objects still in pre-P-005 loose files or packs are migrated the same way: copied into a
+ * container first, and the old files removed only after the copy is durable.
+ *
+ * STILL A DIAGNOSTIC (DEF-9). This is synchronous, on the game thread and scheduled by hand; it is
+ * not the incremental off-thread collector with pins and an epoch protocol that P-003 §5
+ * specifies. No backup, migration or sync consumer may rely on it. The service therefore still
+ * requires an explicit experiment flag -- for that reason, no longer for durability.
  */
 
 struct FTerrainRetentionStats
@@ -60,15 +63,18 @@ struct FTerrainRetentionStats
 	/** Objects reachable from either root slot's checkpoint. */
 	int32 LiveObjects = 0;
 
-	int32 LooseScanned = 0;
-	int32 LooseDeleted = 0;
+	/** Live objects copied out of pre-P-005 loose files and packs into a container. */
+	int32 LegacyObjectsMigrated = 0;
+	/** Pre-P-005 files removed after their live contents were durable in a container. */
+	int32 LegacyFilesDeleted = 0;
 
-	int32 PacksScanned = 0;
-	int32 PacksDeleted = 0;     // nothing in them was live
-	int32 PacksCompacted = 0;   // rewritten without their dead objects
-	int32 PacksKept = 0;        // entirely live, nothing to do
+	/** Whether the pass moved writing to an empty container so the old one could be compacted. */
+	bool bRotated = false;
 
-	int32 ObjectsDroppedFromPacks = 0;
+	int32 ContainersCompacted = 0;   // live objects copied out, then truncated to zero
+	int32 ContainersKept = 0;        // non-empty and entirely live: nothing to do
+
+	int32 ObjectsDropped = 0;
 
 	int64 BytesReclaimed = 0;
 

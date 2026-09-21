@@ -47,6 +47,39 @@ namespace TerrainStorageTest
 		verify(TerrainPersistEncodeRootSlotBody(Root, Body) == ETerrainPersistError::None);
 		return Body;
 	}
+
+	/** Where Needle first occurs in Haystack, or -1. */
+	int32 FindBytes(const TArray<uint8>& Haystack, const TArray<uint8>& Needle)
+	{
+		for (int32 At = 0; At + Needle.Num() <= Haystack.Num(); ++At)
+		{
+			if (FMemory::Memcmp(Haystack.GetData() + At, Needle.GetData(), Needle.Num()) == 0)
+			{
+				return At;
+			}
+		}
+		return -1;
+	}
+
+	/**
+	 * A pre-P-005 pack file's bytes. A container frame's body IS a pack image (P-005 §4.1), so
+	 * the writer that exists is the writer used: one frame, header stripped.
+	 */
+	TArray<uint8> MakeLegacyPackImage(const TArray<TArray<uint8>>& Objects)
+	{
+		FTerrainMemoryStorageDevice Scratch;
+		FTerrainFileObjectStore Store(Scratch);
+		verify(Store.EnsureLayout() == ETerrainStorageResult::Ok);
+		Store.BeginBatch();
+		for (const TArray<uint8>& Object : Objects)
+		{
+			verify(Store.StoreObject(TerrainPersistDigest(Object), Object));
+		}
+		verify(Store.CommitBatch() == ETerrainStorageResult::Ok);
+		TArray<uint8> Frame = *Scratch.Find(TerrainStoragePaths::Container(0));
+		Frame.RemoveAt(0, TerrainFrameHeaderSize);
+		return Frame;
+	}
 }
 
 // ==== Paths =============================================================
@@ -136,9 +169,16 @@ bool FTerrainStorageObjectStoreTest::RunTest(const FString& Parameters)
 
 	FTerrainMemoryStorageDevice Device;
 	FTerrainFileObjectStore Store(Device);
-	TestEqual(TEXT("The objects directory is created"),
-		Store.EnsureLayout(), ETerrainStorageResult::Ok);
+	bool bCreated = false;
+	TestEqual(TEXT("The container pool is created"),
+		Store.EnsureLayout(&bCreated), ETerrainStorageResult::Ok);
+	TestTrue(TEXT("and says it created something"), bCreated);
+	TestEqual(TEXT("as exactly four files"), Device.NumFiles(), TerrainStoragePaths::ContainerCount);
+	TestEqual(TEXT("A second EnsureLayout is Ok"), Store.EnsureLayout(&bCreated), ETerrainStorageResult::Ok);
+	TestFalse(TEXT("and creates nothing"), bCreated);
+	Store.LoadPacks();
 
+	const FString C0 = TerrainStoragePaths::Container(0);
 	const TArray<uint8> Object = Pattern(512, 0x11);
 	const FTerrainDigest Digest = TerrainPersistDigest(Object);
 
@@ -150,8 +190,12 @@ bool FTerrainStorageObjectStoreTest::RunTest(const FString& Parameters)
 
 	TestTrue(TEXT("Storing succeeds"), Store.StoreObject(Digest, Object));
 	TestTrue(TEXT("and the object is now present"), Store.Contains(Digest));
-	TestTrue(TEXT("at exactly the path the naming rule gives"),
+	TestFalse(TEXT("NOT as a loose file -- that would be a new name at runtime (P-005)"),
 		Device.Exists(TerrainStoragePaths::Object(Digest)));
+	TestEqual(TEXT("and no file was created at all"), Device.NumFiles(), TerrainStoragePaths::ContainerCount);
+	TestEqual(TEXT("It is one frame in c.0: header, object, one manifest entry, trailer"),
+		Device.Size(C0), int64(TerrainFrameHeaderSize + 512 + TerrainPackEntrySize + TerrainPackTrailerSize));
+	TestEqual(TEXT("and the valid end is the whole file"), Store.ContainerValidEnd(0), Device.Size(C0));
 
 	{
 		TArray<uint8> Out;
@@ -161,75 +205,121 @@ bool FTerrainStorageObjectStoreTest::RunTest(const FString& Parameters)
 
 	// Content addressing is checked on the way IN.
 	{
+		const int64 Before = Device.Size(C0);
 		const FTerrainDigest Wrong = MakeDigest(0x01);
 		TestFalse(TEXT("Storing under a digest the bytes do not hash to is refused"),
 			Store.StoreObject(Wrong, Object));
-		TestFalse(TEXT("and nothing was written"), Device.Exists(TerrainStoragePaths::Object(Wrong)));
+		TestEqual(TEXT("and nothing was written"), Device.Size(C0), Before);
 	}
 
 	// Storing the same object twice is a success that writes nothing.
 	{
-		const int32 Before = Device.NumFiles();
+		const int64 Before = Device.Size(C0);
 		TestTrue (TEXT("Storing the same object again succeeds"), Store.StoreObject(Digest, Object));
-		TestEqual(TEXT("and adds no file"), Device.NumFiles(), Before);
+		TestEqual(TEXT("and writes nothing"), Device.Size(C0), Before);
 	}
 
-	// ...and on the way OUT. This is the property that lets a reader trust the bytes without
-	// trusting the medium: bit rot under the store is detected, not returned.
+	// ...and on the way OUT: bit rot under the store is detected, not returned.
 	{
-		TArray<uint8>* OnDisk = Device.Find(TerrainStoragePaths::Object(Digest));
-		TestNotNull(TEXT("The object file is reachable for damage"), OnDisk);
-		(*OnDisk)[100] ^= 0xFF;
+		TArray<uint8>* OnDisk = Device.Find(C0);
+		const int32 At = FindBytes(*OnDisk, Object);
+		TestTrue(TEXT("The object's bytes are in the container"), At >= 0);
+		(*OnDisk)[At + 100] ^= 0xFF;
 
 		TArray<uint8> Out;
 		TestFalse(TEXT("A damaged object fails to load rather than returning bad bytes"),
 			Store.LoadObject(Digest, Out));
 
-		(*OnDisk)[100] ^= 0xFF;
+		(*OnDisk)[At + 100] ^= 0xFF;
 		TestTrue(TEXT("and loads again once repaired"), Store.LoadObject(Digest, Out));
 	}
 
-	// A write fault leaves no object behind, and the store reports failure.
+	// A failed append leaves no object behind, and the store reports failure.
 	{
 		FTerrainFaultDevice Faulty(Device);
 		FTerrainFileObjectStore FaultyStore(Faulty);
+		FaultyStore.LoadPacks();
 
 		const TArray<uint8> Second = Pattern(300, 0x77);
 		const FTerrainDigest SecondDigest = TerrainPersistDigest(Second);
 
-		Faulty.FailAfter(ETerrainStorageOp::WriteNew, 0);
-		TestFalse(TEXT("A failed write is reported as failure"),
+		Faulty.FailAfter(ETerrainStorageOp::Append, 0);
+		TestFalse(TEXT("A failed append is reported as failure"),
 			FaultyStore.StoreObject(SecondDigest, Second));
 		TestFalse(TEXT("and leaves no object"), FaultyStore.Contains(SecondDigest));
 
 		Faulty.ClearFaults();
 		TestTrue(TEXT("and the retry succeeds"), FaultyStore.StoreObject(SecondDigest, Second));
+		TestEqual(TEXT("No WriteNew happened on an open store"), Faulty.OpCount(ETerrainStorageOp::WriteNew), 0);
 	}
 
-	// A TORN write leaves a file whose content does not hash to its name. It must not load.
+	// A TORN append leaves bytes past the valid end. They must not load, and the next append must
+	// cut them first -- a frame written after garbage would be invisible to the next scan.
 	{
 		FTerrainFaultDevice Faulty(Device);
 		FTerrainFileObjectStore FaultyStore(Faulty);
+		FaultyStore.LoadPacks();
+		const int64 ValidBefore = FaultyStore.ContainerValidEnd(0);
+		TestEqual(TEXT("The reopened store sees every frame"), ValidBefore, Device.Size(C0));
 
 		const TArray<uint8> Third = Pattern(400, 0x33);
 		const FTerrainDigest ThirdDigest = TerrainPersistDigest(Third);
 
-		Faulty.TearAfter(ETerrainStorageOp::WriteNew, 0, /*TearBytes=*/128);
-		TestFalse(TEXT("A torn write is reported as failure"),
+		Faulty.TearAfter(ETerrainStorageOp::Append, 0, /*TearBytes=*/128);
+		TestFalse(TEXT("A torn append is reported as failure"),
 			FaultyStore.StoreObject(ThirdDigest, Third));
-		TestTrue (TEXT("but the truncated file is on disk, as after a crash"),
-			Device.Exists(TerrainStoragePaths::Object(ThirdDigest)));
-
+		TestEqual(TEXT("but the torn bytes are on disk, as after a crash"),
+			Device.Size(C0), ValidBefore + 128);
 		TArray<uint8> Out;
-		TestFalse(TEXT("and it does NOT load, because it does not hash to its own name"),
-			FaultyStore.LoadObject(ThirdDigest, Out));
+		TestFalse(TEXT("and nothing in them loads"), FaultyStore.LoadObject(ThirdDigest, Out));
 
-		// Recovery from that state is a delete and a retry, and both work.
-		TestEqual(TEXT("The torn object can be removed"),
-			FaultyStore.DeleteObject(ThirdDigest), ETerrainStorageResult::Ok);
+		// A fresh process sees the tail as a tail, and mutates nothing by looking.
+		{
+			FTerrainFileObjectStore Scanner(Device);
+			Scanner.LoadPacks();
+			TestEqual(TEXT("A scan stops at the torn frame"), Scanner.ContainerValidEnd(0), ValidBefore);
+			TestEqual(TEXT("and does not cut it"), Device.Size(C0), ValidBefore + 128);
+		}
+
+		// If the cut fails, the append must not happen.
 		Faulty.ClearFaults();
-		TestTrue(TEXT("and rewritten"), FaultyStore.StoreObject(ThirdDigest, Third));
-		TestTrue(TEXT("and then it loads"), FaultyStore.LoadObject(ThirdDigest, Out));
+		Faulty.FailAfter(ETerrainStorageOp::Truncate, 0);
+		const int32 AppendsBefore = Faulty.OpCount(ETerrainStorageOp::Append);
+		TestFalse(TEXT("With the torn tail uncut, the store refuses to append"),
+			FaultyStore.StoreObject(ThirdDigest, Third));
+		TestEqual(TEXT("and did not try"), Faulty.OpCount(ETerrainStorageOp::Append), AppendsBefore);
+
+		Faulty.ClearFaults();
+		TestTrue(TEXT("The retry succeeds"), FaultyStore.StoreObject(ThirdDigest, Third));
+		TestTrue(TEXT("and loads"), FaultyStore.LoadObject(ThirdDigest, Out));
+
+		FTerrainFileObjectStore Reopened(Device);
+		Reopened.LoadPacks();
+		TestEqual(TEXT("After the cut and the append, a scan sees the whole container"),
+			Reopened.ContainerValidEnd(0), Device.Size(C0));
+		TestTrue(TEXT("and every object"), Reopened.Contains(Digest) && Reopened.Contains(ThirdDigest));
+	}
+
+	// The self-offset rule: a whole, valid frame copied to a position it did not name is not a
+	// frame. This is what keeps stale bytes beyond a truncation point from being believed.
+	{
+		FTerrainMemoryStorageDevice Moved;
+		FTerrainFileObjectStore MovedStore(Moved);
+		MovedStore.EnsureLayout();
+		MovedStore.LoadPacks();
+
+		const TArray<uint8> A = Pattern(64, 0x41);
+		MovedStore.StoreObject(TerrainPersistDigest(A), A);
+		TArray<uint8> Frame = *Moved.Find(TerrainStoragePaths::Container(0));
+
+		TArray<uint8>* C1 = Moved.Find(TerrainStoragePaths::Container(1));
+		C1->Append(Pattern(40, 0x00));   // a "torn" prefix of the same length as a header
+		C1->Append(Frame);               // then a perfect frame that names offset 0, not 40
+
+		FTerrainFileObjectStore Scanner(Moved);
+		Scanner.LoadPacks();
+		TestEqual(TEXT("A frame at an offset it does not name ends the scan"), Scanner.ContainerValidEnd(1), int64(0));
+		TestEqual(TEXT("so c.1 contributes nothing"), Scanner.ContainerDeadBytes(1, TSet<FTerrainDigest>()), int64(0));
 	}
 
 	AddInfo(FString::Printf(TEXT("Store held %d files at the end of the test"), Device.NumFiles()));
@@ -468,6 +558,40 @@ bool FTerrainStoragePlatformDeviceTest::RunTest(const FString& Parameters)
 			FMemory::Memcmp(Back.GetData() + 1000, Tail.GetData(), Tail.Num()), 0);
 	}
 
+	// P-005's three operations, against the real file system: a positioned read, a shrink-only
+	// truncation through an append handle, and a directory sync.
+	{
+		TArray<uint8> Whole, Range;
+		Device.Read(Path, Whole);
+		TestEqual(TEXT("ReadRange succeeds"), Device.ReadRange(Path, 990, 47, Range), ETerrainStorageResult::Ok);
+		TestEqual(TEXT("and returns exactly that range"),
+			FMemory::Memcmp(Range.GetData(), Whole.GetData() + 990, 47), 0);
+		TestEqual(TEXT("A range past the end is WrongSize"),
+			Device.ReadRange(Path, 1000, 38, Range), ETerrainStorageResult::WrongSize);
+
+		TestEqual(TEXT("Truncate shrinks"), Device.Truncate(Path, 1000), ETerrainStorageResult::Ok);
+		TestEqual(TEXT("to exactly the size asked"), Device.Size(Path), (int64)1000);
+		TArray<uint8> Back;
+		Device.Read(Path, Back);
+		TestEqual(TEXT("keeping every byte before the cut"), FMemory::Memcmp(Back.GetData(), Whole.GetData(), 1000), 0);
+		TestEqual(TEXT("Truncate refuses to grow a file"),
+			Device.Truncate(Path, 1001), ETerrainStorageResult::WrongSize);
+		TestEqual(TEXT("and the file is untouched"), Device.Size(Path), (int64)1000);
+		TestEqual(TEXT("Truncating an absent file is NotFound"),
+			Device.Truncate(TEXT("objects/ab/absent.tobj"), 0), ETerrainStorageResult::NotFound);
+
+		TestEqual(TEXT("Appending after a truncation lands at the new end"),
+			Device.Append(Path, Pattern(5, 0xC0)), ETerrainStorageResult::Ok);
+		TestEqual(TEXT("so the file is 1005 bytes"), Device.Size(Path), (int64)1005);
+
+		// On Windows this logs a warning if NTFS refuses the directory flush; the log is the
+		// evidence for P-005 §6 either way.
+		TestEqual(TEXT("SyncDirectory on a subdirectory"), Device.SyncDirectory(TEXT("objects/ab")), ETerrainStorageResult::Ok);
+		TestEqual(TEXT("SyncDirectory on the root"), Device.SyncDirectory(FString()), ETerrainStorageResult::Ok);
+		TestEqual(TEXT("SyncDirectory refuses an escaping path"),
+			Device.SyncDirectory(TEXT("../escaped")), ETerrainStorageResult::BadPath);
+	}
+
 	// Path safety holds against the real file system too.
 	{
 		TestEqual(TEXT("An escaping path is refused before it reaches the disk"),
@@ -493,7 +617,7 @@ bool FTerrainStoragePlatformDeviceTest::RunTest(const FString& Parameters)
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 	FTerrainStoragePackTest,
-	"TerrainCore.Persistence.Storage.Pack",
+	"TerrainCore.Persistence.Storage.Container",
 	EAutomationTestFlags::EditorContext
 	| EAutomationTestFlags::ClientContext
 	| EAutomationTestFlags::ServerContext
@@ -504,11 +628,16 @@ bool FTerrainStoragePackTest::RunTest(const FString& Parameters)
 {
 	using namespace TerrainStorageTest;
 
-	// --- a batch is one file, and nothing in it is durable until it is committed -------------
+	const FString C0 = TerrainStoragePaths::Container(0);
+
+	// --- a batch is one append to a file that already exists, and nothing is durable before it ---
 	{
-		FTerrainMemoryStorageDevice Device;
+		FTerrainMemoryStorageDevice Memory;
+		FTerrainFaultDevice Device(Memory);
 		FTerrainFileObjectStore Store(Device);
 		TestEqual(TEXT("Layout is created"), Store.EnsureLayout(), ETerrainStorageResult::Ok);
+		Store.LoadPacks();
+		const int32 WriteNewAfterLayout = Device.OpCount(ETerrainStorageOp::WriteNew);
 
 		TArray<TArray<uint8>> Objects;
 		TArray<FTerrainDigest> Digests;
@@ -527,32 +656,28 @@ bool FTerrainStoragePackTest::RunTest(const FString& Parameters)
 		}
 		TestEqual(TEXT("Everything is buffered"), Store.BatchNum(), 12);
 
-		// The reason the batch must be readable: the index path-copy re-reads pages it wrote
-		// moments earlier, within the same capture, before anything is durable.
+		// The index path-copy re-reads pages it wrote moments earlier, before anything is durable.
 		TArray<uint8> Readback;
 		TestTrue(TEXT("A buffered object reads back before commit"),
 			Store.LoadObject(Digests[5], Readback));
 		TestTrue(TEXT("and reads back exactly"), Readback == Objects[5]);
+		TestEqual(TEXT("Nothing is on disk before commit"), Memory.Size(C0), int64(0));
 
-		TArray<FString> PackNames;
-		Device.ListFiles(TerrainStoragePaths::PacksDirectory, PackNames);
-		TestEqual(TEXT("Nothing is on disk before commit"), PackNames.Num(), 0);
-
-		TestEqual(TEXT("Commit writes the pack"), Store.CommitBatch(), ETerrainStorageResult::Ok);
+		TestEqual(TEXT("Commit writes the frame"), Store.CommitBatch(), ETerrainStorageResult::Ok);
 		TestFalse(TEXT("and closes the batch"), Store.IsBatchOpen());
+		TestEqual(TEXT("Twelve objects became ONE append"), Device.OpCount(ETerrainStorageOp::Append), 1);
+		TestEqual(TEXT("and no new name"), Device.OpCount(ETerrainStorageOp::WriteNew), WriteNewAfterLayout);
+		TestEqual(TEXT("The file count is still the pool"), Memory.NumFiles(), TerrainStoragePaths::ContainerCount);
 
-		Device.ListFiles(TerrainStoragePaths::PacksDirectory, PackNames);
-		TestEqual(TEXT("Twelve objects became ONE file"), PackNames.Num(), 1);
-
-		// A fresh store over the same device must find them all, which is the property that
-		// makes a pack a store and not a cache.
-		FTerrainFileObjectStore Reopened(Device);
-		TestEqual(TEXT("Packs load"), Reopened.LoadPacks(), ETerrainStorageResult::Ok);
+		// A fresh store over the same device must find them all: a container is a store, not a cache.
+		FTerrainFileObjectStore Reopened(Memory);
+		TestEqual(TEXT("Containers load"), Reopened.LoadPacks(), ETerrainStorageResult::Ok);
 		TestEqual(TEXT("All twelve are mapped"), Reopened.NumPackedObjects(), 12);
+		TestEqual(TEXT("and writing continues where it left off"), Reopened.GetActiveContainer(), 0);
 		for (int32 Index = 0; Index < Objects.Num(); ++Index)
 		{
 			TArray<uint8> Loaded;
-			TestTrue(TEXT("A packed object loads after reopen"),
+			TestTrue(TEXT("A framed object loads after reopen"),
 				Reopened.LoadObject(Digests[Index], Loaded));
 			TestTrue(TEXT("with the exact bytes"), Loaded == Objects[Index]);
 			TestTrue(TEXT("and Contains agrees"), Reopened.Contains(Digests[Index]));
@@ -564,6 +689,7 @@ bool FTerrainStoragePackTest::RunTest(const FString& Parameters)
 		FTerrainMemoryStorageDevice Device;
 		FTerrainFileObjectStore Store(Device);
 		Store.EnsureLayout();
+		Store.LoadPacks();
 
 		const TArray<uint8> Object = Pattern(300, 0x77);
 		const FTerrainDigest Digest = TerrainPersistDigest(Object);
@@ -573,120 +699,102 @@ bool FTerrainStoragePackTest::RunTest(const FString& Parameters)
 		Store.AbandonBatch();
 
 		TestFalse(TEXT("An abandoned batch stored nothing"), Store.Contains(Digest));
-		TArray<FString> PackNames;
-		Device.ListFiles(TerrainStoragePaths::PacksDirectory, PackNames);
-		TestEqual(TEXT("and wrote no file"), PackNames.Num(), 0);
+		TestEqual(TEXT("and wrote nothing"), Device.Size(C0), int64(0));
 	}
 
-	// --- a torn pack is ignored, not an error ------------------------------------------------
-	// This is the crash case the design turns on. A pack is flushed before the root slot that
-	// names it, so a pack that was torn belongs to a capture that never published. Refusing to
-	// open the world over it would turn collectable garbage into a dead world.
+	// --- a torn frame ends the scan; the frames before it are whole ---------------------------
+	// A frame is flushed before the root slot that names it, so a torn one belongs to a capture
+	// that never published. Refusing to open over it would turn garbage into a dead world.
 	{
 		FTerrainMemoryStorageDevice Device;
 		FTerrainFileObjectStore Store(Device);
 		Store.EnsureLayout();
+		Store.LoadPacks();
 
 		const TArray<uint8> Good = Pattern(200, 0x01);
 		const FTerrainDigest GoodDigest = TerrainPersistDigest(Good);
-		Store.BeginBatch();
-		Store.StoreObject(GoodDigest, Good);
-		TestEqual(TEXT("First pack commits"), Store.CommitBatch(), ETerrainStorageResult::Ok);
+		TestTrue(TEXT("First frame commits"), Store.StoreObject(GoodDigest, Good));
+		const int64 FirstEnd = Device.Size(C0);
 
 		const TArray<uint8> Lost = Pattern(200, 0x02);
 		const FTerrainDigest LostDigest = TerrainPersistDigest(Lost);
-		Store.BeginBatch();
-		Store.StoreObject(LostDigest, Lost);
-		TestEqual(TEXT("Second pack commits"), Store.CommitBatch(), ETerrainStorageResult::Ok);
+		TestTrue(TEXT("Second frame commits"), Store.StoreObject(LostDigest, Lost));
 
-		// Tear the second pack by truncating its trailer -- exactly what a crash mid-write
-		// leaves behind.
-		const FString SecondPack = TerrainStoragePaths::Pack(1);
-		TArray<uint8> Image;
-		TestEqual(TEXT("The second pack is readable"),
-			Device.Read(SecondPack, Image), ETerrainStorageResult::Ok);
-		TestEqual(TEXT("Removing it to rewrite torn"),
-			Device.Delete(SecondPack), ETerrainStorageResult::Ok);
-		Image.SetNum(Image.Num() - 8);   // the checksum half of the trailer is gone
-		TestEqual(TEXT("The torn image is written back"),
-			Device.WriteNew(SecondPack, Image), ETerrainStorageResult::Ok);
+		// Tear the second frame's trailer off -- exactly what a crash mid-append leaves behind.
+		// Its header still claims the full length, which no longer fits: the header fails.
+		Device.Find(C0)->SetNum(Device.Size(C0) - 8);
 
 		FTerrainFileObjectStore Reopened(Device);
-		TestEqual(TEXT("Opening over a torn pack succeeds"),
+		TestEqual(TEXT("Opening over a torn frame succeeds"),
 			Reopened.LoadPacks(), ETerrainStorageResult::Ok);
-		TestEqual(TEXT("The intact pack still resolves"), Reopened.NumPackedObjects(), 1);
+		TestEqual(TEXT("The valid end is the end of the first frame"), Reopened.ContainerValidEnd(0), FirstEnd);
+		TestEqual(TEXT("The intact frame still resolves"), Reopened.NumPackedObjects(), 1);
 		TestTrue(TEXT("and its object loads"), Reopened.Contains(GoodDigest));
-		TestFalse(TEXT("The torn pack's object does not"), Reopened.Contains(LostDigest));
+		TestFalse(TEXT("The torn frame's object does not"), Reopened.Contains(LostDigest));
 
-		// The next pack must not reuse the torn pack's id, or it would collide with a file
-		// that is still sitting there.
+		// The next frame goes where the torn one started, not after it.
 		const TArray<uint8> Next = Pattern(200, 0x03);
 		const FTerrainDigest NextDigest = TerrainPersistDigest(Next);
-		Reopened.BeginBatch();
-		Reopened.StoreObject(NextDigest, Next);
-		TestEqual(TEXT("A new pack commits past the torn id"),
-			Reopened.CommitBatch(), ETerrainStorageResult::Ok);
-		TestTrue(TEXT("and its object resolves"), Reopened.Contains(NextDigest));
+		TestTrue(TEXT("A new frame commits over the torn tail"), Reopened.StoreObject(NextDigest, Next));
+
+		FTerrainFileObjectStore Again(Device);
+		Again.LoadPacks();
+		TestEqual(TEXT("and a later scan reaches the end of the file"), Again.ContainerValidEnd(0), Device.Size(C0));
+		TestTrue(TEXT("finding the new object"), Again.Contains(NextDigest));
+		TestFalse(TEXT("and still not the torn one"), Again.Contains(LostDigest));
 	}
 
-	// --- a corrupt pack body fails the checksum, and is ignored wholesale ---------------------
+	// --- a corrupt body is skipped wholesale, and the frames after it still count --------------
 	{
 		FTerrainMemoryStorageDevice Device;
 		FTerrainFileObjectStore Store(Device);
 		Store.EnsureLayout();
+		Store.LoadPacks();
 
-		const TArray<uint8> Object = Pattern(400, 0x5A);
-		const FTerrainDigest Digest = TerrainPersistDigest(Object);
-		Store.BeginBatch();
-		Store.StoreObject(Digest, Object);
-		TestEqual(TEXT("Pack commits"), Store.CommitBatch(), ETerrainStorageResult::Ok);
+		const TArray<uint8> First  = Pattern(400, 0x5A);
+		const TArray<uint8> Second = Pattern(400, 0x5B);
+		Store.StoreObject(TerrainPersistDigest(First), First);
+		Store.StoreObject(TerrainPersistDigest(Second), Second);
 
-		const FString PackPath = TerrainStoragePaths::Pack(0);
-		TArray<uint8> Image;
-		Device.Read(PackPath, Image);
-		Device.Delete(PackPath);
-		Image[10] ^= 0xFF;   // one flipped bit in the body
-		Device.WriteNew(PackPath, Image);
+		(*Device.Find(C0))[TerrainFrameHeaderSize + 10] ^= 0xFF;   // one flipped bit in frame 1's body
 
 		FTerrainFileObjectStore Reopened(Device);
-		TestEqual(TEXT("Opening over a corrupt pack succeeds"),
+		TestEqual(TEXT("Opening over a corrupt frame succeeds"),
 			Reopened.LoadPacks(), ETerrainStorageResult::Ok);
-		TestEqual(TEXT("but nothing in it is trusted"), Reopened.NumPackedObjects(), 0);
+		TestFalse(TEXT("nothing in it is trusted"), Reopened.Contains(TerrainPersistDigest(First)));
+		TestTrue(TEXT("but the frame after it is still found"), Reopened.Contains(TerrainPersistDigest(Second)));
+		TestEqual(TEXT("and the valid end covers both"), Reopened.ContainerValidEnd(0), Device.Size(C0));
 	}
 
-	// --- loose objects and packed objects coexist --------------------------------------------
+	// --- pre-P-005 loose objects and packs are still read, and never written -----------------
 	{
 		FTerrainMemoryStorageDevice Device;
-		FTerrainFileObjectStore Store(Device);
-		Store.EnsureLayout();
 
 		const TArray<uint8> Loose = Pattern(100, 0xA1);
 		const FTerrainDigest LooseDigest = TerrainPersistDigest(Loose);
-		TestTrue(TEXT("An unbatched store writes loose"), Store.StoreObject(LooseDigest, Loose));
+		Device.EnsureDirectory(TerrainStoragePaths::ObjectDirectory(LooseDigest));
+		Device.WriteNew(TerrainStoragePaths::Object(LooseDigest), Loose);
 
 		const TArray<uint8> Packed = Pattern(100, 0xA2);
 		const FTerrainDigest PackedDigest = TerrainPersistDigest(Packed);
-		Store.BeginBatch();
-		Store.StoreObject(PackedDigest, Packed);
-		TestEqual(TEXT("Pack commits"), Store.CommitBatch(), ETerrainStorageResult::Ok);
+		Device.EnsureDirectory(TerrainStoragePaths::PacksDirectory);
+		Device.WriteNew(TerrainStoragePaths::Pack(0), MakeLegacyPackImage({ Packed }));
 
-		FTerrainFileObjectStore Reopened(Device);
-		Reopened.LoadPacks();
+		FTerrainFileObjectStore Store(Device);
+		Store.EnsureLayout();
+		Store.LoadPacks();
 		TArray<uint8> A, B;
-		TestTrue(TEXT("The loose object still loads"), Reopened.LoadObject(LooseDigest, A));
-		TestTrue(TEXT("The packed object loads"), Reopened.LoadObject(PackedDigest, B));
+		TestTrue(TEXT("A pre-P-005 loose object loads"), Store.LoadObject(LooseDigest, A));
+		TestTrue(TEXT("A pre-P-005 packed object loads"), Store.LoadObject(PackedDigest, B));
 		TestTrue(TEXT("Loose bytes are exact"), A == Loose);
 		TestTrue(TEXT("Packed bytes are exact"), B == Packed);
 
-		// Re-storing something already held is a success that writes nothing, whether it is
-		// held loose or in a pack.
-		Reopened.BeginBatch();
-		TestTrue(TEXT("Re-storing a packed object succeeds"),
-			Reopened.StoreObject(PackedDigest, Packed));
-		TestTrue(TEXT("Re-storing a loose object succeeds"),
-			Reopened.StoreObject(LooseDigest, Loose));
-		TestEqual(TEXT("and buffers nothing"), Reopened.BatchNum(), 0);
-		Reopened.AbandonBatch();
+		// Re-storing something already held is a success that writes nothing, wherever it is held.
+		Store.BeginBatch();
+		TestTrue(TEXT("Re-storing a legacy packed object succeeds"), Store.StoreObject(PackedDigest, Packed));
+		TestTrue(TEXT("Re-storing a legacy loose object succeeds"), Store.StoreObject(LooseDigest, Loose));
+		TestEqual(TEXT("and buffers nothing"), Store.BatchNum(), 0);
+		Store.AbandonBatch();
 	}
 
 	// --- a digest that does not match its bytes is refused, batched or not -------------------
@@ -704,6 +812,15 @@ bool FTerrainStoragePackTest::RunTest(const FString& Parameters)
 			Store.StoreObject(Wrong, Object));
 		TestEqual(TEXT("and buffers nothing"), Store.BatchNum(), 0);
 		Store.AbandonBatch();
+	}
+
+	// --- a store whose pool was never created refuses rather than creating it -----------------
+	{
+		FTerrainMemoryStorageDevice Device;
+		FTerrainFileObjectStore Store(Device);
+		const TArray<uint8> Object = Pattern(64, 0x0C);
+		TestFalse(TEXT("Without bootstrap, storing fails"), Store.StoreObject(TerrainPersistDigest(Object), Object));
+		TestEqual(TEXT("and no name was created"), Device.NumFiles(), 0);
 	}
 
 	return true;

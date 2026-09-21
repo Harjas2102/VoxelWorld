@@ -65,6 +65,16 @@ namespace TerrainStoragePaths
 	inline constexpr const TCHAR* JournalDirectory = TEXT("journal");
 	inline constexpr const TCHAR* ObjectsDirectory = TEXT("objects");
 	inline constexpr const TCHAR* PacksDirectory   = TEXT("packs");
+	inline constexpr const TCHAR* ContainersDirectory = TEXT("containers");
+
+	/**
+	 * The fixed container pool (P-005 §4). Every object written after world creation goes into
+	 * one of these pre-created files; none is ever created or removed at runtime.
+	 */
+	inline constexpr int32 ContainerCount = 4;
+
+	/** containers/c.0 .. containers/c.3 */
+	TERRAINCORE_API FString Container(int32 ContainerIndex);
 
 	/** roots/root.0 and roots/root.1 */
 	TERRAINCORE_API FString RootSlot(int32 SlotIndex);
@@ -81,12 +91,16 @@ namespace TerrainStoragePaths
 	 * mechanism to. Refuses anything that is not exactly `seg-` + 16 lowercase hex + `.tjs`.
 	 */
 	TERRAINCORE_API bool ParseJournalSegment(const FString& FileName, uint64& OutSegmentId);
-	/** objects/<first digest byte, lowercase hex>/<64 hex>.tobj -- a 256-way fan-out. */
+	/**
+	 * objects/<first digest byte, lowercase hex>/<64 hex>.tobj -- a 256-way fan-out.
+	 *
+	 * Pre-P-005 layout. Read and migrated by retention; never written any more.
+	 */
 	TERRAINCORE_API FString Object(const FTerrainDigest& Digest);
 	/** The directory an object lives in, so a caller can create it before writing. */
 	TERRAINCORE_API FString ObjectDirectory(const FTerrainDigest& Digest);
 
-	/** packs/pack-%016llx.tpk */
+	/** packs/pack-%016llx.tpk -- pre-P-005 layout, read and migrated, never written. */
 	TERRAINCORE_API FString Pack(uint64 PackId);
 
 	/** The inverse of Pack, over a bare file name -- same reason as ParseJournalSegment. */
@@ -96,8 +110,8 @@ namespace TerrainStoragePaths
 // ---- the device seam ----------------------------------------------------
 
 /**
- * The whole durable-write surface of the terrain store. Six operations, on purpose: every one
- * of them is a place a crash can happen, and a smaller surface is a smaller crash matrix.
+ * The whole durable-write surface of the terrain store. Seven mutating operations, on purpose:
+ * every one of them is a place a crash can happen, and a smaller surface is a smaller crash matrix.
  *
  * DURABILITY CONTRACT. Every mutating call below must have reached stable storage by the time
  * it returns Ok, and implementations get that by calling `IFileHandle::Flush(true)`.
@@ -113,7 +127,10 @@ namespace TerrainStoragePaths
  * this is developed on and wrong on the machine it ships on, which is the worst shape a bug
  * can have. See P-004 §12.
  *
- * None of this makes *namespace* publication durable; that is R-015 and remains unproved.
+ * None of this makes *namespace* publication durable, and after P-005 nothing needs it to: an
+ * open world creates and removes no names. WriteNew is bootstrap-only (world creation, and
+ * pre-creating the container pool); Delete is used only to remove pre-P-005 files whose
+ * contents are already durable elsewhere. See P-005 §2, §6.
  */
 class TERRAINCORE_API ITerrainStorageDevice
 {
@@ -165,6 +182,33 @@ public:
 	virtual ETerrainStorageResult Append(const FString& RelativePath, TArrayView<const uint8> Bytes) = 0;
 
 	virtual ETerrainStorageResult Delete(const FString& RelativePath) = 0;
+
+	/**
+	 * Reads exactly Length bytes starting at Offset. A range not wholly inside the file is
+	 * WrongSize. Resolving one object must not read a whole container (P-005 §3).
+	 */
+	virtual ETerrainStorageResult ReadRange(
+		const FString& RelativePath, int64 Offset, int64 Length, TArray<uint8>& OutBytes) const = 0;
+
+	/**
+	 * Shrinks an existing file to NewSize, then flushes.
+	 *
+	 * **Shrink only**: a NewSize beyond the current length is WrongSize, because a truncation
+	 * that could grow a file would be a way to write bytes nobody chose. This changes one
+	 * existing file's length -- the same kind of metadata an Append changes, and made durable by
+	 * the same per-file flush the journal already depends on (P-005 §3). It never touches a name.
+	 */
+	virtual ETerrainStorageResult Truncate(const FString& RelativePath, int64 NewSize) = 0;
+
+	/**
+	 * Makes a directory's entries durable, as far as the platform allows. **Bootstrap only**
+	 * (P-005 §6): called after world creation, never on a path an acknowledged edit waits for.
+	 *
+	 * Unix: `fsync` on the directory, POSIX's documented primitive; failure is IoError.
+	 * Windows: `FlushFileBuffers` on a backup-semantics directory handle. Not a documented
+	 * guarantee, so a failure is logged and reported as Ok rather than refusing to create worlds.
+	 */
+	virtual ETerrainStorageResult SyncDirectory(const FString& RelativeDirectory) = 0;
 };
 
 /** The real device. Rooted at an absolute directory; nothing it does can escape that root. */
@@ -182,6 +226,9 @@ public:
 	virtual ETerrainStorageResult OverwriteInPlace(const FString& RelativePath, TArrayView<const uint8> Bytes) override;
 	virtual ETerrainStorageResult Append(const FString& RelativePath, TArrayView<const uint8> Bytes) override;
 	virtual ETerrainStorageResult Delete(const FString& RelativePath) override;
+	virtual ETerrainStorageResult ReadRange(const FString& RelativePath, int64 Offset, int64 Length, TArray<uint8>& OutBytes) const override;
+	virtual ETerrainStorageResult Truncate(const FString& RelativePath, int64 NewSize) override;
+	virtual ETerrainStorageResult SyncDirectory(const FString& RelativeDirectory) override;
 
 	const FString& GetRoot() const { return Root; }
 
@@ -205,6 +252,9 @@ public:
 	virtual ETerrainStorageResult OverwriteInPlace(const FString& RelativePath, TArrayView<const uint8> Bytes) override;
 	virtual ETerrainStorageResult Append(const FString& RelativePath, TArrayView<const uint8> Bytes) override;
 	virtual ETerrainStorageResult Delete(const FString& RelativePath) override;
+	virtual ETerrainStorageResult ReadRange(const FString& RelativePath, int64 Offset, int64 Length, TArray<uint8>& OutBytes) const override;
+	virtual ETerrainStorageResult Truncate(const FString& RelativePath, int64 NewSize) override;
+	virtual ETerrainStorageResult SyncDirectory(const FString& RelativeDirectory) override;
 
 	int32 NumFiles() const { return Files.Num(); }
 	void  GetPaths(TArray<FString>& Out) const { Files.GetKeys(Out); }
@@ -237,6 +287,8 @@ enum class ETerrainStorageOp : uint8
 	OverwriteInPlace,
 	Append,
 	Delete,
+	Truncate,
+	SyncDirectory,
 	Count,
 };
 
@@ -262,7 +314,7 @@ public:
 
 	/**
 	 * Fails the Nth **mutating** operation of the session, counting WriteNew, OverwriteInPlace,
-	 * Append and Delete together as one sequence (P-003 §8).
+	 * Append, Delete and Truncate together as one sequence (P-003 §8).
 	 *
 	 * The per-op-type faults above can crash a chosen kind of write. This crashes a chosen
 	 * *moment*, which is what a crash actually is: a session does its writes in one order, and
@@ -275,7 +327,7 @@ public:
 	 */
 	void FailAtMutation(int32 Index, int32 TearBytes = -1);
 
-	/** Mutating operations attempted so far, over all four kinds. */
+	/** Mutating operations attempted so far, over all five kinds. */
 	int32 MutationCount() const { return Mutations; }
 
 	int32 OpCount(ETerrainStorageOp Op) const { return Counts[static_cast<int32>(Op)]; }
@@ -289,6 +341,9 @@ public:
 	virtual ETerrainStorageResult OverwriteInPlace(const FString& RelativePath, TArrayView<const uint8> Bytes) override;
 	virtual ETerrainStorageResult Append(const FString& RelativePath, TArrayView<const uint8> Bytes) override;
 	virtual ETerrainStorageResult Delete(const FString& RelativePath) override;
+	virtual ETerrainStorageResult ReadRange(const FString& RelativePath, int64 Offset, int64 Length, TArray<uint8>& OutBytes) const override;
+	virtual ETerrainStorageResult Truncate(const FString& RelativePath, int64 NewSize) override;
+	virtual ETerrainStorageResult SyncDirectory(const FString& RelativeDirectory) override;
 
 private:
 	struct FFault
@@ -305,7 +360,7 @@ private:
 	FFault Faults[static_cast<int32>(ETerrainStorageOp::Count)];
 	mutable int32 Counts[static_cast<int32>(ETerrainStorageOp::Count)] = {};
 
-	int32 Mutations = 0;             // WriteNew + OverwriteInPlace + Append + Delete, in order
+	int32 Mutations = 0;             // WriteNew + OverwriteInPlace + Append + Delete + Truncate, in order
 	int32 MutationFaultIndex = -1;   // which one to fail; -1 disables
 	int32 MutationTearBytes = -1;
 };
@@ -321,6 +376,13 @@ private:
  *
  * Storing a digest that already exists is a success and writes nothing: two callers producing
  * the same object produced the same bytes, by construction.
+ *
+ * WHERE THE BYTES LIVE (P-005). Every object is written into one of a fixed pool of
+ * pre-created **containers**, as part of a **frame** whose body is a P-004 §13.3 pack image.
+ * A capture is still one durable write -- one Append, one flush (D-036) -- but it now extends a
+ * file that already exists instead of creating a new one, so an open world never depends on a
+ * directory entry surviving a power cut (R-015). Pre-P-005 loose objects and pack files are
+ * still read, and retention migrates them into containers; nothing writes them any more.
  */
 class TERRAINCORE_API FTerrainFileObjectStore final : public ITerrainObjectStore
 {
@@ -328,34 +390,33 @@ public:
 	explicit FTerrainFileObjectStore(ITerrainStorageDevice& InDevice) : Device(InDevice) {}
 
 	virtual bool LoadObject(const FTerrainDigest& Digest, TArray<uint8>& OutBytes) const override;
+
+	/**
+	 * Inside a batch, buffers. Outside one, writes a one-object frame immediately: an unbatched
+	 * store used to create a loose file, which was a runtime name (P-005 §9 item 6).
+	 */
 	virtual bool StoreObject(const FTerrainDigest& Digest, TArrayView<const uint8> Bytes) override;
 
-	/** Creates `objects/` and `packs/`. Per-prefix object directories are made on demand. */
-	ETerrainStorageResult EnsureLayout();
+	/**
+	 * Creates `containers/` and any missing container. **The only place this store creates a
+	 * name**, and it is bootstrap: world creation, or opening a pre-P-005 world, before the
+	 * store admits anything (P-005 §6). OutCreated says whether anything was created, so the
+	 * caller knows a directory sync is owed.
+	 */
+	ETerrainStorageResult EnsureLayout(bool* OutCreated = nullptr);
 
 	bool Contains(const FTerrainDigest& Digest) const;
-
-	/** Removes a loose object. Retention decides WHAT to delete; this only performs it. */
-	ETerrainStorageResult DeleteObject(const FTerrainDigest& Digest);
 
 	// ---- batching: many objects, one durable write (P-004 §13) -------------------------
 
 	/**
-	 * Buffers subsequent StoreObject calls instead of writing each as its own file.
+	 * Buffers subsequent StoreObject calls instead of writing each on its own.
 	 *
 	 * **Why this exists, measured rather than assumed.** A durable write is one `fsync` and an
-	 * `fsync` costs about 3 ms on the development disk *regardless of size* -- a 160-byte index
-	 * page costs the same as a megabyte. A checkpoint over 8 chunks writes 59 objects, of which
-	 * 49 are index pages totalling about 7 KB, and it cost 0.168 s to write that 7 KB. The
-	 * measured alternatives were unambiguous: holding the handles open and flushing them all at
-	 * the end is **no cheaper** (155.8 ms for 49 files -- the flush is per file whenever you
-	 * call it), writing and reopening to flush is 55.6 ms, and putting the same bytes in **one
-	 * file with one flush is 2.3 ms**. Sixty-five times, and the ratio only improves with more
-	 * objects.
-	 *
-	 * So the fix is not *when* the store syncs, it is *how many files* it syncs. Nothing about
-	 * content addressing changes: objects are still named by, and verified against, their
-	 * BLAKE3 digest. Only where the bytes live changes.
+	 * `fsync` costs about 3 ms on the development disk *regardless of size*. A checkpoint over 8
+	 * chunks writes 59 objects; writing them one per file cost 0.168 s, and the same bytes in
+	 * **one write with one flush cost 2.3 ms**. The fix is not *when* the store syncs, it is how
+	 * many times. Content addressing is unchanged; only where the bytes live changes.
 	 */
 	void BeginBatch();
 	bool IsBatchOpen() const { return bBatchOpen; }
@@ -363,12 +424,16 @@ public:
 	int64 BatchBytes() const { return BatchBuffer.Num(); }
 
 	/**
-	 * Writes everything buffered as one pack file and flushes it once, then closes the batch.
+	 * Appends everything buffered as one frame to the active container, flushes once, and closes
+	 * the batch.
 	 *
 	 * Ok and writes nothing when the batch is empty. **Until this returns Ok, nothing buffered
-	 * is durable** -- which is exactly the property publication needs, because a pack that no
-	 * root slot names is unreferenced garbage, the same containment argument P-004 §12 already
-	 * makes for loose objects.
+	 * is durable** -- which is exactly the property publication needs: a frame no root slot
+	 * names is unreferenced garbage.
+	 *
+	 * Before appending, a container whose length differs from its valid end is truncated back
+	 * to it, and the append is refused if that fails (P-005 §4.3). A frame appended after torn
+	 * bytes would be durable, named by a root, and invisible to the next boot's scan.
 	 */
 	ETerrainStorageResult CommitBatch();
 
@@ -376,93 +441,122 @@ public:
 	void AbandonBatch();
 
 	/**
-	 * Scans `packs/` and builds the digest -> location map. Must run before any read that
-	 * could resolve into a pack, so `FTerrainWorldStore::Open` runs it.
+	 * Scans every container and every pre-P-005 pack, and builds the digest -> location map.
+	 * Must run before any read that could resolve into either, so `FTerrainWorldStore::Open`
+	 * runs it. **Mutates nothing**: a torn container tail is repaired lazily by the next append.
 	 *
-	 * A pack whose trailer is missing or whose checksum fails is **ignored, not an error**: it
-	 * is a torn write from a capture that never reached its root slot, so nothing published
-	 * refers to it. Refusing to open the world over it would turn recoverable garbage into a
-	 * dead world.
+	 * A frame or pack that fails validation is **ignored, not an error**: it was written by an
+	 * append whose flush never returned, so no published root refers to it. In a container the
+	 * first invalid frame also ends the scan (P-005 §4.2).
 	 */
 	ETerrainStorageResult LoadPacks();
 
-	int32 NumPackedObjects() const { return PackMap.Num(); }
+	/** Distinct digests resolvable through containers or pre-P-005 packs. */
+	int32 NumPackedObjects() const;
 
-	/** Last consumed pack id; use immediately after a successful CommitBatch/CompactPack. */
-	uint64 NewestPackId() const { return NextPackId > 0 ? NextPackId - 1 : 0; }
+	// ---- containers (P-005 §4) ---------------------------------------------------------
 
-	// ---- what reclamation needs to see (P-004 §8) -------------------------------------
+	int32 GetActiveContainer() const { return ActiveContainer; }
+
+	/** Bytes of whole valid frames, from offset 0. Past it is a torn tail, or nothing. */
+	int64 ContainerValidEnd(int32 ContainerIndex) const;
+
+	/** Digests whose resolving copy lives in this container. */
+	void GetContainerContents(int32 ContainerIndex, TArray<FTerrainDigest>& OutDigests) const;
 
 	/**
-	 * Every loose object currently on the device, by digest.
+	 * Object bytes in this container that are not the resolving copy of a Live digest: dead
+	 * objects, and copies shadowed by an earlier container. Frame and manifest overhead is not
+	 * counted, so a container holding only live objects reports zero and is left alone.
+	 */
+	int64 ContainerDeadBytes(int32 ContainerIndex, const TSet<FTerrainDigest>& Live) const;
+
+	/**
+	 * Makes an empty container active, if there is one and the active container is not already
+	 * empty. Policy, not correctness: any container is a valid home for any frame (P-005 §4.5).
+	 */
+	bool RotateActiveToEmpty();
+
+	/**
+	 * Copies every Live object resolving into this container into one new frame in the active
+	 * container, flushes it, reads every copy back through the verifying path, and only then
+	 * truncates this container to zero (P-005 §5 step 3).
 	 *
-	 * Walks the 256-way fan-out, so it is O(directories) and is a reclamation-time operation,
-	 * not something to call on a frame. A file whose name is not a valid digest is skipped
-	 * rather than guessed at: reclamation deleting a file it could not name would be deleting
-	 * something it does not understand.
+	 * Refuses the active container (it would copy into itself and then cut itself), and refuses
+	 * while a batch is open. A failure before the truncation changes nothing that matters: the
+	 * originals are untouched, and a copy that became durable is a harmless duplicate.
+	 */
+	ETerrainStorageResult CompactContainer(
+		int32 ContainerIndex, const TSet<FTerrainDigest>& Live, int32& OutKept, int32& OutDropped);
+
+	// ---- pre-P-005 files: read and migrate, never write --------------------------------
+
+	/**
+	 * Every loose object currently on the device, by digest. Walks the 256-way fan-out, so it
+	 * is a reclamation-time operation. A file whose name is not a valid digest is skipped.
 	 */
 	ETerrainStorageResult ListLooseObjects(TArray<FTerrainDigest>& OutDigests) const;
 
-	/** Every pack id on the device, ascending, whether or not its contents were readable. */
+	/** Every pre-P-005 pack id on the device, ascending, readable or not. */
 	ETerrainStorageResult ListPacks(TArray<uint64>& OutPackIds) const;
 
-	/** Digests currently resolved through this pack; duplicate copies in other packs are omitted. */
-	void GetPackContents(uint64 PackId, TArray<FTerrainDigest>& OutDigests) const;
-
-	int64 PackSize(uint64 PackId) const;
-
 	/**
-	 * Removes a whole pack and forgets everything it held.
+	 * Copies every Live object that currently resolves through a loose file or a pre-P-005
+	 * pack into one frame in the active container and flushes it; **then** deletes every
+	 * loose object and every pre-P-005 pack (P-005 §5 step 1).
 	 *
-	 * **There is no way to remove one object from a pack**, which is the cost packs charge for
-	 * turning 59 durable writes into 2 (P-004 §13.6). A pack is removable only when nothing
-	 * live refers to ANY object in it; retention decides that, this only performs it.
+	 * Removing a name is safe where creating one is not: if a removal is lost to a power cut,
+	 * the file comes back holding a byte-identical duplicate.
 	 */
-	ETerrainStorageResult DeletePack(uint64 PackId);
-
-	/**
-	 * Rewrites a pack with only the objects in `Live`, then removes the original.
-	 *
-	 * **Without this, reclamation barely works.** A pack is removable only when nothing in it
-	 * is live, and index path-copying shares pages between generations by design -- so every
-	 * old pack keeps at least one page the current checkpoint still references, and no pack is
-	 * ever fully dead. Measured on a three-generation world: 0 of 3 packs removable, 176 bytes
-	 * reclaimed, 757 KB stranded. Compaction is what turns that into real space.
-	 *
-	 * Under the device durability contract, the new pack is written and flushed
-	 * BEFORE the old one is deleted. A crash in between leaves both, holding byte-identical
-	 * copies of the live objects under the same digests -- a duplicate, not a contradiction,
-	 * and `LoadPacks` resolves it deterministically by keeping the earlier pack. A crash before
-	 * the new pack is durable changes nothing at all. Namespace durability is still R-015:
-	 * losing the new name after deleting the old one can affect both retained roots.
-	 *
-	 * Refuses while a batch is open. Returns Ok and does nothing when there is nothing to drop.
-	 */
-	ETerrainStorageResult CompactPack(
-		uint64 PackId, const TSet<FTerrainDigest>& Live, int32& OutKept, int32& OutDropped);
+	ETerrainStorageResult MigrateLegacy(const TSet<FTerrainDigest>& Live,
+		int32& OutMigrated, int32& OutFilesDeleted, int64& OutBytesDeleted);
 
 private:
-	struct FPackLocation
+	struct FObjectLocation
 	{
-		uint64 PackId = 0;
-		int64  Offset = 0;
-		int32  Length = 0;
+		int64 Offset = 0;   // absolute, within the container or pack file
+		int32 Length = 0;
 	};
 
-	bool LoadFromPack(const FPackLocation& Where, TArray<uint8>& OutBytes) const;
+	struct FContainerState
+	{
+		int64 ValidEnd = 0;
+		int64 ObjectBytes = 0;   // every accepted manifest entry, duplicates included
+		TMap<FTerrainDigest, FObjectLocation> Index;   // first copy within this container
+	};
+
+	/** Validates a pack image (P-004 §13.4 rules 1-5); entry offsets are relative to it. */
+	static bool ParsePackImage(TArrayView<const uint8> Image,
+		TArray<TPair<FTerrainDigest, FObjectLocation>>& OutEntries);
+
+	/** Builds a pack image from the open batch. */
+	void BuildBatchImage(TArray<uint8>& OutImage) const;
+
+	ETerrainStorageResult ScanContainer(int32 ContainerIndex);
+	ETerrainStorageResult LoadLegacyPacks();
+
+	bool LoadFrom(const FString& Path, const FObjectLocation& Where,
+		const FTerrainDigest& Digest, TArray<uint8>& OutBytes) const;
+
+	/** The container a digest resolves into -- the first, in index order -- or INDEX_NONE. */
+	int32 ResolveContainer(const FTerrainDigest& Digest) const;
 
 	ITerrainStorageDevice& Device;
 
-	TMap<FTerrainDigest, FPackLocation> PackMap;
-	uint64 NextPackId = 0;
+	FContainerState Containers[TerrainStoragePaths::ContainerCount];
+	int32 ActiveContainer = 0;
+
+	/** Pre-P-005 packs: digest -> (pack id, location). Read-only. */
+	TMap<FTerrainDigest, TPair<uint64, FObjectLocation>> LegacyPacks;
 
 	bool          bBatchOpen = false;
 	TArray<uint8> BatchBuffer;
-	TMap<FTerrainDigest, FPackLocation> BatchEntries;   // offsets are into BatchBuffer
+	TArray<FTerrainDigest> BatchOrder;                    // store order, so frames are deterministic
+	TMap<FTerrainDigest, FObjectLocation> BatchEntries;   // offsets are into BatchBuffer
 };
 
 /**
- * A pack's fixed 32-byte trailer, at the very end of the file (P-004 §13).
+ * A pack's fixed 32-byte trailer, at the very end of the image (P-004 §13).
  *
  * The trailer is last because it is written last: a torn pack has no valid trailer, so
  * "complete" and "usable" are the same question and one read at a known offset answers it.
@@ -472,6 +566,18 @@ inline constexpr uint32 TerrainPackVersion      = 1;
 inline constexpr int32  TerrainPackTrailerSize  = 32;
 inline constexpr int32  TerrainPackEntrySize    = 44;   // 32-byte digest + u64 offset + u32 length
 inline constexpr int32  TerrainPackMaxEntries   = 1 << 20;
+
+/**
+ * A container frame's fixed 40-byte header (P-005 §4.1). The body that follows is a pack image.
+ *
+ * The header records its own offset, so a frame is valid only where it was written: the
+ * remains of an older frame beyond a truncation point can never be read as a frame.
+ */
+inline constexpr uint64 TerrainFrameMagic       = 0x314D415246535254ULL;  // "TRSFRAM1", little-endian
+inline constexpr uint32 TerrainFrameVersion     = 1;
+inline constexpr int32  TerrainFrameHeaderSize  = 40;
+/** A frame body beyond this is refused on write and treated as invalid on read. */
+inline constexpr int64  TerrainFrameMaxBody     = 1LL << 30;
 
 // ---- the slot pair ------------------------------------------------------
 

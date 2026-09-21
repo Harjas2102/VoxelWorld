@@ -92,12 +92,16 @@ bool FTerrainRetentionTest::RunTest(const FString& Parameters)
 	Base.OriginWorldMicrometres[2] = 0;
 	Base.ValueConfig               = 0;
 
-	FTerrainWorldStore Store(Device);
+	// Every operation the live store performs is counted, so the test can say what P-005 claims:
+	// after bootstrap, an open world creates no name and removes none.
+	FTerrainFaultDevice Counted(Device);
+	FTerrainWorldStore Store(Counted);
 	if (!Store.Create(Base, Identity.World, Identity.Epoch, 1789412345678LL).IsOk())
 	{
 		AddError(TEXT("World create failed"));
 		return false;
 	}
+	const int32 BootstrapWriteNew = Counted.OpCount(ETerrainStorageOp::WriteNew);
 
 	FTerrainWorldStoreJournal Journal(Store);
 	FMemoryTerrainBackend Backend;
@@ -312,9 +316,11 @@ bool FTerrainRetentionTest::RunTest(const FString& Parameters)
 		FTerrainFaultDevice Faults(Copy);
 		FTerrainWorldStore Opened(Faults);
 		if (!Opened.Open().IsOk()) { return false; }
-		if (Case == 0) { Faults.FailAfter(ETerrainStorageOp::WriteNew, 0); }
-		if (Case == 1) { Faults.TearAfter(ETerrainStorageOp::WriteNew, 0, 100); }
-		if (Case == 2) { Faults.FailAfter(ETerrainStorageOp::Delete, 0, TerrainStoragePaths::Pack(0)); }
+		// Every capture went to c.0, so the sweep moves writing to c.1 and compacts c.0 into it:
+		// fail the copy, tear the copy, or fail the cut after the copy is durable.
+		if (Case == 0) { Faults.FailAfter(ETerrainStorageOp::Append, 0, TerrainStoragePaths::Container(1)); }
+		if (Case == 1) { Faults.TearAfter(ETerrainStorageOp::Append, 0, 100, TerrainStoragePaths::Container(1)); }
+		if (Case == 2) { Faults.FailAfter(ETerrainStorageOp::Truncate, 0, TerrainStoragePaths::Container(0)); }
 		FTerrainRetentionStats Interrupted;
 		TestFalse(TEXT("Injected compaction interruption is reported"),
 			TerrainReclaimStore(Opened, Interrupted).IsOk());
@@ -322,7 +328,7 @@ bool FTerrainRetentionTest::RunTest(const FString& Parameters)
 		if (!VerifyRestore(Copy, 12, HashesAtG12)) { return false; }
 		FTerrainMemoryStorageDevice Fallback = Copy;
 		if (!BreakNewestSlot(Fallback) || !VerifyRestore(Fallback, 8, HashesAtG8)) { return false; }
-		// Retry in the same process, especially after a torn immutable pack consumed its id.
+		// Retry in the same process -- after a torn copy, the retry must cut the tail first.
 		FTerrainRetentionStats Retried;
 		TestTrue(TEXT("Retry after an interrupted sweep succeeds without restarting"),
 			TerrainReclaimStore(Opened, Retried).IsOk());
@@ -336,7 +342,7 @@ bool FTerrainRetentionTest::RunTest(const FString& Parameters)
 		FTerrainRetentionStats Blocked;
 		const FTerrainStoreResult Refused = TerrainReclaimStore(Store, Blocked);
 		TestFalse(TEXT("Reclamation refuses while a capture holds an open batch"), Refused.IsOk());
-		TestEqual(TEXT("and deletes nothing"), Blocked.LooseDeleted + Blocked.PacksDeleted, 0);
+		TestEqual(TEXT("and touches nothing"), Blocked.ContainersCompacted + Blocked.LegacyFilesDeleted, 0);
 
 		Store.GetObjects().AbandonBatch();
 	}
@@ -354,26 +360,28 @@ bool FTerrainRetentionTest::RunTest(const FString& Parameters)
 
 	TestTrue(TEXT("Something was actually live"), Stats.LiveObjects > 0);
 	TestTrue(TEXT("and something was actually reclaimed -- otherwise this proves nothing"),
-		Stats.LooseDeleted + Stats.PacksDeleted + Stats.ObjectsDroppedFromPacks > 0);
+		Stats.ObjectsDropped > 0);
 	TestTrue(TEXT("so the store got smaller"), Device.TotalBytes() < BeforeBytes);
 
-	// Specifically: compaction had to do the work. Waiting for a pack to become entirely dead
-	// reclaims almost nothing here, because path-copying shares pages between generations --
-	// measured at 0 of 3 packs removable and 176 bytes freed before compaction existed.
-	TestTrue(TEXT("Partly dead packs were compacted, not merely counted"),
-		Stats.PacksCompacted > 0);
-	TestTrue(TEXT("dropping dead objects out of live packs"),
-		Stats.ObjectsDroppedFromPacks > 0);
+	// Specifically: compaction had to do the work. Path-copying shares pages between
+	// generations, so nothing ever becomes entirely dead on its own -- measured at 176 bytes
+	// freed before compaction existed.
+	TestTrue(TEXT("Writing moved to an empty container"), Stats.bRotated);
+	TestTrue(TEXT("so the one holding garbage could be compacted"), Stats.ContainersCompacted > 0);
 	TestTrue(TEXT("The reclaim is worth having, not a rounding error"),
 		BeforeBytes - Device.TotalBytes() > BeforeBytes / 10);
 
+	// P-005's claim, as a count: three captures and a full compaction, and not one name.
+	TestEqual(TEXT("After bootstrap the open world created no name"),
+		Counted.OpCount(ETerrainStorageOp::WriteNew), BootstrapWriteNew);
+	TestEqual(TEXT("and removed none"), Counted.OpCount(ETerrainStorageOp::Delete), 0);
+	TestTrue(TEXT("while compaction really cut a container"), Counted.OpCount(ETerrainStorageOp::Truncate) > 0);
+
 	AddInfo(FString::Printf(
-		TEXT("Retention: %d live, %d/%d loose deleted; of %d packs %d deleted, %d compacted ")
-		TEXT("(%d dead objects dropped); %lld bytes reclaimed, %lld -> %lld total"),
-		Stats.LiveObjects, Stats.LooseDeleted, Stats.LooseScanned,
-		Stats.PacksScanned, Stats.PacksDeleted, Stats.PacksCompacted,
-		Stats.ObjectsDroppedFromPacks, Stats.BytesReclaimed,
-		BeforeBytes, Device.TotalBytes()));
+		TEXT("Retention: %d live; %d containers compacted (%d dead objects dropped), rotated=%d; ")
+		TEXT("%lld bytes reclaimed, %lld -> %lld total"),
+		Stats.LiveObjects, Stats.ContainersCompacted, Stats.ObjectsDropped, Stats.bRotated ? 1 : 0,
+		Stats.BytesReclaimed, BeforeBytes, Device.TotalBytes()));
 
 	// ===== the current generation still restores, chunk for chunk ==========================
 	{
@@ -424,11 +432,10 @@ bool FTerrainRetentionTest::RunTest(const FString& Parameters)
 		FTerrainRetentionStats Again;
 		const FTerrainStoreResult Result = TerrainReclaimStore(Reopened, Again);
 		TestTrue (TEXT("A second sweep succeeds"), Result.IsOk());
-		TestEqual(TEXT("and has nothing left to delete -- the first one was complete"),
-			Again.LooseDeleted + Again.PacksDeleted, 0);
-		TestEqual(TEXT("and nothing left to compact either"), Again.PacksCompacted, 0);
-		TestEqual(TEXT("because every surviving pack is now entirely live"),
-			Again.ObjectsDroppedFromPacks, 0);
+		TestEqual(TEXT("and has nothing left to compact -- the first one was complete"),
+			Again.ContainersCompacted, 0);
+		TestFalse(TEXT("nor any reason to move writing"), Again.bRotated);
+		TestEqual(TEXT("because every surviving object is live"), Again.ObjectsDropped, 0);
 	}
 
 	return true;

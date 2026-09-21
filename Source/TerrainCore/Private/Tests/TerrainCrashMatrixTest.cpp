@@ -17,8 +17,8 @@
  * TerrainCore.Persistence.CrashMatrix -- crash at every write, recover, prove it landed on a
  * real moment in history (P-003 §8; named evidence for `Restart.CrashMatrix`).
  *
- * WHAT THE OTHER TESTS DO NOT COVER. `Storage.SlotPair` tears a root slot, `Storage.Pack` tears
- * a pack, `Persistence.Retention` interrupts a compaction. Each is a case somebody thought of.
+ * WHAT THE OTHER TESTS DO NOT COVER. `Storage.SlotPair` tears a root slot, `Storage.Container`
+ * tears a frame, `Persistence.Retention` interrupts a compaction. Each is a case somebody thought of.
  * P-003 §8 asks for something stronger -- *"before/after apply, append/flush, every
  * payload/page/descriptor write/flush, root overwrite/flush, segment discovery/rotation and
  * every deletion"* -- and a handful of hand-picked cases cannot be that, because the write
@@ -313,8 +313,8 @@ bool FTerrainCrashMatrixTest::RunTest(const FString& Parameters)
 
 	AddInfo(FString::Printf(
 		TEXT("Crash matrix: %d mutating writes over %d edits and 2 checkpoints, walked twice ")
-		TEXT("(hard failure and torn write). Packs keep the count low: one write per capture ")
-		TEXT("rather than one per payload, page and descriptor."),
+		TEXT("(hard failure and torn write). Packs keep the count low: one append per capture ")
+		TEXT("rather than one write per payload, page and descriptor."),
 		MutationCount, CrashOpCount));
 
 	// --- the matrix -------------------------------------------------------------------------

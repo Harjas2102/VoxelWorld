@@ -86,8 +86,14 @@ def main():
         raise RuntimeError('Reclamation did not reduce the save')
     after_files = file_hashes()
     for path, digest in before_files.items():
-        if not path.startswith(('objects', 'packs')) and after_files.get(path) != digest:
+        if not path.startswith(('objects', 'packs', 'containers')) and after_files.get(path) != digest:
             raise RuntimeError(f'Reclamation changed protected file {path}')
+    # P-005: an open world creates and removes no names. Reclamation truncates containers; it
+    # must leave exactly the same set of files behind, on a real disk.
+    if set(after_files) != set(before_files):
+        raise RuntimeError('Reclamation created or removed a file name: '
+                           f'+{sorted(set(after_files) - set(before_files))} '
+                           f'-{sorted(set(before_files) - set(after_files))}')
     if hashes(run('Restart', 'Terrain.StressCaptureHashes')) != generations[-1]:
         raise RuntimeError('Restart after reclamation changed terrain')
     second = run('SecondSweep', 'Terrain.Reclaim')

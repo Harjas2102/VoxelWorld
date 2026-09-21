@@ -118,6 +118,9 @@ public:
 	const FTerrainJournalWriter* GetJournal() const { return Journal.Get(); }
 
 private:
+	/** SyncDirectory over every directory bootstrap creates names in (P-005 §6). */
+	FTerrainStoreResult SyncBootstrapDirectories();
+
 	FTerrainStoreResult StoreCheckpointObject(const FTerrainCheckpointDescriptor& Checkpoint,
 	                                          FTerrainDigest& OutDigest, uint32& OutLength);
 

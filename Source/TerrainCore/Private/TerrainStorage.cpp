@@ -6,6 +6,14 @@
 #include "HAL/PlatformFileManager.h"
 #include "GenericPlatform/GenericPlatformFile.h"
 #include "Misc/Paths.h"
+#include "TerrainCore.h"
+
+#if PLATFORM_WINDOWS
+#include "Windows/WindowsHWrapper.h"
+#elif PLATFORM_UNIX
+#include <fcntl.h>
+#include <unistd.h>
+#endif
 
 /**
  * The storage device seam and the two stores built on it (P-004 §11, §12).
@@ -386,6 +394,142 @@ ETerrainStorageResult FTerrainPlatformStorageDevice::Delete(const FString& Relat
 	return File.DeleteFile(*Absolute) ? ETerrainStorageResult::Ok : ETerrainStorageResult::IoError;
 }
 
+ETerrainStorageResult FTerrainPlatformStorageDevice::ReadRange(
+	const FString& RelativePath, int64 Offset, int64 Length, TArray<uint8>& OutBytes) const
+{
+	const FString Absolute = Resolve(RelativePath);
+	if (Absolute.IsEmpty())
+	{
+		return ETerrainStorageResult::BadPath;
+	}
+	if (Offset < 0 || Length < 0 || Length > MAX_int32)
+	{
+		return ETerrainStorageResult::WrongSize;
+	}
+
+	IPlatformFile& File = FPlatformFileManager::Get().GetPlatformFile();
+	TUniquePtr<IFileHandle> Handle(File.OpenRead(*Absolute));
+	if (!Handle.IsValid())
+	{
+		return File.FileExists(*Absolute) ? ETerrainStorageResult::IoError : ETerrainStorageResult::NotFound;
+	}
+
+	const int64 FileSize = Handle->Size();
+	if (FileSize < 0)
+	{
+		return ETerrainStorageResult::IoError;
+	}
+	if (Offset > FileSize || Length > FileSize - Offset)
+	{
+		return ETerrainStorageResult::WrongSize;
+	}
+
+	OutBytes.Reset();
+	OutBytes.AddUninitialized(static_cast<int32>(Length));
+	if (Length > 0 && (!Handle->Seek(Offset) || !Handle->Read(OutBytes.GetData(), Length)))
+	{
+		OutBytes.Reset();
+		return ETerrainStorageResult::IoError;
+	}
+	return ETerrainStorageResult::Ok;
+}
+
+ETerrainStorageResult FTerrainPlatformStorageDevice::Truncate(const FString& RelativePath, int64 NewSize)
+{
+	const FString Absolute = Resolve(RelativePath);
+	if (Absolute.IsEmpty())
+	{
+		return ETerrainStorageResult::BadPath;
+	}
+	if (NewSize < 0)
+	{
+		return ETerrainStorageResult::WrongSize;
+	}
+
+	IPlatformFile& File = FPlatformFileManager::Get().GetPlatformFile();
+	if (!File.FileExists(*Absolute))
+	{
+		return ETerrainStorageResult::NotFound;
+	}
+
+	// bAppend = true, for the same reason as OverwriteInPlace: bAppend = false truncates to zero
+	// on open, which would turn "cut the torn tail" into "lose the container".
+	TUniquePtr<IFileHandle> Handle(File.OpenWrite(*Absolute, /*bAppend=*/true, /*bAllowRead=*/true));
+	if (!Handle.IsValid())
+	{
+		return ETerrainStorageResult::IoError;
+	}
+
+	const int64 Current = Handle->Size();
+	if (Current < 0)
+	{
+		return ETerrainStorageResult::IoError;
+	}
+	if (NewSize > Current)
+	{
+		return ETerrainStorageResult::WrongSize;   // shrink only
+	}
+	if (NewSize < Current && !Handle->Truncate(NewSize))
+	{
+		return ETerrainStorageResult::IoError;
+	}
+	// The new length is metadata of this file, made durable by this file's own flush -- the same
+	// primitive every journal append already relies on (P-005 §3).
+	return Handle->Flush(/*bFullFlush=*/true) ? ETerrainStorageResult::Ok : ETerrainStorageResult::IoError;
+}
+
+ETerrainStorageResult FTerrainPlatformStorageDevice::SyncDirectory(const FString& RelativeDirectory)
+{
+	// The empty path names the world directory itself: base.tobj and the top-level directories
+	// are entries in it, and it is the one directory no relative path can name.
+	FString Absolute = RelativeDirectory.IsEmpty() ? Root : Resolve(RelativeDirectory);
+	if (Absolute.IsEmpty())
+	{
+		return ETerrainStorageResult::BadPath;
+	}
+	Absolute = FPaths::ConvertRelativePathToFull(Absolute);
+
+#if PLATFORM_WINDOWS
+	// Win32 has no documented directory flush. A backup-semantics handle with write access is
+	// the closest thing, and NTFS accepts FlushFileBuffers on it. Not being documented, a
+	// failure here must not stop a world being created -- see the declaration.
+	FPaths::MakePlatformFilename(Absolute);
+	HANDLE Handle = ::CreateFileW(*Absolute, GENERIC_READ | GENERIC_WRITE,
+		FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
+		OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, nullptr);
+	if (Handle == INVALID_HANDLE_VALUE)
+	{
+		UE_LOG(LogTerrainCore, Warning,
+			TEXT("SyncDirectory: could not open '%s' (error %u); its entries are as durable as ")
+			TEXT("NTFS makes them without help (P-005 §6)."), *Absolute, ::GetLastError());
+		return ETerrainStorageResult::Ok;
+	}
+	const BOOL bFlushed = ::FlushFileBuffers(Handle);
+	const uint32 FlushError = bFlushed ? 0 : ::GetLastError();
+	::CloseHandle(Handle);
+	if (!bFlushed)
+	{
+		UE_LOG(LogTerrainCore, Warning,
+			TEXT("SyncDirectory: FlushFileBuffers on '%s' failed (error %u); continuing (P-005 §6)."),
+			*Absolute, FlushError);
+	}
+	return ETerrainStorageResult::Ok;
+#elif PLATFORM_UNIX
+	// POSIX's documented primitive: fsync on the directory makes its entries durable. On the
+	// shipping server this closes the bootstrap window rather than narrowing it.
+	const int Descriptor = ::open(TCHAR_TO_UTF8(*Absolute), O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+	if (Descriptor < 0)
+	{
+		return ETerrainStorageResult::IoError;
+	}
+	const int Synced = ::fsync(Descriptor);
+	::close(Descriptor);
+	return Synced == 0 ? ETerrainStorageResult::Ok : ETerrainStorageResult::IoError;
+#else
+	return ETerrainStorageResult::Ok;
+#endif
+}
+
 // ---- the memory device --------------------------------------------------
 
 ETerrainStorageResult FTerrainMemoryStorageDevice::EnsureDirectory(const FString& RelativePath)
@@ -514,6 +658,53 @@ ETerrainStorageResult FTerrainMemoryStorageDevice::Delete(const FString& Relativ
 	return Files.Remove(RelativePath) > 0 ? ETerrainStorageResult::Ok : ETerrainStorageResult::NotFound;
 }
 
+ETerrainStorageResult FTerrainMemoryStorageDevice::ReadRange(
+	const FString& RelativePath, int64 Offset, int64 Length, TArray<uint8>& OutBytes) const
+{
+	if (!TerrainStorageIsSafeRelativePath(RelativePath))
+	{
+		return ETerrainStorageResult::BadPath;
+	}
+	const TArray<uint8>* Found = Files.Find(RelativePath);
+	if (Found == nullptr)
+	{
+		return ETerrainStorageResult::NotFound;
+	}
+	if (Offset < 0 || Length < 0 || Offset > Found->Num() || Length > Found->Num() - Offset)
+	{
+		return ETerrainStorageResult::WrongSize;
+	}
+	OutBytes.Reset();
+	OutBytes.Append(Found->GetData() + Offset, static_cast<int32>(Length));
+	return ETerrainStorageResult::Ok;
+}
+
+ETerrainStorageResult FTerrainMemoryStorageDevice::Truncate(const FString& RelativePath, int64 NewSize)
+{
+	if (!TerrainStorageIsSafeRelativePath(RelativePath))
+	{
+		return ETerrainStorageResult::BadPath;
+	}
+	TArray<uint8>* Found = Files.Find(RelativePath);
+	if (Found == nullptr)
+	{
+		return ETerrainStorageResult::NotFound;
+	}
+	if (NewSize < 0 || NewSize > Found->Num())
+	{
+		return ETerrainStorageResult::WrongSize;
+	}
+	Found->SetNum(static_cast<int32>(NewSize));
+	return ETerrainStorageResult::Ok;
+}
+
+ETerrainStorageResult FTerrainMemoryStorageDevice::SyncDirectory(const FString& RelativeDirectory)
+{
+	// Nothing in memory is more or less durable than anything else.
+	return RelativeDirectory.IsEmpty() || TerrainStorageIsSafeRelativePath(RelativeDirectory)
+		? ETerrainStorageResult::Ok : ETerrainStorageResult::BadPath;
+}
+
 // ---- fault injection ----------------------------------------------------
 
 void FTerrainFaultDevice::FailAfter(ETerrainStorageOp Op, int32 CountBefore, const FString& PathFilter)
@@ -555,7 +746,8 @@ bool FTerrainFaultDevice::ShouldFail(ETerrainStorageOp Op, const FString& Path, 
 	const bool bMutating = Op == ETerrainStorageOp::WriteNew
 		|| Op == ETerrainStorageOp::OverwriteInPlace
 		|| Op == ETerrainStorageOp::Append
-		|| Op == ETerrainStorageOp::Delete;
+		|| Op == ETerrainStorageOp::Delete
+		|| Op == ETerrainStorageOp::Truncate;
 	if (bMutating)
 	{
 		const int32 ThisMutation = Mutations++;
@@ -686,49 +878,137 @@ ETerrainStorageResult FTerrainFaultDevice::Delete(const FString& RelativePath)
 	return Inner.Delete(RelativePath);
 }
 
+ETerrainStorageResult FTerrainFaultDevice::ReadRange(
+	const FString& RelativePath, int64 Offset, int64 Length, TArray<uint8>& OutBytes) const
+{
+	++Counts[static_cast<int32>(ETerrainStorageOp::Read)];
+	return Inner.ReadRange(RelativePath, Offset, Length, OutBytes);
+}
+
+ETerrainStorageResult FTerrainFaultDevice::Truncate(const FString& RelativePath, int64 NewSize)
+{
+	int32 Tear = -1;
+	if (ShouldFail(ETerrainStorageOp::Truncate, RelativePath, Tear))
+	{
+		// A file length is set or it is not; there is no half-truncation to model, so a failed
+		// truncation changes nothing and the torn mode is the same as the hard one.
+		return ETerrainStorageResult::IoError;
+	}
+	return Inner.Truncate(RelativePath, NewSize);
+}
+
+ETerrainStorageResult FTerrainFaultDevice::SyncDirectory(const FString& RelativeDirectory)
+{
+	int32 Tear = -1;
+	if (ShouldFail(ETerrainStorageOp::SyncDirectory, RelativeDirectory, Tear))
+	{
+		return ETerrainStorageResult::IoError;
+	}
+	return Inner.SyncDirectory(RelativeDirectory);
+}
+
 // ---- the object store ---------------------------------------------------
 
-ETerrainStorageResult FTerrainFileObjectStore::EnsureLayout()
+namespace
 {
-	const ETerrainStorageResult ObjectsResult =
-		Device.EnsureDirectory(TerrainStoragePaths::ObjectsDirectory);
-	if (ObjectsResult != ETerrainStorageResult::Ok)
+	void PutU32(TArray<uint8>& Out, uint32 Value)
 	{
-		return ObjectsResult;
+		for (int32 i = 0; i < 4; ++i) { Out.Add(static_cast<uint8>((Value >> (i * 8)) & 0xFFu)); }
 	}
-	return Device.EnsureDirectory(TerrainStoragePaths::PacksDirectory);
+
+	void PutU64(TArray<uint8>& Out, uint64 Value)
+	{
+		for (int32 i = 0; i < 8; ++i) { Out.Add(static_cast<uint8>((Value >> (i * 8)) & 0xFFu)); }
+	}
+
+	uint32 GetU32(const uint8* P)
+	{
+		uint32 V = 0;
+		for (int32 i = 0; i < 4; ++i) { V |= static_cast<uint32>(P[i]) << (i * 8); }
+		return V;
+	}
+
+	uint64 GetU64(const uint8* P)
+	{
+		uint64 V = 0;
+		for (int32 i = 0; i < 8; ++i) { V |= static_cast<uint64>(P[i]) << (i * 8); }
+		return V;
+	}
+
+	/** Byte order, so every list this store writes or migrates is in a deterministic order. */
+	bool DigestLess(const FTerrainDigest& A, const FTerrainDigest& B)
+	{
+		return FMemory::Memcmp(A.Bytes, B.Bytes, TerrainPersistDigestSize) < 0;
+	}
+}
+
+namespace TerrainStoragePaths
+{
+	FString Container(int32 ContainerIndex)
+	{
+		check(ContainerIndex >= 0 && ContainerIndex < ContainerCount);
+		return FString::Printf(TEXT("%s/c.%d"), ContainersDirectory, ContainerIndex);
+	}
+}
+
+ETerrainStorageResult FTerrainFileObjectStore::EnsureLayout(bool* OutCreated)
+{
+	if (OutCreated != nullptr) { *OutCreated = false; }
+
+	const ETerrainStorageResult DirectoryResult =
+		Device.EnsureDirectory(TerrainStoragePaths::ContainersDirectory);
+	if (DirectoryResult != ETerrainStorageResult::Ok)
+	{
+		return DirectoryResult;
+	}
+
+	for (int32 Index = 0; Index < TerrainStoragePaths::ContainerCount; ++Index)
+	{
+		const FString Path = TerrainStoragePaths::Container(Index);
+		if (Device.Exists(Path))
+		{
+			continue;
+		}
+		// Bootstrap, and the only name this store ever creates (P-005 §6). An empty container
+		// is a zero-length file: frames start at offset 0 and there is no header to tear.
+		const ETerrainStorageResult Created = Device.WriteNew(Path, TArrayView<const uint8>());
+		if (Created != ETerrainStorageResult::Ok && Created != ETerrainStorageResult::AlreadyExists)
+		{
+			return Created;
+		}
+		if (OutCreated != nullptr) { *OutCreated = true; }
+	}
+	return ETerrainStorageResult::Ok;
+}
+
+int32 FTerrainFileObjectStore::ResolveContainer(const FTerrainDigest& Digest) const
+{
+	for (int32 Index = 0; Index < TerrainStoragePaths::ContainerCount; ++Index)
+	{
+		if (Containers[Index].Index.Contains(Digest))
+		{
+			return Index;
+		}
+	}
+	return INDEX_NONE;
 }
 
 bool FTerrainFileObjectStore::Contains(const FTerrainDigest& Digest) const
 {
 	return BatchEntries.Contains(Digest)
-		|| PackMap.Contains(Digest)
+		|| ResolveContainer(Digest) != INDEX_NONE
+		|| LegacyPacks.Contains(Digest)
 		|| Device.Exists(TerrainStoragePaths::Object(Digest));
 }
 
-bool FTerrainFileObjectStore::LoadObject(const FTerrainDigest& Digest, TArray<uint8>& OutBytes) const
+bool FTerrainFileObjectStore::LoadFrom(const FString& Path, const FObjectLocation& Where,
+	const FTerrainDigest& Digest, TArray<uint8>& OutBytes) const
 {
 	TArray<uint8> Bytes;
-
-	// An object written earlier in this batch must read back NOW, before the pack is durable.
-	// The index path-copy reads pages it wrote moments ago in the same capture, so a batch that
-	// could not be read from would break the very caller it exists for.
-	if (const FPackLocation* Buffered = BatchEntries.Find(Digest))
-	{
-		Bytes.Append(BatchBuffer.GetData() + Buffered->Offset, Buffered->Length);
-	}
-	else if (const FPackLocation* Packed = PackMap.Find(Digest))
-	{
-		if (!LoadFromPack(*Packed, Bytes))
-		{
-			return false;
-		}
-	}
-	else if (Device.Read(TerrainStoragePaths::Object(Digest), Bytes) != ETerrainStorageResult::Ok)
+	if (Device.ReadRange(Path, Where.Offset, Where.Length, Bytes) != ETerrainStorageResult::Ok)
 	{
 		return false;
 	}
-
 	// Verified on the way out as well as on the way in. Content addressing checked only on
 	// write is a naming convention; checked on read it is the reason a caller can trust the
 	// bytes without trusting the medium.
@@ -736,9 +1016,56 @@ bool FTerrainFileObjectStore::LoadObject(const FTerrainDigest& Digest, TArray<ui
 	{
 		return false;
 	}
-
 	OutBytes = MoveTemp(Bytes);
 	return true;
+}
+
+bool FTerrainFileObjectStore::LoadObject(const FTerrainDigest& Digest, TArray<uint8>& OutBytes) const
+{
+	// An object written earlier in this batch must read back NOW, before it is durable. The
+	// index path-copy reads pages it wrote moments ago in the same capture.
+	if (const FObjectLocation* Buffered = BatchEntries.Find(Digest))
+	{
+		TArray<uint8> Bytes;
+		Bytes.Append(BatchBuffer.GetData() + Buffered->Offset, Buffered->Length);
+		if (TerrainPersistDigest(Bytes) != Digest)
+		{
+			return false;
+		}
+		OutBytes = MoveTemp(Bytes);
+		return true;
+	}
+
+	// Every copy, in resolution order; the first that reads and verifies wins. Normally there is
+	// one. There are two in the window between a compaction's copy and its truncation, and if
+	// that truncation's outcome is uncertain the copy that still verifies is the right answer.
+	for (int32 Index = 0; Index < TerrainStoragePaths::ContainerCount; ++Index)
+	{
+		if (const FObjectLocation* Where = Containers[Index].Index.Find(Digest))
+		{
+			if (LoadFrom(TerrainStoragePaths::Container(Index), *Where, Digest, OutBytes))
+			{
+				return true;
+			}
+		}
+	}
+
+	if (const TPair<uint64, FObjectLocation>* Legacy = LegacyPacks.Find(Digest))
+	{
+		if (LoadFrom(TerrainStoragePaths::Pack(Legacy->Key), Legacy->Value, Digest, OutBytes))
+		{
+			return true;
+		}
+	}
+
+	TArray<uint8> Loose;
+	if (Device.Read(TerrainStoragePaths::Object(Digest), Loose) == ETerrainStorageResult::Ok
+		&& TerrainPersistDigest(Loose) == Digest)
+	{
+		OutBytes = MoveTemp(Loose);
+		return true;
+	}
+	return false;
 }
 
 bool FTerrainFileObjectStore::StoreObject(const FTerrainDigest& Digest, TArrayView<const uint8> Bytes)
@@ -748,46 +1075,32 @@ bool FTerrainFileObjectStore::StoreObject(const FTerrainDigest& Digest, TArrayVi
 		return false;
 	}
 
-	if (BatchEntries.Contains(Digest) || PackMap.Contains(Digest))
+	if (Contains(Digest))
 	{
-		// Immutable and content-addressed: already held, in this batch or an earlier pack.
+		// Immutable and content-addressed: already held, in this batch, a container or a
+		// pre-P-005 file. The same digest is the same bytes, so this writes nothing.
 		return true;
 	}
 
-	const FString Path = TerrainStoragePaths::Object(Digest);
-	if (Device.Exists(Path))
+	// Outside a batch, one object is one frame. This used to create a loose file, which was
+	// a new name at runtime -- the thing P-005 removes.
+	const bool bImplicitBatch = !bBatchOpen;
+	if (bImplicitBatch)
 	{
-		// Immutable and content-addressed: the same digest is the same bytes, so this is a
-		// success that writes nothing rather than a conflict.
-		return true;
+		BeginBatch();
 	}
 
-	if (bBatchOpen)
-	{
-		FPackLocation Where;
-		Where.Offset = BatchBuffer.Num();
-		Where.Length = Bytes.Num();
-		BatchBuffer.Append(Bytes.GetData(), Bytes.Num());
-		BatchEntries.Add(Digest, Where);
-		return true;
-	}
+	FObjectLocation Where;
+	Where.Offset = BatchBuffer.Num();
+	Where.Length = Bytes.Num();
+	BatchBuffer.Append(Bytes.GetData(), Bytes.Num());
+	BatchEntries.Add(Digest, Where);
+	BatchOrder.Add(Digest);
 
-	if (Device.EnsureDirectory(TerrainStoragePaths::ObjectDirectory(Digest)) != ETerrainStorageResult::Ok)
-	{
-		return false;
-	}
-
-	const ETerrainStorageResult Result = Device.WriteNew(Path, Bytes);
-	// A concurrent writer of the SAME object is not a failure, for the same reason as above.
-	return Result == ETerrainStorageResult::Ok || Result == ETerrainStorageResult::AlreadyExists;
+	return bImplicitBatch ? CommitBatch() == ETerrainStorageResult::Ok : true;
 }
 
-ETerrainStorageResult FTerrainFileObjectStore::DeleteObject(const FTerrainDigest& Digest)
-{
-	return Device.Delete(TerrainStoragePaths::Object(Digest));
-}
-
-// ---- packs: many objects, one durable write (P-004 §13) -----------------
+// ---- batching (P-004 §13, P-005 §4) -------------------------------------
 
 void FTerrainFileObjectStore::BeginBatch()
 {
@@ -795,6 +1108,7 @@ void FTerrainFileObjectStore::BeginBatch()
 	bBatchOpen = true;
 	BatchBuffer.Reset();
 	BatchEntries.Reset();
+	BatchOrder.Reset();
 }
 
 void FTerrainFileObjectStore::AbandonBatch()
@@ -802,6 +1116,34 @@ void FTerrainFileObjectStore::AbandonBatch()
 	bBatchOpen = false;
 	BatchBuffer.Reset();
 	BatchEntries.Reset();
+	BatchOrder.Reset();
+}
+
+void FTerrainFileObjectStore::BuildBatchImage(TArray<uint8>& OutImage) const
+{
+	// Body is already assembled in BatchBuffer; append the manifest, then the trailer. The
+	// manifest follows store order, so the same captures always produce the same bytes.
+	const int64 ManifestOffset = BatchBuffer.Num();
+	OutImage.Reset();
+	OutImage.Reserve(ManifestOffset + BatchOrder.Num() * TerrainPackEntrySize + TerrainPackTrailerSize);
+	OutImage.Append(BatchBuffer);
+
+	for (const FTerrainDigest& Digest : BatchOrder)
+	{
+		const FObjectLocation& Where = BatchEntries.FindChecked(Digest);
+		OutImage.Append(Digest.Bytes, TerrainPersistDigestSize);
+		PutU64(OutImage, static_cast<uint64>(Where.Offset));
+		PutU32(OutImage, static_cast<uint32>(Where.Length));
+	}
+
+	// The checksum covers body and manifest, so a torn image fails here rather than being
+	// half believed.
+	const uint64 Checksum = TerrainPersistChecksum(OutImage);
+	PutU64(OutImage, TerrainPackMagic);
+	PutU32(OutImage, TerrainPackVersion);
+	PutU32(OutImage, static_cast<uint32>(BatchOrder.Num()));
+	PutU64(OutImage, static_cast<uint64>(ManifestOffset));
+	PutU64(OutImage, Checksum);
 }
 
 ETerrainStorageResult FTerrainFileObjectStore::CommitBatch()
@@ -821,82 +1163,460 @@ ETerrainStorageResult FTerrainFileObjectStore::CommitBatch()
 		return ETerrainStorageResult::IoError;
 	}
 
-	// Created on demand, exactly as StoreObject does for the object fan-out directories: the
-	// store is not guaranteed to have had EnsureLayout run against it.
-	if (Device.EnsureDirectory(TerrainStoragePaths::PacksDirectory) != ETerrainStorageResult::Ok)
+	FContainerState& Target = Containers[ActiveContainer];
+	const FString Path = TerrainStoragePaths::Container(ActiveContainer);
+
+	// --- P-005 §4.3: append only at the valid end -----------------------------------------------
+	const int64 OnDisk = Device.Size(Path);
+	if (OnDisk < 0)
+	{
+		// The pool is missing. Creating it here would be a runtime name, which is the one thing
+		// this design forbids; the world was not bootstrapped, so refuse.
+		AbandonBatch();
+		return ETerrainStorageResult::NotFound;
+	}
+	if (OnDisk < Target.ValidEnd)
+	{
+		// Shorter than the frames we indexed: something outside this store cut it, and the
+		// index can no longer be trusted to describe it.
+		AbandonBatch();
+		return ETerrainStorageResult::IoError;
+	}
+	if (OnDisk > Target.ValidEnd)
+	{
+		// A torn tail -- from a previous process, or a failed append earlier in this one. A
+		// frame written after it would be durable, named by a root, and unreachable by the scan.
+		const ETerrainStorageResult Cut = Device.Truncate(Path, Target.ValidEnd);
+		if (Cut != ETerrainStorageResult::Ok)
+		{
+			AbandonBatch();
+			return Cut;
+		}
+	}
+
+	TArray<uint8> Image;
+	BuildBatchImage(Image);
+	if (Image.Num() > TerrainFrameMaxBody)
 	{
 		AbandonBatch();
 		return ETerrainStorageResult::IoError;
 	}
 
-	const uint64 PackId   = NextPackId;
-	const FString PackPath = TerrainStoragePaths::Pack(PackId);
+	TArray<uint8> Frame;
+	Frame.Reserve(TerrainFrameHeaderSize + Image.Num());
+	PutU64(Frame, TerrainFrameMagic);
+	PutU64(Frame, static_cast<uint64>(Target.ValidEnd));   // where this frame is, and nowhere else
+	PutU64(Frame, static_cast<uint64>(Image.Num()));
+	PutU32(Frame, TerrainFrameVersion);
+	PutU32(Frame, 0);
+	PutU64(Frame, TerrainPersistChecksum(TArrayView<const uint8>(Frame.GetData(), 32)));
+	Frame.Append(Image);
 
-	// Body is already assembled in BatchBuffer; append the manifest, then the trailer.
-	const int64 ManifestOffset = BatchBuffer.Num();
-	TArray<uint8> Image = MoveTemp(BatchBuffer);
-	Image.Reserve(ManifestOffset + BatchEntries.Num() * TerrainPackEntrySize + TerrainPackTrailerSize);
-
-	for (const TPair<FTerrainDigest, FPackLocation>& Entry : BatchEntries)
-	{
-		Image.Append(Entry.Key.Bytes, TerrainPersistDigestSize);
-		const uint64 Offset = static_cast<uint64>(Entry.Value.Offset);
-		const uint32 Length = static_cast<uint32>(Entry.Value.Length);
-		for (int32 i = 0; i < 8; ++i) { Image.Add(static_cast<uint8>((Offset >> (i * 8)) & 0xFFu)); }
-		for (int32 i = 0; i < 4; ++i) { Image.Add(static_cast<uint8>((Length >> (i * 8)) & 0xFFu)); }
-	}
-
-	// The checksum covers everything before the trailer -- body and manifest both -- so a
-	// torn or partially written pack fails here rather than being half believed.
-	const uint64 Checksum = TerrainPersistChecksum(Image);
-
-	const uint32 Count = static_cast<uint32>(BatchEntries.Num());
-	for (int32 i = 0; i < 8; ++i) { Image.Add(static_cast<uint8>((TerrainPackMagic >> (i * 8)) & 0xFFu)); }
-	for (int32 i = 0; i < 4; ++i) { Image.Add(static_cast<uint8>((TerrainPackVersion >> (i * 8)) & 0xFFu)); }
-	for (int32 i = 0; i < 4; ++i) { Image.Add(static_cast<uint8>((Count >> (i * 8)) & 0xFFu)); }
-	const uint64 ManifestOffsetU = static_cast<uint64>(ManifestOffset);
-	for (int32 i = 0; i < 8; ++i) { Image.Add(static_cast<uint8>((ManifestOffsetU >> (i * 8)) & 0xFFu)); }
-	for (int32 i = 0; i < 8; ++i) { Image.Add(static_cast<uint8>((Checksum >> (i * 8)) & 0xFFu)); }
-
-	// One file, one flush. This is the whole point of the batch.
-	const ETerrainStorageResult Result = Device.WriteNew(PackPath, Image);
+	// One append, one flush. This is the whole point of the batch.
+	const ETerrainStorageResult Result = Device.Append(Path, Frame);
 	if (Result != ETerrainStorageResult::Ok)
 	{
-		// A failed write may still leave a torn immutable file. Do not make every later
-		// capture retry that occupied name until the process restarts.
-		if (Device.Exists(PackPath)) { ++NextPackId; }
+		// Whatever reached the file is past ValidEnd, and the next append cuts it.
 		AbandonBatch();
 		return Result;
 	}
 
-	// Only once it is durable do the buffered objects become resolvable from the pack.
-	for (const TPair<FTerrainDigest, FPackLocation>& Entry : BatchEntries)
+	// Only once it is durable do the buffered objects become resolvable from the container.
+	const int64 BodyStart = Target.ValidEnd + TerrainFrameHeaderSize;
+	for (const FTerrainDigest& Digest : BatchOrder)
 	{
-		FPackLocation Where = Entry.Value;
-		Where.PackId = PackId;
-		PackMap.Add(Entry.Key, Where);
+		FObjectLocation Where = BatchEntries.FindChecked(Digest);
+		Where.Offset += BodyStart;
+		Target.Index.FindOrAdd(Digest, Where);
+		Target.ObjectBytes += Where.Length;
 	}
+	Target.ValidEnd += Frame.Num();
 
-	++NextPackId;
 	AbandonBatch();
 	return ETerrainStorageResult::Ok;
 }
 
-bool FTerrainFileObjectStore::LoadFromPack(const FPackLocation& Where, TArray<uint8>& OutBytes) const
+// ---- reading what is on disk --------------------------------------------
+
+bool FTerrainFileObjectStore::ParsePackImage(TArrayView<const uint8> Image,
+	TArray<TPair<FTerrainDigest, FObjectLocation>>& OutEntries)
 {
-	TArray<uint8> Image;
-	if (Device.Read(TerrainStoragePaths::Pack(Where.PackId), Image) != ETerrainStorageResult::Ok)
+	OutEntries.Reset();
+
+	// P-004 §13.4, rules 1-5: any failure condemns the whole image.
+	if (Image.Num() < TerrainPackTrailerSize)
 	{
 		return false;
 	}
-	if (Where.Offset < 0 || Where.Length < 0 || Where.Offset + Where.Length > Image.Num())
+	const uint8* const Trailer = Image.GetData() + Image.Num() - TerrainPackTrailerSize;
+	if (GetU64(Trailer) != TerrainPackMagic || GetU32(Trailer + 8) != TerrainPackVersion)
 	{
 		return false;
 	}
-	OutBytes.Reset();
-	OutBytes.Append(Image.GetData() + Where.Offset, Where.Length);
+	const uint32 Count          = GetU32(Trailer + 12);
+	const uint64 ManifestOffset = GetU64(Trailer + 16);
+	const uint64 Checksum       = GetU64(Trailer + 24);
+	if (Count > static_cast<uint32>(TerrainPackMaxEntries))
+	{
+		return false;
+	}
+	const uint64 ManifestBytes = static_cast<uint64>(Count) * TerrainPackEntrySize;
+	if (ManifestOffset > static_cast<uint64>(Image.Num())
+		|| ManifestOffset + ManifestBytes + TerrainPackTrailerSize != static_cast<uint64>(Image.Num()))
+	{
+		return false;
+	}
+	if (TerrainPersistChecksum(Image.Slice(0, Image.Num() - TerrainPackTrailerSize)) != Checksum)
+	{
+		return false;
+	}
+
+	const uint8* Entry = Image.GetData() + ManifestOffset;
+	for (uint32 i = 0; i < Count; ++i, Entry += TerrainPackEntrySize)
+	{
+		FTerrainDigest Digest;
+		FMemory::Memcpy(Digest.Bytes, Entry, TerrainPersistDigestSize);
+		const uint64 Offset = GetU64(Entry + TerrainPersistDigestSize);
+		const uint32 Length = GetU32(Entry + TerrainPersistDigestSize + 8);
+
+		// Rule 6: an entry pointing outside the body is skipped on its own.
+		if (Offset > ManifestOffset || Length > ManifestOffset - Offset || Length > MAX_int32)
+		{
+			continue;
+		}
+		FObjectLocation Where;
+		Where.Offset = static_cast<int64>(Offset);
+		Where.Length = static_cast<int32>(Length);
+		OutEntries.Emplace(Digest, Where);
+	}
 	return true;
 }
+
+ETerrainStorageResult FTerrainFileObjectStore::ScanContainer(int32 ContainerIndex)
+{
+	FContainerState& State = Containers[ContainerIndex];
+	State = FContainerState();
+
+	const FString Path = TerrainStoragePaths::Container(ContainerIndex);
+	const int64 Size = Device.Size(Path);
+	if (Size <= 0)
+	{
+		return ETerrainStorageResult::Ok;   // empty, or absent until EnsureLayout runs
+	}
+
+	// P-005 §4.2: walk frames from offset 0; the first whose HEADER fails ends the scan, and
+	// where it starts is the valid end. Nothing past it was ever named by a root.
+	int64 Position = 0;
+	while (Size - Position >= TerrainFrameHeaderSize)
+	{
+		TArray<uint8> Header;
+		const ETerrainStorageResult HeaderRead =
+			Device.ReadRange(Path, Position, TerrainFrameHeaderSize, Header);
+		if (HeaderRead != ETerrainStorageResult::Ok)
+		{
+			return HeaderRead;   // a device failure is not a torn frame
+		}
+
+		const uint8* H = Header.GetData();
+		if (GetU64(H) != TerrainFrameMagic
+			|| GetU64(H + 8) != static_cast<uint64>(Position)
+			|| GetU32(H + 24) != TerrainFrameVersion
+			|| GetU32(H + 28) != 0
+			|| GetU64(H + 32) != TerrainPersistChecksum(TArrayView<const uint8>(H, 32)))
+		{
+			break;
+		}
+		const uint64 BodyLength = GetU64(H + 16);
+		const int64 Remaining = Size - Position - TerrainFrameHeaderSize;
+		if (BodyLength < static_cast<uint64>(TerrainPackTrailerSize)
+			|| BodyLength > static_cast<uint64>(TerrainFrameMaxBody)
+			|| BodyLength > static_cast<uint64>(Remaining))
+		{
+			break;
+		}
+
+		const int64 BodyStart = Position + TerrainFrameHeaderSize;
+		TArray<uint8> Body;
+		const ETerrainStorageResult BodyRead =
+			Device.ReadRange(Path, BodyStart, static_cast<int64>(BodyLength), Body);
+		if (BodyRead != ETerrainStorageResult::Ok)
+		{
+			return BodyRead;
+		}
+
+		// A whole frame whose header holds but whose body does not is skipped, not a stop: its
+		// length is trustworthy, so the frames after it still are. That is bit rot, or a flush
+		// that extended the file without its data -- either way nothing it held is believed.
+		TArray<TPair<FTerrainDigest, FObjectLocation>> Entries;
+		if (!ParsePackImage(Body, Entries))
+		{
+			UE_LOG(LogTerrainCore, Warning,
+				TEXT("Container %d: the frame at %lld fails its body checks and is ignored."),
+				ContainerIndex, Position);
+		}
+		for (TPair<FTerrainDigest, FObjectLocation>& Entry : Entries)
+		{
+			Entry.Value.Offset += BodyStart;
+			State.Index.FindOrAdd(Entry.Key, Entry.Value);
+			State.ObjectBytes += Entry.Value.Length;
+		}
+		Position = BodyStart + static_cast<int64>(BodyLength);
+	}
+
+	State.ValidEnd = Position;
+	if (Position != Size)
+	{
+		UE_LOG(LogTerrainCore, Log,
+			TEXT("Container %d: %lld bytes past the last whole frame (a torn append); the next ")
+			TEXT("append cuts them."), ContainerIndex, Size - Position);
+	}
+	return ETerrainStorageResult::Ok;
+}
+
+ETerrainStorageResult FTerrainFileObjectStore::LoadLegacyPacks()
+{
+	LegacyPacks.Reset();
+
+	TArray<uint64> PackIds;
+	const ETerrainStorageResult Listed = ListPacks(PackIds);
+	if (Listed != ETerrainStorageResult::Ok)
+	{
+		return Listed;
+	}
+
+	for (const uint64 PackId : PackIds)
+	{
+		TArray<uint8> Image;
+		if (Device.Read(TerrainStoragePaths::Pack(PackId), Image) != ETerrainStorageResult::Ok)
+		{
+			continue;
+		}
+		TArray<TPair<FTerrainDigest, FObjectLocation>> Entries;
+		if (!ParsePackImage(Image, Entries))
+		{
+			continue;   // torn or corrupt: unreferenced by construction, so ignored
+		}
+		for (const TPair<FTerrainDigest, FObjectLocation>& Entry : Entries)
+		{
+			// Earlier packs win, as they always did.
+			LegacyPacks.FindOrAdd(Entry.Key, TPair<uint64, FObjectLocation>(PackId, Entry.Value));
+		}
+	}
+	return ETerrainStorageResult::Ok;
+}
+
+ETerrainStorageResult FTerrainFileObjectStore::LoadPacks()
+{
+	for (int32 Index = 0; Index < TerrainStoragePaths::ContainerCount; ++Index)
+	{
+		const ETerrainStorageResult Scanned = ScanContainer(Index);
+		if (Scanned != ETerrainStorageResult::Ok)
+		{
+			return Scanned;
+		}
+	}
+
+	const ETerrainStorageResult Legacy = LoadLegacyPacks();
+	if (Legacy != ETerrainStorageResult::Ok)
+	{
+		return Legacy;
+	}
+
+	// P-005 §4.5: keep writing where the world was last written. Policy, not correctness.
+	ActiveContainer = 0;
+	int64 Largest = 0;
+	for (int32 Index = 0; Index < TerrainStoragePaths::ContainerCount; ++Index)
+	{
+		if (Containers[Index].ValidEnd > Largest)
+		{
+			Largest = Containers[Index].ValidEnd;
+			ActiveContainer = Index;
+		}
+	}
+	return ETerrainStorageResult::Ok;
+}
+
+int32 FTerrainFileObjectStore::NumPackedObjects() const
+{
+	TSet<FTerrainDigest> Distinct;
+	for (const FContainerState& State : Containers)
+	{
+		for (const TPair<FTerrainDigest, FObjectLocation>& Entry : State.Index)
+		{
+			Distinct.Add(Entry.Key);
+		}
+	}
+	for (const TPair<FTerrainDigest, TPair<uint64, FObjectLocation>>& Entry : LegacyPacks)
+	{
+		Distinct.Add(Entry.Key);
+	}
+	return Distinct.Num();
+}
+
+// ---- containers ---------------------------------------------------------
+
+int64 FTerrainFileObjectStore::ContainerValidEnd(int32 ContainerIndex) const
+{
+	return ContainerIndex >= 0 && ContainerIndex < TerrainStoragePaths::ContainerCount
+		? Containers[ContainerIndex].ValidEnd : -1;
+}
+
+void FTerrainFileObjectStore::GetContainerContents(int32 ContainerIndex, TArray<FTerrainDigest>& OutDigests) const
+{
+	OutDigests.Reset();
+	if (ContainerIndex < 0 || ContainerIndex >= TerrainStoragePaths::ContainerCount)
+	{
+		return;
+	}
+	for (const TPair<FTerrainDigest, FObjectLocation>& Entry : Containers[ContainerIndex].Index)
+	{
+		if (ResolveContainer(Entry.Key) == ContainerIndex)
+		{
+			OutDigests.Add(Entry.Key);
+		}
+	}
+}
+
+int64 FTerrainFileObjectStore::ContainerDeadBytes(int32 ContainerIndex, const TSet<FTerrainDigest>& Live) const
+{
+	if (ContainerIndex < 0 || ContainerIndex >= TerrainStoragePaths::ContainerCount)
+	{
+		return 0;
+	}
+	const FContainerState& State = Containers[ContainerIndex];
+	int64 LiveBytes = 0;
+	for (const TPair<FTerrainDigest, FObjectLocation>& Entry : State.Index)
+	{
+		if (Live.Contains(Entry.Key) && ResolveContainer(Entry.Key) == ContainerIndex)
+		{
+			LiveBytes += Entry.Value.Length;
+		}
+	}
+	return State.ObjectBytes - LiveBytes;
+}
+
+bool FTerrainFileObjectStore::RotateActiveToEmpty()
+{
+	if (bBatchOpen || Containers[ActiveContainer].ValidEnd == 0)
+	{
+		return false;
+	}
+	for (int32 Index = 0; Index < TerrainStoragePaths::ContainerCount; ++Index)
+	{
+		if (Index != ActiveContainer && Containers[Index].ValidEnd == 0
+			&& Device.Size(TerrainStoragePaths::Container(Index)) >= 0)
+		{
+			ActiveContainer = Index;
+			return true;
+		}
+	}
+	return false;
+}
+
+ETerrainStorageResult FTerrainFileObjectStore::CompactContainer(
+	int32 ContainerIndex, const TSet<FTerrainDigest>& Live, int32& OutKept, int32& OutDropped)
+{
+	OutKept = 0;
+	OutDropped = 0;
+
+	if (ContainerIndex < 0 || ContainerIndex >= TerrainStoragePaths::ContainerCount)
+	{
+		return ETerrainStorageResult::BadPath;
+	}
+	if (bBatchOpen || ContainerIndex == ActiveContainer)
+	{
+		// Compacting the active container would copy it into itself and then cut itself.
+		return ETerrainStorageResult::IoError;
+	}
+
+	FContainerState& Source = Containers[ContainerIndex];
+	if (Source.ValidEnd == 0)
+	{
+		return ETerrainStorageResult::Ok;
+	}
+	const FString SourcePath = TerrainStoragePaths::Container(ContainerIndex);
+
+	// What survives: live digests whose resolving copy is here. Everything else in the index --
+	// dead objects, and copies shadowed by an earlier container -- is dropped.
+	TArray<FTerrainDigest> Survivors;
+	for (const TPair<FTerrainDigest, FObjectLocation>& Entry : Source.Index)
+	{
+		if (Live.Contains(Entry.Key) && ResolveContainer(Entry.Key) == ContainerIndex)
+		{
+			Survivors.Add(Entry.Key);
+		}
+		else
+		{
+			++OutDropped;
+		}
+	}
+	// In container order, so a compacted frame keeps its objects in the order they were written.
+	Survivors.Sort([&Source](const FTerrainDigest& A, const FTerrainDigest& B)
+	{
+		return Source.Index.FindChecked(A).Offset < Source.Index.FindChecked(B).Offset;
+	});
+	OutKept = Survivors.Num();
+
+	const int32 TargetIndex = ActiveContainer;
+	const FString TargetPath = TerrainStoragePaths::Container(TargetIndex);
+
+	// --- 1. copy the survivors into one frame in the active container ----------------------------
+	BeginBatch();
+	for (const FTerrainDigest& Digest : Survivors)
+	{
+		if (Containers[TargetIndex].Index.Contains(Digest))
+		{
+			continue;   // the active container already holds a copy
+		}
+		TArray<uint8> Bytes;
+		if (!LoadFrom(SourcePath, Source.Index.FindChecked(Digest), Digest, Bytes))
+		{
+			AbandonBatch();
+			return ETerrainStorageResult::IoError;   // nothing written, nothing cut
+		}
+		FObjectLocation Where;
+		Where.Offset = BatchBuffer.Num();
+		Where.Length = Bytes.Num();
+		BatchBuffer.Append(Bytes);
+		BatchEntries.Add(Digest, Where);
+		BatchOrder.Add(Digest);
+	}
+
+	// Durable first. Until this returns Ok the source is the only copy, and it is untouched.
+	const ETerrainStorageResult Written = CommitBatch();
+	if (Written != ETerrainStorageResult::Ok)
+	{
+		return Written;
+	}
+
+	// --- 2. read every survivor back from the ACTIVE container specifically ----------------------
+	// LoadObject would be satisfied by the source copy, which is exactly the copy about to go.
+	for (const FTerrainDigest& Digest : Survivors)
+	{
+		const FObjectLocation* Copy = Containers[TargetIndex].Index.Find(Digest);
+		TArray<uint8> Verified;
+		if (Copy == nullptr || !LoadFrom(TargetPath, *Copy, Digest, Verified))
+		{
+			return ETerrainStorageResult::IoError;
+		}
+	}
+
+	// --- 3. only now cut the source --------------------------------------------------------------
+	// No name is created or removed. The copy was flushed before this call was issued, so a
+	// power cut can at most undo the truncation, leaving a duplicate (P-005 §5).
+	const ETerrainStorageResult Cut = Device.Truncate(SourcePath, 0);
+	if (Cut != ETerrainStorageResult::Ok)
+	{
+		// The file may or may not have been cut. Describe what is actually there rather than
+		// what we hoped; every survivor has a verified copy in the active container either way.
+		ScanContainer(ContainerIndex);
+		return Cut;
+	}
+	Source = FContainerState();
+	return ETerrainStorageResult::Ok;
+}
+
+// ---- pre-P-005 files ----------------------------------------------------
 
 ETerrainStorageResult FTerrainFileObjectStore::ListLooseObjects(TArray<FTerrainDigest>& OutDigests) const
 {
@@ -965,234 +1685,107 @@ ETerrainStorageResult FTerrainFileObjectStore::ListPacks(TArray<uint64>& OutPack
 	return ETerrainStorageResult::Ok;
 }
 
-void FTerrainFileObjectStore::GetPackContents(uint64 PackId, TArray<FTerrainDigest>& OutDigests) const
+ETerrainStorageResult FTerrainFileObjectStore::MigrateLegacy(const TSet<FTerrainDigest>& Live,
+	int32& OutMigrated, int32& OutFilesDeleted, int64& OutBytesDeleted)
 {
-	OutDigests.Reset();
-	for (const TPair<FTerrainDigest, FPackLocation>& Entry : PackMap)
-	{
-		if (Entry.Value.PackId == PackId)
-		{
-			OutDigests.Add(Entry.Key);
-		}
-	}
-}
-
-int64 FTerrainFileObjectStore::PackSize(uint64 PackId) const
-{
-	return Device.Size(TerrainStoragePaths::Pack(PackId));
-}
-
-ETerrainStorageResult FTerrainFileObjectStore::DeletePack(uint64 PackId)
-{
-	const ETerrainStorageResult Result = Device.Delete(TerrainStoragePaths::Pack(PackId));
-	if (Result != ETerrainStorageResult::Ok && Result != ETerrainStorageResult::NotFound)
-	{
-		return Result;
-	}
-
-	// Forget its contents, or a later read would resolve a digest into a file that is gone.
-	for (auto It = PackMap.CreateIterator(); It; ++It)
-	{
-		if (It.Value().PackId == PackId)
-		{
-			It.RemoveCurrent();
-		}
-	}
-	return ETerrainStorageResult::Ok;
-}
-
-ETerrainStorageResult FTerrainFileObjectStore::CompactPack(
-	uint64 PackId, const TSet<FTerrainDigest>& Live, int32& OutKept, int32& OutDropped)
-{
-	OutKept = 0;
-	OutDropped = 0;
+	OutMigrated = 0;
+	OutFilesDeleted = 0;
+	OutBytesDeleted = 0;
 
 	if (bBatchOpen)
 	{
 		return ETerrainStorageResult::IoError;
 	}
 
-	// What this pack holds, split into what survives and what does not.
-	TArray<FTerrainDigest> Contents;
-	GetPackContents(PackId, Contents);
-	if (Contents.Num() == 0)
+	TArray<FTerrainDigest> Loose;
+	const ETerrainStorageResult LooseListed = ListLooseObjects(Loose);
+	if (LooseListed != ETerrainStorageResult::Ok)
 	{
-		return ETerrainStorageResult::Ok;   // unreadable or already empty; not ours to rewrite
+		return LooseListed;
 	}
-
-	TArray<FTerrainDigest> Survivors;
-	for (const FTerrainDigest& Digest : Contents)
+	TArray<uint64> PackIds;
+	const ETerrainStorageResult PacksListed = ListPacks(PackIds);
+	if (PacksListed != ETerrainStorageResult::Ok)
 	{
-		if (Live.Contains(Digest)) { Survivors.Add(Digest); } else { ++OutDropped; }
+		return PacksListed;
 	}
-	OutKept = Survivors.Num();
-
-	if (OutDropped == 0 || OutKept == 0)
+	if (Loose.Num() == 0 && PackIds.Num() == 0)
 	{
-		// Nothing to drop, or nothing to keep -- the latter is a whole-pack delete, which is
-		// the caller's decision and a different operation.
 		return ETerrainStorageResult::Ok;
 	}
 
-	TArray<uint8> Image;
-	if (Device.Read(TerrainStoragePaths::Pack(PackId), Image) != ETerrainStorageResult::Ok)
+	// --- 1. every live object that no container holds yet, into one frame ------------------------
+	TArray<FTerrainDigest> ToCopy;
+	for (const FTerrainDigest& Digest : Live)
 	{
-		return ETerrainStorageResult::IoError;
+		if (ResolveContainer(Digest) == INDEX_NONE)
+		{
+			ToCopy.Add(Digest);
+		}
 	}
+	ToCopy.Sort([](const FTerrainDigest& A, const FTerrainDigest& B) { return DigestLess(A, B); });
 
-	// Re-buffer the survivors as a new batch, so the pack is written by exactly the code that
-	// writes every other pack -- one file, one flush, one format.
-	bBatchOpen = true;
-	BatchBuffer.Reset();
-	BatchEntries.Reset();
-
-	for (const FTerrainDigest& Digest : Survivors)
+	BeginBatch();
+	for (const FTerrainDigest& Digest : ToCopy)
 	{
-		const FPackLocation* Where = PackMap.Find(Digest);
-		if (Where == nullptr || Where->PackId != PackId
-			|| Where->Offset < 0 || Where->Length < 0
-			|| Where->Offset + Where->Length > Image.Num())
+		TArray<uint8> Bytes;
+		if (!LoadObject(Digest, Bytes))   // resolves through the pre-P-005 files, verified
 		{
 			AbandonBatch();
 			return ETerrainStorageResult::IoError;
 		}
-
-		FPackLocation Moved;
-		const TArrayView<const uint8> Survivor(Image.GetData() + Where->Offset, Where->Length);
-		if (TerrainPersistDigest(Survivor) != Digest)
-		{
-			AbandonBatch();
-			return ETerrainStorageResult::IoError;
-		}
-		Moved.Offset = BatchBuffer.Num();
-		Moved.Length = Where->Length;
-		BatchBuffer.Append(Image.GetData() + Where->Offset, Where->Length);
-		BatchEntries.Add(Digest, Moved);
+		FObjectLocation Where;
+		Where.Offset = BatchBuffer.Num();
+		Where.Length = Bytes.Num();
+		BatchBuffer.Append(Bytes);
+		BatchEntries.Add(Digest, Where);
+		BatchOrder.Add(Digest);
 	}
-
-	// Durable first. Until this returns Ok the original is the only copy, and it is untouched.
 	const ETerrainStorageResult Written = CommitBatch();
 	if (Written != ETerrainStorageResult::Ok)
 	{
-		return Written;   // CommitBatch already abandoned the batch
+		return Written;   // no pre-P-005 file has been touched
 	}
-	// Verify the replacement through the normal content-addressed read path before
-	// removing the original. Namespace durability across power loss remains R-015.
-	for (const FTerrainDigest& Digest : Survivors)
+
+	for (const FTerrainDigest& Digest : ToCopy)
 	{
+		const int32 Where = ResolveContainer(Digest);
 		TArray<uint8> Verified;
-		if (!LoadObject(Digest, Verified)) { return ETerrainStorageResult::IoError; }
-	}
-
-	// CommitBatch has repointed every survivor at the new pack, so what still names the old one
-	// is exactly the garbage. Deleting the file now is safe; a crash before this point leaves a
-	// harmless duplicate rather than a loss.
-	return DeletePack(PackId);
-}
-
-ETerrainStorageResult FTerrainFileObjectStore::LoadPacks()
-{
-	PackMap.Reset();
-	NextPackId = 0;
-
-	TArray<FString> Names;
-	const ETerrainStorageResult ListResult =
-		Device.ListFiles(TerrainStoragePaths::PacksDirectory, Names);
-	if (ListResult == ETerrainStorageResult::NotFound)
-	{
-		return ETerrainStorageResult::Ok;   // no packs directory yet: no packs
-	}
-	if (ListResult != ETerrainStorageResult::Ok)
-	{
-		return ListResult;
-	}
-
-	TArray<uint64> PackIds;
-	for (const FString& Name : Names)
-	{
-		uint64 PackId = 0;
-		if (TerrainStoragePaths::ParsePack(Name, PackId))
+		if (Where == INDEX_NONE
+			|| !LoadFrom(TerrainStoragePaths::Container(Where),
+			             Containers[Where].Index.FindChecked(Digest), Digest, Verified))
 		{
-			PackIds.Add(PackId);
+			return ETerrainStorageResult::IoError;
 		}
 	}
-	PackIds.Sort();
+	OutMigrated = ToCopy.Num();
 
+	// --- 2. only now remove the old names -----------------------------------------------------------
+	// A lost removal brings back a byte-identical duplicate; nothing is lost either way.
+	auto Remove = [this, &OutFilesDeleted, &OutBytesDeleted](const FString& Path) -> ETerrainStorageResult
+	{
+		const int64 Size = Device.Size(Path);
+		const ETerrainStorageResult Deleted = Device.Delete(Path);
+		if (Deleted != ETerrainStorageResult::Ok && Deleted != ETerrainStorageResult::NotFound)
+		{
+			return Deleted;
+		}
+		++OutFilesDeleted;
+		OutBytesDeleted += FMath::Max<int64>(Size, 0);
+		return ETerrainStorageResult::Ok;
+	};
+
+	for (const FTerrainDigest& Digest : Loose)
+	{
+		const ETerrainStorageResult Removed = Remove(TerrainStoragePaths::Object(Digest));
+		if (Removed != ETerrainStorageResult::Ok) { return Removed; }
+	}
 	for (const uint64 PackId : PackIds)
 	{
-		// Ids are allocated in order, so the next one is past the highest that exists --
-		// whether or not that pack turned out to be readable. Reusing the id of a torn pack
-		// would make a new pack overwrite it, and WriteNew refuses to overwrite anyway.
-		NextPackId = FMath::Max(NextPackId, PackId + 1);
-
-		TArray<uint8> Image;
-		if (Device.Read(TerrainStoragePaths::Pack(PackId), Image) != ETerrainStorageResult::Ok)
-		{
-			continue;
-		}
-		if (Image.Num() < TerrainPackTrailerSize)
-		{
-			continue;   // torn before the trailer: unreferenced garbage, not an error
-		}
-
-		const uint8* const Trailer = Image.GetData() + Image.Num() - TerrainPackTrailerSize;
-		auto ReadU64 = [](const uint8* P) -> uint64
-		{
-			uint64 V = 0;
-			for (int32 i = 0; i < 8; ++i) { V |= static_cast<uint64>(P[i]) << (i * 8); }
-			return V;
-		};
-		auto ReadU32 = [](const uint8* P) -> uint32
-		{
-			uint32 V = 0;
-			for (int32 i = 0; i < 4; ++i) { V |= static_cast<uint32>(P[i]) << (i * 8); }
-			return V;
-		};
-
-		if (ReadU64(Trailer) != TerrainPackMagic || ReadU32(Trailer + 8) != TerrainPackVersion)
-		{
-			continue;
-		}
-		const uint32 Count          = ReadU32(Trailer + 12);
-		const uint64 ManifestOffset = ReadU64(Trailer + 16);
-		const uint64 Checksum       = ReadU64(Trailer + 24);
-
-		if (Count > static_cast<uint32>(TerrainPackMaxEntries))
-		{
-			continue;
-		}
-		const int64 ManifestBytes = static_cast<int64>(Count) * TerrainPackEntrySize;
-		if (static_cast<int64>(ManifestOffset) + ManifestBytes + TerrainPackTrailerSize != Image.Num())
-		{
-			continue;   // the trailer does not describe this file
-		}
-		if (TerrainPersistChecksum(TArrayView<const uint8>(
-				Image.GetData(), Image.Num() - TerrainPackTrailerSize)) != Checksum)
-		{
-			continue;   // torn or corrupt: ignored, for the reason in the header
-		}
-
-		const uint8* Entry = Image.GetData() + ManifestOffset;
-		for (uint32 i = 0; i < Count; ++i, Entry += TerrainPackEntrySize)
-		{
-			FTerrainDigest Digest;
-			FMemory::Memcpy(Digest.Bytes, Entry, TerrainPersistDigestSize);
-
-			FPackLocation Where;
-			Where.PackId = PackId;
-			Where.Offset = static_cast<int64>(ReadU64(Entry + TerrainPersistDigestSize));
-			Where.Length = static_cast<int32>(ReadU32(Entry + TerrainPersistDigestSize + 8));
-
-			if (Where.Offset < 0 || Where.Length < 0
-				|| Where.Offset + Where.Length > static_cast<int64>(ManifestOffset))
-			{
-				continue;   // a manifest entry that points outside the body is not trusted
-			}
-			// Earlier packs win: a digest names one byte string, so a later duplicate is the
-			// same bytes and re-mapping it would only churn.
-			PackMap.FindOrAdd(Digest, Where);
-		}
+		const ETerrainStorageResult Removed = Remove(TerrainStoragePaths::Pack(PackId));
+		if (Removed != ETerrainStorageResult::Ok) { return Removed; }
 	}
+	LegacyPacks.Reset();
 	return ETerrainStorageResult::Ok;
 }
 

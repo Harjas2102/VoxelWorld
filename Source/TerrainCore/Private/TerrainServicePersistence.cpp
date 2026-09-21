@@ -302,14 +302,14 @@ void UTerrainService::CloseWorldStore()
 void UTerrainService::ReclaimStore()
 {
 	check(IsInGameThread());
-	// P-004 section 12 still gates production use on namespace-durability evidence.
-	// Compaction can move objects shared by BOTH roots, so fallback alone cannot cover
-	// loss of a replacement pack's name after the original was deleted (R-015).
+	// R-015 no longer gates this: since P-005 compaction creates and removes no names. What
+	// still gates it is DEF-9 -- the pass is synchronous on the game thread, scheduled by hand,
+	// and has none of P-003 section 5's retention pins or epoch protocol.
 	if (!FParse::Param(FCommandLine::Get(), TEXT("TerrainRetentionExperiment")))
 	{
 		UE_LOG(LogTerrainCore, Warning,
-			TEXT("Terrain.Reclaim: disabled pending R-015 durability acceptance. ")
-			TEXT("Isolated test worlds may opt in with -TerrainRetentionExperiment."));
+			TEXT("Terrain.Reclaim: disabled pending production retention (DEF-9: incremental, ")
+			TEXT("off-thread, pinned). Isolated test worlds may opt in with -TerrainRetentionExperiment."));
 		return;
 	}
 
@@ -333,18 +333,18 @@ void UTerrainService::ReclaimStore()
 		// A validation failure precedes deletion, but an I/O failure can follow a partial
 		// sweep. Report the completed work instead of claiming the device is unchanged.
 		UE_LOG(LogTerrainCore, Warning,
-			TEXT("Terrain.Reclaim: stopped (%s); completed %d loose deletions, %d pack deletions, ")
+			TEXT("Terrain.Reclaim: stopped (%s); completed %d migrations, %d legacy deletions, ")
 			TEXT("%d compactions. Recovery dependencies are retained."), *Result.ToString(),
-			Stats.LooseDeleted, Stats.PacksDeleted, Stats.PacksCompacted);
+			Stats.LegacyObjectsMigrated, Stats.LegacyFilesDeleted, Stats.ContainersCompacted);
 		return;
 	}
 
 	UE_LOG(LogTerrainCore, Display,
-		TEXT("**** Terrain.Reclaim: %d live objects; %d/%d loose deleted; of %d packs %d deleted, ")
-		TEXT("%d compacted (%d dead objects dropped); %lld bytes reclaimed, ")
+		TEXT("**** Terrain.Reclaim: %d live objects; %d migrated from %d legacy files; ")
+		TEXT("%d containers compacted (%d dead objects dropped), rotated=%s; %lld bytes reclaimed, ")
 		TEXT("in %.3f s. ****"),
-		Stats.LiveObjects, Stats.LooseDeleted, Stats.LooseScanned, Stats.PacksScanned,
-		Stats.PacksDeleted, Stats.PacksCompacted, Stats.ObjectsDroppedFromPacks,
+		Stats.LiveObjects, Stats.LegacyObjectsMigrated, Stats.LegacyFilesDeleted,
+		Stats.ContainersCompacted, Stats.ObjectsDropped, Stats.bRotated ? TEXT("yes") : TEXT("no"),
 		Stats.BytesReclaimed, Stats.Seconds);
 }
 

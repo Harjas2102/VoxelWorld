@@ -215,111 +215,71 @@ FTerrainStoreResult TerrainReclaimStore(
 		return FTerrainStoreResult::Bad(ETerrainPersistError::OrderViolation);
 	}
 
-	// --- sweep loose objects ------------------------------------------------------------------
-	TArray<FTerrainDigest> Loose;
-	const ETerrainStorageResult Listed = Objects.ListLooseObjects(Loose);
-	if (Listed != ETerrainStorageResult::Ok)
+	// --- 1. pre-P-005 files: copy what is live into a container, then remove them --------------
+	// Reclaimed is NET: the live objects are re-written into a container, so deleting the old
+	// files frees only what was dead in them. Counting the deletions alone would report a world
+	// that merely changed layout as having shrunk by its whole size.
+	int64 LegacyBytes = 0;
+	const int32 MigrationTarget = Objects.GetActiveContainer();
+	const int64 TargetBefore = Objects.ContainerValidEnd(MigrationTarget);
+	const ETerrainStorageResult Migrated = Objects.MigrateLegacy(
+		Live, OutStats.LegacyObjectsMigrated, OutStats.LegacyFilesDeleted, LegacyBytes);
+	const int64 MigrationGrowth = Objects.ContainerValidEnd(MigrationTarget) - TargetBefore;
+	OutStats.BytesReclaimed += FMath::Max<int64>(LegacyBytes - MigrationGrowth, 0);
+	if (Migrated != ETerrainStorageResult::Ok)
 	{
-		return FTerrainStoreResult::Io(Listed);
+		return FTerrainStoreResult::Io(Migrated);
 	}
-	OutStats.LooseScanned = Loose.Num();
 
-	for (const FTerrainDigest& Digest : Loose)
+	// --- 2. move writing off a container that holds garbage, so it can be compacted -----------
+	// Compaction never touches the active container: it would copy into itself and then cut
+	// itself. With no empty container to move to, the active one simply waits for a later pass.
+	if (Objects.ContainerDeadBytes(Objects.GetActiveContainer(), Live) > 0)
 	{
-		if (Live.Contains(Digest))
+		OutStats.bRotated = Objects.RotateActiveToEmpty();
+	}
+
+	// --- 3. compact every other container that holds dead bytes -------------------------------
+	for (int32 Index = 0; Index < TerrainStoragePaths::ContainerCount; ++Index)
+	{
+		const int32 Active = Objects.GetActiveContainer();
+		const int64 Before = Objects.ContainerValidEnd(Index);
+		if (Index == Active || Before <= 0)
 		{
 			continue;
 		}
-		const int64 Size = Store.GetDevice().Size(TerrainStoragePaths::Object(Digest));
-		const ETerrainStorageResult Deleted = Objects.DeleteObject(Digest);
-		if (Deleted != ETerrainStorageResult::Ok && Deleted != ETerrainStorageResult::NotFound)
+		if (Objects.ContainerDeadBytes(Index, Live) == 0)
 		{
-			return FTerrainStoreResult::Io(Deleted);
-		}
-		++OutStats.LooseDeleted;
-		if (Size > 0)
-		{
-			OutStats.BytesReclaimed += Size;
-		}
-	}
-
-	// --- sweep whole packs (P-004 §13.6) ------------------------------------------------------
-	TArray<uint64> PackIds;
-	const ETerrainStorageResult PacksListed = Objects.ListPacks(PackIds);
-	if (PacksListed != ETerrainStorageResult::Ok)
-	{
-		return FTerrainStoreResult::Io(PacksListed);
-	}
-	OutStats.PacksScanned = PackIds.Num();
-
-	for (const uint64 PackId : PackIds)
-	{
-		TArray<FTerrainDigest> Contents;
-		Objects.GetPackContents(PackId, Contents);
-
-		int32 LiveInPack = 0;
-		for (const FTerrainDigest& Digest : Contents)
-		{
-			if (Live.Contains(Digest))
-			{
-				++LiveInPack;
-			}
-		}
-
-		const int64 Size = Objects.PackSize(PackId);
-
-		if (LiveInPack == 0)
-		{
-			// Every live dependency was loaded and validated above, and none resolves through
-			// this pack. It may contain dead objects, redundant copies, or an abandoned tear.
-			const ETerrainStorageResult Deleted = Objects.DeletePack(PackId);
-			if (Deleted != ETerrainStorageResult::Ok)
-			{
-				return FTerrainStoreResult::Io(Deleted);
-			}
-			++OutStats.PacksDeleted;
-			if (Size > 0)
-			{
-				OutStats.BytesReclaimed += Size;
-			}
+			++OutStats.ContainersKept;
 			continue;
 		}
 
-		if (Contents.Num() == LiveInPack)
-		{
-			++OutStats.PacksKept;   // entirely live: nothing to do
-			continue;
-		}
-
-		// Partly dead. Rewrite it without the garbage, because waiting for a pack to become
-		// ENTIRELY dead never happens: path-copying shares index pages between generations by
-		// design, so an old pack keeps at least one live page essentially forever.
+		const int64 ActiveBefore = Objects.ContainerValidEnd(Active);
 		int32 Kept = 0, Dropped = 0;
-		const ETerrainStorageResult Compacted = Objects.CompactPack(PackId, Live, Kept, Dropped);
+		const ETerrainStorageResult Compacted = Objects.CompactContainer(Index, Live, Kept, Dropped);
 		if (Compacted != ETerrainStorageResult::Ok)
 		{
 			return FTerrainStoreResult::Io(Compacted);
 		}
 
-		++OutStats.PacksCompacted;
-		OutStats.ObjectsDroppedFromPacks += Dropped;
-
-		const int64 After = Objects.PackSize(Objects.NewestPackId());
-		if (Size > 0 && After > 0 && After < Size)
+		++OutStats.ContainersCompacted;
+		OutStats.ObjectsDropped += Dropped;
+		const int64 Grown = Objects.ContainerValidEnd(Active) - ActiveBefore;
+		if (Before > Grown)
 		{
-			OutStats.BytesReclaimed += Size - After;
+			OutStats.BytesReclaimed += Before - Grown;
 		}
 	}
 
 	OutStats.Seconds = FPlatformTime::Seconds() - Started;
 
 	UE_LOG(LogTerrainCore, Log,
-		TEXT("Retention: %d live objects; %d/%d loose deleted; of %d packs, %d deleted, ")
-		TEXT("%d compacted (%d dead objects dropped), %d untouched; %lld bytes reclaimed in %.3f s."),
-		OutStats.LiveObjects, OutStats.LooseDeleted, OutStats.LooseScanned,
-		OutStats.PacksScanned, OutStats.PacksDeleted, OutStats.PacksCompacted,
-		OutStats.ObjectsDroppedFromPacks, OutStats.PacksKept,
-		OutStats.BytesReclaimed, OutStats.Seconds);
+		TEXT("Retention: %d live objects; %d migrated from %d pre-P-005 files; rotated=%s; ")
+		TEXT("%d containers compacted (%d dead objects dropped), %d untouched; %lld bytes reclaimed ")
+		TEXT("in %.3f s."),
+		OutStats.LiveObjects, OutStats.LegacyObjectsMigrated, OutStats.LegacyFilesDeleted,
+		OutStats.bRotated ? TEXT("yes") : TEXT("no"), OutStats.ContainersCompacted,
+		OutStats.ObjectsDropped, OutStats.ContainersKept, OutStats.BytesReclaimed, OutStats.Seconds);
 
 	return FTerrainStoreResult::Ok();
 }
