@@ -3,6 +3,7 @@
 #include "TerrainService.h"
 #include "TerrainChunk.h"
 #include "MemoryTerrainBackend.h"
+#include "TerrainChunkSnapshot.h"
 #include "TerrainWorldField.h"
 #include "Misc/AutomationTest.h"
 #include "Subsystems/SubsystemCollection.h"
@@ -29,21 +30,33 @@ bool FTerrainReplayValidationTest::RunTest(const FString&)
     const FTerrainChunkKey Key(0,0,0);
     const uint64 Initial=S->HashChunk(Key);
     TestTrue(TEXT("resident initial hash"),Initial!=0);
+    // P-008 §3: checks apply to SYNCED chunks. Announce the chunk pristine first.
+    TestTrue(TEXT("pristine chunk accepted"),S->AcceptPristine({FIntVector(0)}));
+    TArray<FIntVector> Resync;
     auto Gap=Revs; Gap[0].Before=1; Gap[0].After=2;
-    TestFalse(TEXT("missing previous revision refused"),S->ApplyReplicatedOp(Bytes,Gap));
-    TestEqual(TEXT("gap cannot mutate"),S->HashChunk(Key),Initial);
+    TestTrue(TEXT("a gapped op is still a usable op"),S->ApplyReplicatedOp(Bytes,Gap,Resync));
+    TestTrue(TEXT("missing previous revision is reported for resync"),Resync.Num()==1 && Resync[0]==FIntVector(0));
+    TestEqual(TEXT("a lost chunk's revision is not advanced"),S->GetRevision(Key),uint32(0));
     TestFalse(TEXT("cannot acknowledge corrupted chunk pristine"),S->AcceptPristine({FIntVector(0)}));
-    TestFalse(TEXT("later op remains blocked pending resync"),S->ApplyReplicatedOp(Bytes,Revs));
-    S->ResyncRequired.Reset(); // Test fixture only: simulate completed resync.
-    TestTrue(TEXT("valid chain applies"),S->ApplyReplicatedOp(Bytes,Revs));
-    TestEqual(TEXT("revision advances exactly once"),S->GetRevision(Key),uint32(1));
+    TestTrue(TEXT("later op still applies"),S->ApplyReplicatedOp(Bytes,Revs,Resync));
+    TestEqual(TEXT("but an unsynced chunk is neither checked nor bumped"),S->GetRevision(Key),uint32(0));
+    TestEqual(TEXT("and is not reported twice"),Resync.Num(),0);
+    // The repair: an authoritative snapshot of the chunk at revision 1.
+    FMemoryTerrainBackend Truth; Truth.Initialize(S->ActiveInit); Truth.SetStreamingInterest(Interest);
+    FTerrainEditResult TruthResult; Truth.ApplyOp(Op,TruthResult);
+    FTerrainRegionData Region; Truth.ReadRegion(Key,Region);
+    TArray<uint8> Compressed; TestTrue(TEXT("snapshot encodes"),TerrainEncodeChunkSnapshot(Region.Payload,Compressed));
+    TestTrue(TEXT("snapshot repairs the chunk"),S->ApplyReplicatedSnapshot(Key,1,Compressed));
+    TestEqual(TEXT("revision taken from the snapshot"),S->GetRevision(Key),uint32(1));
     const uint64 Edited=S->HashChunk(Key);
+    TestEqual(TEXT("data taken from the snapshot"),Edited,Truth.HashRegion(Key));
     TestTrue(TEXT("real mutation"),Edited!=Initial);
-    TestFalse(TEXT("duplicate replay rejected"),S->ApplyReplicatedOp(Bytes,Revs));
-    TestEqual(TEXT("duplicate preserves terrain"),S->HashChunk(Key),Edited);
-    S->ResyncRequired.Reset();
+    TestTrue(TEXT("duplicate replay is usable"),S->ApplyReplicatedOp(Bytes,Revs,Resync));
+    TestEqual(TEXT("duplicate replay is detected as a gap"),Resync.Num(),1);
+    TestEqual(TEXT("duplicate preserves terrain (idempotent)"),S->HashChunk(Key),Edited);
+    TestEqual(TEXT("duplicate does not advance the revision"),S->GetRevision(Key),uint32(1));
     Revs[0].Before=1; Revs[0].After=2; const auto Duplicate=Revs[0]; Revs.Add(Duplicate);
-    TestFalse(TEXT("extra revision entry refused"),S->ApplyReplicatedOp(Bytes,Revs));
+    TestFalse(TEXT("extra revision entry refused"),S->ApplyReplicatedOp(Bytes,Revs,Resync));
     TestEqual(TEXT("malformed envelope preserves terrain"),S->HashChunk(Key),Edited);
     FTerrainEditRequest Request; FTerrainOp Quantised;
     Request.RadiusCm=-1;

@@ -48,16 +48,38 @@ evidence and the self-review are in `Docs/proposals/P-007-exclusive-writer-lease
   refused and changes no byte of the save, and after the first server is killed hard a third
   opens the world and passes SelfTest. `Test-TerrainCheckpoint.py` and one-round
   `MP.Convergence -CheckpointCapture` also pass.
-- **New defect found, predating T-128:** after a server travel on a persisted world, clients
-  apply none of the server's edits. The multi-round `MP.Convergence` fails in round 2. I
-  reproduced it on `614201d` with the T-128 work stashed. This is **T-129**, next.
+- Found while regression-testing T-128, and fixed as **T-129** (below): after a server travel on
+  a saved world, clients received none of the server's edits.
+- Writer and reviewer were the same agent.
+
+## T-129 breadcrumb (post-CP-018, not yet checkpointed)
+
+**T-129 is implemented, tested and committed. The next `checkpoint` records it.** The spec,
+the DEF-3 resolution, the evidence and the self-review are in
+`Docs/proposals/P-008-join-in-progress.md`.
+- **Root cause.** `RefreshSubscriptions` only subscribed a client to never-edited chunks. So once
+  the server started remembering the world, no client could ever sync an edited chunk. That was
+  build step 5 missing, not a small bug.
+- **The fix is build step 5.** Edited chunks are sent as compressed, fragmented snapshots, nearest
+  first, with backpressure. `FTerrainReplica` applies revision checks per chunk, only to chunks it
+  holds in sync. Resync now repairs chunks instead of just logging. DEF-3 closes without a
+  buffering protocol, because commits are serialized on the server and each client's stream is
+  one ordered channel.
+- **Adapter fix, forced by measurement:** `WriteRegion` does a bulk write. Snapshot install went
+  from 65–165 ms to 16–25 ms per chunk, and **server boot restore at 256 chunks from 4.4 s to
+  0.8–1.0 s**.
+- Evidence: **39/39** automation, including the new `Replication.JoinInProgress` with two negative
+  controls. `MP.Convergence` passes 2 rounds, then 3 rounds with an observer at 60 s. `-DropOp 20`
+  passes, showing a detected gap and a repair. `Test-TerrainCheckpoint.py`,
+  `Test-TerrainRetention.py` (256 hashes) and `Test-TerrainLease.py` pass. Both targets build.
+- `ARCHITECTURE.md` §4.8 still says the protocol "must not be implemented as written", and §14
+  still lists DEF-3 as open. Both need updating at the checkpoint, against P-008.
 - Writer and reviewer were the same agent.
 
 ## What is NOT done, stated plainly
 
-- **T-129, terrain after server travel.** Round 2 of a multi-round `MP.Convergence` fails on a
-  persisted world: the server commits, and the clients apply 0. Reproduce with
-  `Tools/Test-TerrainMultiplayer.ps1 -Rounds 2 -DurationSeconds 20 -CheckpointCapture`.
+- **E-6 has not been measured:** a heavily dug region with a joiner arriving mid-edit. A client
+  stalls 16–25 ms per snapshot, and resync has no rate limit (P-008 §7).
 - **Journal trimming.** The journal grows forever: about 49 KB per checkpoint interval. It needs
   a pre-created segment ring, because `Rotate` creates a name (P-005 §8).
 - **Retention pins.** No backup, migration or sync consumer exists. When one does, its pin must
@@ -70,9 +92,8 @@ evidence and the self-review are in `Docs/proposals/P-007-exclusive-writer-lease
 
 ## Next safe action
 
-**T-129: clients receive no terrain after a server travel on a persisted world.** Start with the
-round-2 server and client logs from the reproduction above. The server reopens the store at
-G>0 with nonzero chunk revisions. Suspect the client subscription and pristine acknowledgement
-path, which was last proved across travel at CP-014, before persistence existed. After that,
-Phase 1's gate items 1C (material yield) and 1E (join-in-progress) remain before the backend
-decision.
+**T-130 — gate item 1C: material queries and resource yield.** The server must measure what an
+edit actually removed, per material, and award it (ARCHITECTURE §4.9, D-011). Today the adapter
+reads no materials back (K9), so snapshots, checkpoints and hashes all carry density only. That
+is the largest remaining hole in the Phase 1 gate. Join-in-progress (1E) is working; what remains
+of it is the E-6 measurement.

@@ -1,10 +1,11 @@
-// Copyright VoxelWorld. Step 3 live transport; snapshot/resync transfer remains step 5.
+// Copyright VoxelWorld. Step 3 live transport; step 5 modified-chunk sync and resync (P-008).
 #include "TerrainService.h"
 #include "TerrainCommitJournal.h"
 #include "TerrainChunk.h"
 #include "TerrainCore.h"
 #include "TerrainQuantise.h"
 #include "TerrainSettings.h"
+#include "TerrainChunkSnapshot.h"
 #include "Engine/World.h"
 #include "EngineUtils.h"
 #include "GameFramework/PlayerController.h"
@@ -48,6 +49,7 @@ void UTerrainService::TickService()
 		for (const auto& Entry:Streams) if (auto* Stream=Entry.Value.Get()) RefreshSubscriptions(*Stream);
 		NextSubscriptionUpdate=Now+.5;
 	}
+	PumpSnapshots();
 	EditQueue.Pump(Now,QueueCallbacks());
 
 	// After the pump, never inside it: a capture taken mid-transaction would not be a cut.
@@ -232,44 +234,107 @@ bool UTerrainService::CommitOp(const FTerrainOp& Op,const FTerrainEditResult& R,
 	for (const auto& Entry:Streams)
 	{
 		auto* Stream=Entry.Value.Get(); if (!Stream || !Stream->bReady) continue;
+		// A chunk with a snapshot in flight is relevant: the client will be synced to the state
+		// before this op by the time the op arrives, because both travel on one ordered channel.
+		const auto Held=[Stream](const FTerrainChunkKey& K)
+		{ return Stream->Subscribed.Contains(K) || Stream->PendingPristine.Contains(K) || Stream->Syncing.Contains(K); };
 		bool Relevant=false;
-		for (const auto& K:R.AffectedChunks) if (Stream->Subscribed.Contains(K) || Stream->PendingPristine.Contains(K)) { Relevant=true; break; }
+		for (const auto& K:R.AffectedChunks) if (Held(K)) { Relevant=true; break; }
 		if (Relevant)
 		{
 			Stream->ClientApplyOp(Bytes,Revisions);
-			for (const auto& V:Revisions) Stream->DeliveredRevisions.Add(FTerrainChunkKey(V.Key.X,V.Key.Y,V.Key.Z),V.After);
+			// Only for chunks the client holds in sync. Recording a revision for a chunk it merely
+			// has in the footprint would later let a resubscription skip a snapshot it needs.
+			for (const auto& V:Revisions)
+			{
+				const FTerrainChunkKey K(V.Key.X,V.Key.Y,V.Key.Z);
+				if (Stream->Subscribed.Contains(K) || Stream->Syncing.Contains(K)) Stream->DeliveredRevisions.Add(K,V.After);
+			}
 		}
 	}
 	return true;
 }
-bool UTerrainService::ApplyReplicatedOp(const TArray<uint8>& Bytes,const TArray<FTerrainChunkRevision>& Revisions)
+bool UTerrainService::ApplyReplicatedOp(const TArray<uint8>& Bytes,const TArray<FTerrainChunkRevision>& Revisions,
+	TArray<FIntVector>& OutResync)
 {
+	OutResync.Reset();
 	if (!IsBackendReady() || HasAuthority() || Bytes.Num()!=TerrainOpEncodedSize) return false;
-	FTerrainOp Op; FTerrainBox B; int64 W,Scans;
-	if (!DeserializeTerrainOp(Bytes,Op) || !Op.OpSeq || !TerrainOpBounds(Op,B)
+	FTerrainOp Op; int64 W,Scans;
+	if (!DeserializeTerrainOp(Bytes,Op) || !Op.OpSeq
 		|| !TerrainOpCounts(Op,GetDefault<UTerrainSettings>()->MaxVoxelsPerOp,W,Scans)) return false;
-	TArray<FTerrainChunkKey> Keys; if (!TerrainChunkKeysForBox(B,Keys) || Keys.Num()!=Revisions.Num()) return false;
-	const auto NeedResync = [&]() { for (const auto& K:Keys) ResyncRequired.Add(K); return false; };
-    TSet<FTerrainChunkKey> Seen; TArray<FTerrainChunkKey> Changed;
-	for (const auto& V:Revisions)
-	{
-		const FTerrainChunkKey K(V.Key.X,V.Key.Y,V.Key.Z);
-		if (Seen.Contains(K) || !Keys.Contains(K) || V.After<V.Before || uint64(V.After)>uint64(V.Before)+1) return NeedResync();
-		Seen.Add(K);
-		if (ResyncRequired.Contains(K) || GetRevision(K)!=V.Before) { return NeedResync(); }
-		if (V.After!=V.Before) Changed.Add(K);
-	}
-	FTerrainEditResult R;
-	if (!Backend->ApplyOp(Op,R) || R.bTruncated) return NeedResync();
-	if (R.AffectedChunks.Num()!=Changed.Num()) return NeedResync();
-	for (const auto& K:R.AffectedChunks) if (!Changed.Contains(K)) return NeedResync();
-	return RevisionIndex->TryBumpRevisions(Changed);
+	TArray<FTerrainChunkKey> Lost;
+	if (!Replica.ApplyOp(*Backend,*RevisionIndex,Op,Revisions,Lost)) return false;
+	for (const auto& K:Lost) OutResync.Add(FIntVector(K.X,K.Y,K.Z));
+	return true;
+}
+bool UTerrainService::ApplyReplicatedSnapshot(const FTerrainChunkKey& Key,FTerrainRev Rev,TArrayView<const uint8> Compressed)
+{
+	if (!IsBackendReady() || HasAuthority()) return false;
+	return Replica.ApplySnapshot(*Backend,*RevisionIndex,Key,Rev,Compressed);
 }
 bool UTerrainService::AcceptPristine(const TArray<FIntVector>& Keys)
 {
-	if (!IsBackendReady() || Keys.Num()>64) return false;
-	for (const auto& K:Keys) if (GetRevision(FTerrainChunkKey(K.X,K.Y,K.Z))!=0 || ResyncRequired.Contains(FTerrainChunkKey(K.X,K.Y,K.Z))) return false;
+	if (!IsBackendReady() || !RevisionIndex || Keys.Num()>64) return false;
+	TArray<FTerrainChunkKey> Chunks;
+	for (const auto& K:Keys) Chunks.Add(FTerrainChunkKey(K.X,K.Y,K.Z));
+	return Replica.AcceptPristine(*RevisionIndex,Chunks);
+}
+void UTerrainService::ReceiveSnapshotAck(UTerrainStreamComponent& Stream,const FTerrainChunkKey& Key,uint32 Generation,bool bApplied)
+{
+	if (!HasAuthority()) return;
+	const auto* Flight=Stream.Syncing.Find(Key);
+	if (!Flight || Flight->Generation!=Generation) return;   // stale: a resync already superseded it
+	Stream.SnapshotBytesInFlight-=Flight->Bytes;
+	Stream.Syncing.Remove(Key);
+	if (bApplied) Stream.Subscribed.Add(Key);
+	else Stream.DeliveredRevisions.Remove(Key);   // the next refresh sends it again
+}
+bool UTerrainService::SendSnapshot(UTerrainStreamComponent& Stream,const FTerrainChunkKey& Key)
+{
+	// Read NOW, between commits: this is the cut. Every op committed before it is inside the
+	// snapshot; every op committed after it is sent after it, on the same ordered channel.
+	FTerrainRegionData Region;
+	if (!Backend->IsRegionResident(Key) || !Backend->ReadRegion(Key,Region)
+		|| Region.Encoding!=ETerrainRegionEncoding::Dense) return false;
+	TArray<uint8> Compressed; TArray<TArray<uint8>> Pieces;
+	if (!TerrainEncodeChunkSnapshot(Region.Payload,Compressed) || !TerrainSplitChunkSnapshot(Compressed,Pieces)) return false;
+	const FTerrainRev Rev=GetRevision(Key);
+	const uint32 Generation=Stream.NextSyncGeneration++;
+	FTerrainSnapshotFragment F;
+	F.Key=FIntVector(Key.X,Key.Y,Key.Z); F.Generation=Generation; F.Rev=Rev;
+	F.Count=uint8(Pieces.Num()); F.TotalBytes=Compressed.Num();
+	// Every fragment in this one call: nothing can be committed between them.
+	for (int32 I=0;I<Pieces.Num();++I) { F.Index=uint8(I); F.Bytes=MoveTemp(Pieces[I]); Stream.ClientChunkSnapshot(F); }
+	UTerrainStreamComponent::FSnapshotInFlight Flight; Flight.Generation=Generation; Flight.Bytes=Compressed.Num();
+	Stream.Syncing.Add(Key,Flight);
+	Stream.SnapshotBytesInFlight+=Compressed.Num();
+	Stream.DeliveredRevisions.Add(Key,Rev);
+	++SnapshotsSent; SnapshotBytesSent+=Compressed.Num();
+	UE_LOG(LogTerrainCore,Verbose,TEXT("Snapshot (%d,%d,%d) rev %u -> source %u: %d bytes in %d fragment(s)"),
+		Key.X,Key.Y,Key.Z,Rev,Stream.SourceId,Compressed.Num(),Pieces.Num());
 	return true;
+}
+void UTerrainService::PumpSnapshots()
+{
+	// Per connection, a bound on unacknowledged bytes -- not a mean rate -- because UE closes a
+	// connection whose reliable buffer overflows (§7.3). One snapshot may always be in flight,
+	// so a chunk larger than the budget still goes out, alone.
+	constexpr int32 MaxBytesInFlight=64*1024;
+	int32 Budget=2;   // chunks per tick across all connections: each read and compress costs ms
+	for (const auto& Entry:Streams)
+	{
+		auto* Stream=Entry.Value.Get(); if (!Stream || !Stream->bReady) continue;
+		while (Budget>0 && !Stream->SnapshotQueue.IsEmpty()
+			&& (Stream->Syncing.IsEmpty() || Stream->SnapshotBytesInFlight<MaxBytesInFlight))
+		{
+			const FTerrainChunkKey K=Stream->SnapshotQueue[0];
+			Stream->SnapshotQueue.RemoveAt(0);
+			// Pristine by now, or already covered: the refresh will choose the right path.
+			if (GetRevision(K)==0 || Stream->Subscribed.Contains(K) || Stream->Syncing.Contains(K)) continue;
+			--Budget;
+			if (!SendSnapshot(*Stream,K)) break;   // not readable yet; the next refresh re-queues it
+		}
+	}
 }
 uint64 UTerrainService::HashChunk(const FTerrainChunkKey& Key) const
 { return IsBackendReady() ? Backend->HashRegion(Key) : 0; }
@@ -286,6 +351,10 @@ void UTerrainService::RefreshSubscriptions(UTerrainStreamComponent& Stream)
 	};
 	for (auto It=Stream.Subscribed.CreateIterator();It;++It) if (Distance(*It)>FMath::Square(Radius*1.5)) It.RemoveCurrent();
 	for (auto It=Stream.PendingPristine.CreateIterator();It;++It) if (Distance(*It)>FMath::Square(Radius*1.5)) It.RemoveCurrent();
+	// A snapshot already in flight completes on its ack; one still queued is simply dropped.
+	Stream.SnapshotQueue.RemoveAll([&](const FTerrainChunkKey& K) { return Distance(K)>FMath::Square(Radius*1.5); });
+	// The listen host shares the authoritative world: everything near it is in sync by definition.
+	const bool bLocalHost=PC->IsLocalController();
 	TArray<FIntVector> Batch;
 	// The finite prototype world bounds the scan; avoid coordinates derived from client input.
 	const auto World=ActiveInit.WorldBoundsVox;
@@ -294,12 +363,20 @@ void UTerrainService::RefreshSubscriptions(UTerrainStreamComponent& Stream)
 	for (int32 X=TerrainChunkCoordinate(World.Min.X);X<=TerrainChunkCoordinate(World.Max.X-1);++X)
 	{
 		FTerrainChunkKey K(X,Y,Z);
-		if (Distance(K)>Radius*Radius || Stream.Subscribed.Contains(K) || Stream.PendingPristine.Contains(K)) continue;
+		if (Distance(K)>Radius*Radius || Stream.Subscribed.Contains(K) || Stream.PendingPristine.Contains(K)
+			|| Stream.Syncing.Contains(K)) continue;
+		if (bLocalHost) { Stream.Subscribed.Add(K); continue; }
 		if (const uint32* Delivered=Stream.DeliveredRevisions.Find(K); Delivered && *Delivered==GetRevision(K))
 		{ Stream.Subscribed.Add(K); continue; }
-		if (GetRevision(K)!=0) continue; // Modified-chunk catch-up needs the step-5 protocol.
+		if (GetRevision(K)!=0)
+		{
+			// P-008 §4: an edited chunk is caught up by snapshot, nearest first.
+			if (!Stream.SnapshotQueue.Contains(K)) Stream.SnapshotQueue.Add(K);
+			continue;
+		}
 		Stream.PendingPristine.Add(K); Batch.Add(FIntVector(X,Y,Z));
 		if (Batch.Num()==64) { Stream.ClientPristine(Batch); Batch.Reset(); }
 	}
 	if (!Batch.IsEmpty()) Stream.ClientPristine(Batch);
+	Stream.SnapshotQueue.Sort([&](const FTerrainChunkKey& A,const FTerrainChunkKey& B) { return Distance(A)<Distance(B); });
 }

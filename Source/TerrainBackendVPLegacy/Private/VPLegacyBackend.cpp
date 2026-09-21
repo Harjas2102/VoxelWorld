@@ -582,16 +582,28 @@ bool FVPLegacyBackend::WriteRegion(const FTerrainRegionData& In)
 		return false;
 	}
 
+	// ONE write lock, ONE accelerator and ONE render update for the whole chunk -- the write
+	// twin of ReadRegion's T-120 fix. UVoxelDataTools::SetValue per voxel took a lock, walked
+	// the octree from the root and queued a remesh of the voxel's bounds, 32,768 times: a
+	// measured 65-165 ms per chunk on a client installing a join-in-progress snapshot (P-008).
+	// Same value conversion as before (FVoxelValue from the same float), so the stored samples
+	// are unchanged; only the number of locks and remesh requests is.
 	const FTerrainBox Bounds = TerrainChunkBounds(In.Key);
-	for (int32 Z = 0; Z < TerrainChunkSizeVox; ++Z)
-	for (int32 Y = 0; Y < TerrainChunkSizeVox; ++Y)
-	for (int32 X = 0; X < TerrainChunkSizeVox; ++X)
+	const FVoxelIntBox VoxelBounds(Bounds.Min, Bounds.Max);
 	{
-		const int16 Stored = static_cast<int16>(Read16(In.Payload, LocalIndex(X, Y, Z) * 2));
-		UVoxelDataTools::SetValue(Actor,
-			FIntVector(Bounds.Min.X + X, Bounds.Min.Y + Y, Bounds.Min.Z + Z),
-			static_cast<float>(Stored) / VPLegacyValueScale);
+		auto& WorldData = Actor->GetData();
+		FVoxelWriteScopeLock Lock(WorldData, VoxelBounds, FUNCTION_FNAME);
+		FVoxelMutableDataAccelerator Accelerator(WorldData, VoxelBounds);
+		for (int32 Z = 0; Z < TerrainChunkSizeVox; ++Z)
+		for (int32 Y = 0; Y < TerrainChunkSizeVox; ++Y)
+		for (int32 X = 0; X < TerrainChunkSizeVox; ++X)
+		{
+			const int16 Stored = static_cast<int16>(Read16(In.Payload, LocalIndex(X, Y, Z) * 2));
+			Accelerator.SetValue(Bounds.Min.X + X, Bounds.Min.Y + Y, Bounds.Min.Z + Z,
+				FVoxelValue(static_cast<float>(Stored) / VPLegacyValueScale));
+		}
 	}
+	FVoxelToolHelpers::UpdateWorld(Actor, VoxelBounds);
 
 	// Materials in the payload are ignored: nothing writes non-zero ones yet (K9, step 6).
 	return true;

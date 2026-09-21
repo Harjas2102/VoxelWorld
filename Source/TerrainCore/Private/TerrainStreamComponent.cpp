@@ -106,12 +106,61 @@ void UTerrainStreamComponent::ClientApplyOp_Implementation(const TArray<uint8>& 
 {
 	// A listen host already shares the authoritative world; it must never apply twice.
 	if (GetOwner()->HasAuthority()) return;
+#if !UE_BUILD_SHIPPING
+	// Harness only: pretend the Nth op was lost, so the gap detector and the snapshot repair
+	// run against a real divergence rather than a hypothetical one (MP.Resync).
+	int32 DropAt=0;
+	if (FParse::Value(FCommandLine::Get(),TEXT("TerrainMPDropOp="),DropAt) && DropAt>0 && ReceivedOps+DroppedOps+1==DropAt && !DroppedOps)
+	{ ++DroppedOps; UE_LOG(LogTerrainCore,Display,TEXT("MP.Resync: dropped op %d on purpose"),DropAt); return; }
+#endif
 	++ReceivedOps;
-	if (auto* S=GetWorld()->GetSubsystem<UTerrainService>(); S && S->ApplyReplicatedOp(Bytes,Revisions)) return;
+	auto* S=GetWorld()->GetSubsystem<UTerrainService>();
+	TArray<FIntVector> Resync;
+	const bool bUsable=S && S->ApplyReplicatedOp(Bytes,Revisions,Resync);
+	if (!bUsable) { Resync.Reset(); for (const auto& V:Revisions) Resync.Add(V.Key); }
+	if (Resync.IsEmpty()) return;
 	++ApplyFailures;
-	TArray<FIntVector> Keys; for (const auto& V:Revisions) Keys.Add(V.Key);
-	ServerRequestResync(Keys);
-	UE_LOG(LogTerrainCore,Warning,TEXT("Terrain revision/contract gap: stopped applying op; resync required."));
+	ServerRequestResync(Resync);
+	UE_LOG(LogTerrainCore,Warning,TEXT("Terrain revision/contract gap in %d chunk(s); requesting resync."),Resync.Num());
+}
+void UTerrainStreamComponent::ClientChunkSnapshot_Implementation(const FTerrainSnapshotFragment& F)
+{
+	// The listen host's world IS the authoritative one.
+	if (GetOwner()->HasAuthority()) { if (F.Index+1==F.Count) ServerAckSnapshot(F.Key,F.Generation,true); return; }
+	auto* S=GetWorld()->GetSubsystem<UTerrainService>();
+	FTerrainSnapshotFragmentView View;
+	View.Key=FTerrainChunkKey(F.Key.X,F.Key.Y,F.Key.Z); View.Generation=F.Generation; View.Rev=F.Rev;
+	View.Index=F.Index; View.Count=F.Count; View.TotalBytes=F.TotalBytes; View.Bytes=F.Bytes;
+	TArray<uint8> Compressed; FTerrainChunkKey Discarded;
+	switch (Assembler.Add(View,Compressed,Discarded))
+	{
+	case FTerrainSnapshotAssembler::EResult::Incomplete:
+		return;
+	case FTerrainSnapshotAssembler::EResult::Complete:
+	{
+		const double Started=FPlatformTime::Seconds();
+		const bool bApplied=S && S->ApplyReplicatedSnapshot(View.Key,View.Rev,Compressed);
+		if (bApplied)
+		{
+			++SnapshotsApplied;
+			// The client-side cost of a join, per chunk: E-6 wants it measured, not assumed.
+			UE_LOG(LogTerrainCore,Log,TEXT("Terrain snapshot (%d,%d,%d) rev %u installed: %d bytes in %.1f ms"),
+				F.Key.X,F.Key.Y,F.Key.Z,F.Rev,Compressed.Num(),(FPlatformTime::Seconds()-Started)*1000.);
+		}
+		else UE_LOG(LogTerrainCore,Warning,TEXT("Terrain snapshot for chunk (%d,%d,%d) could not be applied."),F.Key.X,F.Key.Y,F.Key.Z);
+		ServerAckSnapshot(F.Key,F.Generation,bApplied);
+		return;
+	}
+	case FTerrainSnapshotAssembler::EResult::Rejected:
+		if (S) S->MarkReplicaUnsynced(Discarded);
+		ServerRequestResync({FIntVector(Discarded.X,Discarded.Y,Discarded.Z)});
+		UE_LOG(LogTerrainCore,Warning,TEXT("Terrain snapshot fragment out of sequence; chunk (%d,%d,%d) requested again."),Discarded.X,Discarded.Y,Discarded.Z);
+		return;
+	}
+}
+void UTerrainStreamComponent::ServerAckSnapshot_Implementation(FIntVector Key,uint32 Generation,bool bApplied)
+{
+	if (auto* S=GetWorld()->GetSubsystem<UTerrainService>()) S->ReceiveSnapshotAck(*this,FTerrainChunkKey(Key.X,Key.Y,Key.Z),Generation,bApplied);
 }
 void UTerrainStreamComponent::ServerRequestResync_Implementation(const TArray<FIntVector>& Keys)
 {
@@ -120,8 +169,12 @@ void UTerrainStreamComponent::ServerRequestResync_Implementation(const TArray<FI
 	{
 		const FTerrainChunkKey K(P.X,P.Y,P.Z);
 		Subscribed.Remove(K); PendingPristine.Remove(K); DeliveredRevisions.Remove(K);
+		SnapshotQueue.Remove(K);
+		if (const FSnapshotInFlight* Flight=Syncing.Find(K)) { SnapshotBytesInFlight-=Flight->Bytes; Syncing.Remove(K); }
 	}
-	UE_LOG(LogTerrainCore,Warning,TEXT("Terrain source %u needs modified-chunk resync (step 5); no false sync acknowledgement."),SourceId);
+	// The next subscription refresh re-sends each chunk: a snapshot if it has been edited, the
+	// 12-byte pristine notice if it has not (P-008 §5).
+	UE_LOG(LogTerrainCore,Warning,TEXT("Terrain source %u requested resync of %d chunk(s)."),SourceId,Keys.Num());
 }
 void UTerrainStreamComponent::ClientBeginTest_Implementation(int32 Index,float Duration,bool Observer)
 {
@@ -142,11 +195,12 @@ void UTerrainStreamComponent::ClientVerifyTest_Implementation(const TArray<FIntV
 	if (Keys.Num()>64) return;
 	TArray<uint64> Hashes;
 	if (auto* S=GetWorld()->GetSubsystem<UTerrainService>()) for (const auto& K:Keys) Hashes.Add(S->HashChunk(FTerrainChunkKey(K.X,K.Y,K.Z)));
-	UE_LOG(LogTerrainCore,Display,TEXT("MP.Convergence client %d finished: edits=%d applied=%d failures=%d chunks=%d"),TestIndex,TestEdits,ReceivedOps,ApplyFailures,Hashes.Num());
-	ServerTestHashes(Hashes,ReceivedOps,ApplyFailures);
+	UE_LOG(LogTerrainCore,Display,TEXT("MP.Convergence client %d finished: edits=%d applied=%d failures=%d snapshots=%d dropped=%d chunks=%d"),
+		TestIndex,TestEdits,ReceivedOps,ApplyFailures,SnapshotsApplied,DroppedOps,Hashes.Num());
+	ServerTestHashes(Hashes,ReceivedOps,ApplyFailures,SnapshotsApplied,DroppedOps);
 #endif
 }
-void UTerrainStreamComponent::ServerTestHashes_Implementation(const TArray<uint64>& Hashes,int32 Applied,int32 Failures)
+void UTerrainStreamComponent::ServerTestHashes_Implementation(const TArray<uint64>& Hashes,int32 Applied,int32 Failures,int32 Snapshots,int32 Dropped)
 {
-	if (auto* S=GetWorld()->GetSubsystem<UTerrainService>(); S && S->IsMultiplayerTest()) S->ReceiveTestHashes(this,Hashes,Applied,Failures);
+	if (auto* S=GetWorld()->GetSubsystem<UTerrainService>(); S && S->IsMultiplayerTest()) S->ReceiveTestHashes(this,Hashes,Applied,Failures,Snapshots,Dropped);
 }

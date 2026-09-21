@@ -1,7 +1,7 @@
 <# Dedicated server plus three real clients; exact server/client chunk hashes after a shared edit workload. #>
 [CmdletBinding()]
 param([int]$DurationSeconds=60,[ValidateRange(1,3)][int]$Rounds=1,[int]$Port=17777,[switch]$IncludeObserver,
-      [switch]$CheckpointCapture,
+      [switch]$CheckpointCapture,[int]$DropOp=0,
       [string]$Engine='C:\Program Files\Epic Games\UE_5.8')
 $ErrorActionPreference='Stop'
 if ($DurationSeconds -lt 5 -or $DurationSeconds -gt 120) { throw 'Duration must be 5..120 seconds.' }
@@ -39,6 +39,8 @@ try {
         $clientArgs=@('"'+$taskProject+'"',("127.0.0.1:"+$Port),'-game','-nullrhi','-unattended','-nosplash','-nosound',
             ('-seconds='+($DurationSeconds*$Rounds+135)),('-abslog="'+$clientLog+'"'))
         if ($i -eq 3) { $clientArgs+='-TerrainMPObserver' }
+        # MP.Resync: client 0 loses its Nth op on purpose, and must detect the gap and repair it.
+        if ($i -eq 0 -and $DropOp -gt 0) { $clientArgs+=('-TerrainMPDropOp='+$DropOp) }
         $client=Start-Process -FilePath $taskExe -ArgumentList $clientArgs -WindowStyle Hidden -PassThru
         $taskProcesses.Add($client)
         Write-Output "Client $i PID $($client.Id)"

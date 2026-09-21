@@ -59,3 +59,15 @@ bool FTerrainRevisionIndex::SeedRevisions(TConstArrayView<TPair<FTerrainChunkKey
 	}
 	return true;
 }
+
+void FTerrainRevisionIndex::AssignReplicaRevision(const FTerrainChunkKey& Key, FTerrainRev Rev)
+{
+	if (Rev == 0)
+	{
+		Revisions.Remove(Key);
+	}
+	else
+	{
+		Revisions.Add(Key, Rev);
+	}
+}

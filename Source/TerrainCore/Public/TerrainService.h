@@ -13,6 +13,7 @@
 #include "TerrainCheckpoint.h"
 #include "TerrainRetention.h"
 #include "TerrainStreamComponent.h"
+#include "TerrainReplica.h"
 #include "TerrainService.generated.h"
 
 class UTerrainSettings;
@@ -70,14 +71,28 @@ public:
 	uint32 RegisterStream(UTerrainStreamComponent* Stream);
 	void UnregisterStream(uint32 Id);
 	bool SubmitPlayerEdit(UTerrainStreamComponent* Stream, const FTerrainEditRequest& Request, FTerrainEditReceipt& Receipt);
-	bool ApplyReplicatedOp(const TArray<uint8>& Bytes, const TArray<FTerrainChunkRevision>& Revisions);
+	/**
+	 * Replica: applies one authoritative op (P-008 §3). Revision checks and bumps apply only to
+	 * chunks this replica holds in sync; a chunk it does not is written but stays unsynced until
+	 * a snapshot replaces it. Returns false when the op itself is unusable. OutResync lists the
+	 * synced chunks that turned out not to match and must be requested again.
+	 */
+	bool ApplyReplicatedOp(const TArray<uint8>& Bytes, const TArray<FTerrainChunkRevision>& Revisions,
+	                       TArray<FIntVector>& OutResync);
+	/** Replica: installs an authoritative snapshot of one chunk and marks it synced. */
+	bool ApplyReplicatedSnapshot(const FTerrainChunkKey& Key, FTerrainRev Rev, TArrayView<const uint8> Compressed);
+	/** Replica: forgets one chunk's sync, e.g. after a snapshot fragment was lost. */
+	void MarkReplicaUnsynced(const FTerrainChunkKey& Key) { Replica.MarkUnsynced(Key); }
+	/** Authority: a client acknowledged (or refused) a snapshot. */
+	void ReceiveSnapshotAck(UTerrainStreamComponent& Stream, const FTerrainChunkKey& Key, uint32 Generation, bool bApplied);
 	bool AcceptPristine(const TArray<FIntVector>& Keys);
 	uint64 HashChunk(const FTerrainChunkKey& Key) const;
 	bool IsMultiplayerTest() const;
 #if !UE_BUILD_SHIPPING
 	void RunAdapterChecks();
 #endif
-	void ReceiveTestHashes(UTerrainStreamComponent* Stream, const TArray<uint64>& Hashes, int32 Applied, int32 Failures);
+	void ReceiveTestHashes(UTerrainStreamComponent* Stream, const TArray<uint64>& Hashes, int32 Applied, int32 Failures,
+	                       int32 Snapshots, int32 Dropped);
 
 	/**
 	 * Streaming interest (§7.4). Handles are service-owned; 0 means "not acquired" and is
@@ -112,6 +127,9 @@ private:
 	FTimerHandle ServiceTickHandle;
 	void TickService();
 	void RefreshSubscriptions(UTerrainStreamComponent& Stream);
+	/** Authority: sends queued snapshots within each connection's byte budget (P-008 §4). */
+	void PumpSnapshots();
+	bool SendSnapshot(UTerrainStreamComponent& Stream, const FTerrainChunkKey& Key);
 	FTerrainQueueCallbacks QueueCallbacks();
 	ETerrainEditRejection ValidateOp(const FTerrainOp& Op, const FTerrainSourceState& Source) const;
 
@@ -146,7 +164,10 @@ private:
 	int64 NextAdminRequest = 1;
 	FTerrainEditReceipt LastAdminReceipt;
 	double NextSubscriptionUpdate = 0;
-	TSet<FTerrainChunkKey> ResyncRequired;
+	/** Replica: which chunks are known to equal the server's (P-008 §3). */
+	FTerrainReplica Replica;
+	int32 SnapshotsSent = 0;
+	int64 SnapshotBytesSent = 0;
 	void TickMultiplayerTest();
 	bool bMPStarted = false, bMPVerifying = false, bMPFinished = false;
 	double MPStartTime = 0;

@@ -42,6 +42,16 @@ public:
 	 */
 	bool SeedRevisions(TConstArrayView<TPair<FTerrainChunkKey, FTerrainRev>> Restored);
 
+	/**
+	 * Replica only (P-008): sets one chunk's revision to the value an authoritative snapshot
+	 * carries. A replica's revision is a copy of the server's, not history of its own, so an
+	 * authoritative snapshot overwrites it in either direction. Zero removes the entry.
+	 *
+	 * Never called on the authority: the server's revisions only ever move by TryBumpRevisions
+	 * or boot-time SeedRevisions.
+	 */
+	void AssignReplicaRevision(const FTerrainChunkKey& Key, FTerrainRev Rev);
+
 private:
 	TMap<FTerrainChunkKey, FTerrainRev> Revisions;
 

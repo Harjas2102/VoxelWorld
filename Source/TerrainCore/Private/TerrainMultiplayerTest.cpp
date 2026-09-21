@@ -64,21 +64,26 @@ void UTerrainService::TickMultiplayerTest()
 	}
 #endif
 }
-void UTerrainService::ReceiveTestHashes(UTerrainStreamComponent* Stream,const TArray<uint64>& Hashes,int32 Applied,int32 Failures)
+void UTerrainService::ReceiveTestHashes(UTerrainStreamComponent* Stream,const TArray<uint64>& Hashes,int32 Applied,int32 Failures,int32 Snapshots,int32 Dropped)
 {
 #if !UE_BUILD_SHIPPING
 	if (!bMPVerifying || bMPFinished || !Stream || Stream->bTestReported) return;
 	Stream->bTestReported=true; ++MPReports;
+	// A client told to lose an op must show the gap AND the repair: failures, then a snapshot,
+	// then the same hashes as everyone else. Without the drop, any failure is a failure.
+	const bool Repaired=Dropped>0 && Failures>0 && Snapshots>0;
 	const bool Match=Stream->bObserver ? Applied==0 && Failures==0
-		: Hashes==MPHashes && !Hashes.Contains(uint64(0)) && Applied>0 && Failures==0;
+		: Hashes==MPHashes && !Hashes.Contains(uint64(0)) && Applied>0 && (Dropped>0 ? Repaired : Failures==0);
 	if (!Match) ++MPFailures;
-	UE_LOG(LogTerrainCore,Display,TEXT("MP.Convergence source=%u match=%d applied=%d failures=%d observer=%d"),Stream->SourceId,int32(Match),Applied,Failures,int32(Stream->bObserver));
+	UE_LOG(LogTerrainCore,Display,TEXT("MP.Convergence source=%u match=%d applied=%d failures=%d snapshots=%d dropped=%d observer=%d"),
+		Stream->SourceId,int32(Match),Applied,Failures,Snapshots,Dropped,int32(Stream->bObserver));
 	int32 Expected=0; for (const auto& E:Streams) if (auto* S=E.Value.Get();S && S->bReady) ++Expected;
 	if (MPReports==Expected)
 	{
         bMPFinished=true;
         UE_LOG(LogTerrainCore,Display,TEXT("MP.Queue max age %.3f ms; max backend apply %.3f ms"),
             EditQueue.MaxQueueAgeSeconds()*1000.,EditQueue.MaxApplySeconds()*1000.);
+		UE_LOG(LogTerrainCore,Display,TEXT("MP.Snapshots sent=%d bytes=%lld"),SnapshotsSent,SnapshotBytesSent);
 		UE_LOG(LogTerrainCore,Display,TEXT("**** MP.Convergence: %s clients=%d chunks=%d committed=%llu ****"),MPFailures ? TEXT("FAIL") : TEXT("PASS"),MPReports,MPKeys.Num(),EditQueue.NextSequence()-1);
         static int32 CompletedRounds=0;
         int32 Rounds=1; FParse::Value(FCommandLine::Get(),TEXT("TerrainMPRounds="),Rounds);
