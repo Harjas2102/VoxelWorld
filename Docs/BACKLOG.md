@@ -86,7 +86,10 @@ deliberately removing arbitrary terrain manipulation from Pillar 1).
 
 - **1B** — `TerrainEditOp`, authoritative request path, revision IDs, 2–3 client
   same-region test. — ✅ **DONE (CP-014, T-115)**
-- **1C** — Material field; soil/stone/ore query; **resource yield from removed material**.
+- **1C** — Material field; soil/stone/ore query; **resource yield from removed material**. —
+  ✅ **DONE (CP-019, T-130 + T-131)**. Exact material ids, measured per-material yield (E-1: +2.4%
+  at the player dig), credited into a crash-safe SQLite ledger. *Not done:* an inventory UI;
+  spending; inventory-based placement (GAME); durable player identity (R-017).
 - **1D** — Persistence journal, snapshot + compaction prototype, restart test. — ✅ **DONE
   for terrain (CP-016, T-116…T-125)**. Edits are journalled durably before broadcast, a
   checkpoint bounds replay, capture is incremental and on by default, the store can be
@@ -95,11 +98,14 @@ deliberately removing arbitrary terrain manipulation from Pillar 1).
   R-015 closed by construction at CP-017 (T-126): an open world creates no file names.
   Background retention runs by default since CP-018 (T-127): DEF-9 closed for
   payloads and index pages.
+  The exclusive-writer lease is done at CP-019 (T-128), and so are settlement and its SQLite
+  ledger (T-131, DEF-1).
   *Not done:*
-  - *the exclusive-writer lease (**T-128, next**);*
   - *journal trimming, which must rotate within a pre-created segment ring;*
-  - *settlement and its SQLite ledger (build step 6, which is what DEF-1 needs).*
-- **1E** — Join-in-progress, chunk relevancy, compression/batching only as needed.
+  - *backups (P-003 §5's backup descriptor).*
+- **1E** — Join-in-progress, chunk relevancy, compression/batching only as needed. — ✅ **DONE
+  except E-6 (CP-019, T-129)**. Ordered snapshots, nearest first, with backpressure and resync;
+  DEF-3 resolved. *Not done:* E-6, a heavy region with a joiner arriving mid-edit.
 - **1F** — Stress profile, collision, foliage, nav, streaming → **decide the backend**.
 
 ### T-006 — Editor fluency *(rescoped at CP-002; not started)*
@@ -186,6 +192,9 @@ building.
 - Server on a LAN box; port forwarding; friends direct-connect from outside *(was T-303)*
 - Remote friends playtest, 2–4 players; reconnect; save/restart *(was T-305)*
 - Bandwidth and performance telemetry
+- **Durable player identity** (Steam or EOS login): inventories are keyed by it (R-017). This is a
+  Director decision when it comes up.
+- Linux run of `WriterLease`, `Settlement.*` and `Storage.PlatformDevice` (R-007)
 
 **Milestone:** harvest → mine → craft → build → persist, with friends.
 
@@ -226,6 +235,32 @@ T-101B sub-step 1D, which requires the multiplayer-capable version instead.
 ---
 
 ## Done
+
+- **T-131** *(CP-019)* **Settlement ledger — digging pays; DEF-1 resolved for terrain.**
+  - The credit is decided before the journal write and recorded in it. The new `EntityStore`
+    module settles it into SQLite (UE's `SQLiteCore`), all or nothing, keyed by (OpSeq, digest).
+  - Boot settles (W, H] from the journal. A missing ledger or an old copy is refused.
+  - Players place Fill, which never pays.
+  - Found: UE's SQLite silently refused WAL; it now runs EXCLUSIVE + WAL + FULL, read back.
+  - Evidence: 42/42 automation. `Test-TerrainSettlement.py` passes 8 hard kills with the audit
+    matching every time, and was mutation-tested. MP audits pass every round. **D-046**, spec
+    **P-010**.
+- **T-130** *(CP-019)* **Materials and physical yield.**
+  - Exact game-material ids through the generator's colour table, with no visible change.
+  - Signed per-material yield on the real plugin, written to the journal as `Measured` and
+    returned in the receipt.
+  - E-1 answered: +2.4% at the 2 m dig.
+  - MP material hashes, mutation-tested. **D-045**, spec **P-009**.
+- **T-129** *(CP-019)* **Join-in-progress — clients sync edited chunks.**
+  - Found by T-128's regression run: after server travel on a saved world, clients got no edits.
+  - Built step 5: ordered snapshots, `FTerrainReplica`, and a resync that repairs. DEF-3 resolved.
+  - A bulk `WriteRegion` took boot restore of 256 chunks from 4.4 s to 0.9 s.
+  - MP passes 3 rounds, and `-DropOp` passes. **D-044**, spec **P-008**.
+- **T-128** *(CP-019)* **Exclusive-writer lease.**
+  - An OS lock on `writer.lock`, taken before the world's existence is checked. A second server is
+    refused with `StoreBusy` and changes no byte.
+  - No stale lease after a hard kill.
+  - Mutation-tested. **D-043**, spec **P-007**.
 
 - **T-127** *(CP-018)* **Background retention — DEF-9 closed for payloads and pages.**
   `FTerrainRetentionCollector`:

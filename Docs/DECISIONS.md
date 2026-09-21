@@ -1614,3 +1614,110 @@ are always migrated.
 - **Journal trimming.**
 - **The exclusive-writer lease** (T-128).
 
+
+## D-043 — The exclusive-writer lease: an OS lock, taken before existence is checked (2026-09-21)
+
+**Recorded:** CP-019 · **Class:** technical (per **D-023**) · **Architect ruling, logged
+not asked** · **Scope:** T-128, P-003 §5 · **Status:** ACCEPTED · **Spec:** P-007
+
+- The lease is an OS lock on `writer.lock` at the world root: `LockFileEx` on Windows (a handle
+  that shares read and write but not delete), and on Unix `flock` plus an inode check. Its
+  contents are never used. A crashed holder never leaves a stale lease.
+- It lives in the device seam (`ITerrainStorageDevice::AcquireExclusiveLease`). The world store
+  holds it for its whole life and releases it last. The service takes it **before** checking
+  whether the world exists, so two servers cannot both create the world.
+- It never blocks: a held lease gives `StoreBusy` at once. The second server closes terrain
+  access and changes no byte.
+- `Open`/`Create` do not take the lease themselves: headless tests model restarts with two store
+  objects. Taking the lease is not a mutation, so crash-matrix indices are unchanged.
+
+## D-044 — Join-in-progress by ordered snapshots; DEF-3 resolved (2026-09-21)
+
+**Recorded:** CP-019 · **Class:** technical (per **D-023**) · **Architect ruling, logged
+not asked** · **Scope:** T-129, build step 5, DEF-3 · **Status:** ACCEPTED · **Spec:** P-008
+
+- **DEF-3 is resolved without a buffering protocol.** Commits are serialized on the server, and
+  each client's terrain stream is one reliable, ordered channel, so a snapshot read between two
+  commits arrives before every later op.
+- `FTerrainReplica`: revision checks and bumps apply **only to chunks the replica holds in sync**.
+  An op is still written over its whole footprint, which is safe because the kernel is
+  pointwise. A gap demotes the one chunk it affects, not the whole op.
+- Snapshots use the Dense layout, Zlib-compressed, in fragments of at most 16 KiB, sent nearest
+  first. Each connection may have at most 64 KiB unacknowledged, and the server sends at most 2
+  per tick; acknowledgements are generation-checked. Resync now repairs chunks.
+- `DeliveredRevisions` records only chunks the client holds in sync.
+- **Adapter determination:** `FVPLegacyBackend::WriteRegion` is a bulk write (one lock, one
+  accelerator, one remesh). Snapshot install went from 65–165 ms to 16–25 ms per chunk, and boot
+  restore of 256 chunks from 4.4 s to 0.8–1.0 s, with every restart hash unchanged.
+
+## D-045 — Materials and physical yield; DEF-6 measurement half; K9's config switch deferred (2026-09-21)
+
+**Recorded:** CP-019 · **Class:** technical (per **D-023**) · **Architect ruling, logged
+not asked** · **Scope:** T-130, gate 1C (physical half) · **Status:** ACCEPTED · **Spec:** P-009
+
+- **Measurement:** signed microlitres per game material. Removal is attributed to the pre-edit
+  material, placement to `Op.MaterialId`. There is one shared `TerrainOccupancy`.
+  `ITerrainBackend::MeasuresPhysicalYield()` drives the journal's `Measured` flag.
+- **E-1 is answered** against the rendered hole: +2.4% at the 2 m player dig, and within 0.5% from
+  radius 6 up.
+- **Material ids without a visible change:** the generator colours each voxel by game id, one
+  distinct colour per catalog entry, and the adapter inverts that table exactly. If two colours
+  ever collide, yield is reported as unavailable.
+- **This amends the timing of K9 (D-024):** the SingleIndex config switch changes how terrain
+  looks, so it waits for the Director. Saves and the wire carry ids only, so the switch is
+  adapter-internal whenever it happens.
+- Old saves (material 0) keep their generated materials. `HashRegion` on the plugin stays
+  density-only on purpose; materials are verified directly.
+
+## D-046 — The settlement ledger in SQLite; DEF-1 resolved for terrain settlement; economy policy v1 (2026-09-21)
+
+**Recorded:** CP-019 · **Class:** technical (per **D-023**), **includes a dependency entry**
+(AGENTS §4: no new architectural dependency without a decision entry) · **Scope:** T-131,
+gate 1C, DEF-1, DEF-6 · **Status:** ACCEPTED · **Spec:** P-010
+
+### 1. Dependency
+
+- UE's **`SQLiteCore`** engine plugin (SQLite 3.47.1) is enabled in `VoxelWorld.uproject` for all
+  targets. This implements D-012 ("SQLite holds entities"); it is not a new vendor.
+- New module **`EntityStore`** is the only module that links it. It registers its ledger with
+  `FTerrainSettlementRegistry`, and the service loads it by name
+  (`UTerrainSettings::SettlementModule`).
+- TerrainCore's `Build.cs` is unchanged. No MCP plugin is involved (D-025 untouched).
+
+### 2. Protocol
+
+This is P-003 §2 and §3 as written:
+- The intent is decided before the journal write and recorded in the record.
+- A serialized worker settles `(OpSeq, digest, deltas, W)` in all-or-nothing transactions of up
+  to 16 records. Settlement never gates terrain.
+- 32 unsettled records pause execution, and checkpoint cuts wait for W = H.
+- Boot settles (W, H] from the journal and never recomputes. It refuses a missing ledger once
+  the journal has ever paid, and refuses W < G or W > H. Worlds from before T-131 get a new
+  ledger and settle their NoEconomy history.
+
+### 3. SQLite configuration
+
+UE's SQLite runs on its own file layer with no shared memory, so plain WAL silently stays in
+DELETE mode. The ledger therefore sets `locking_mode=EXCLUSIVE` + `journal_mode=WAL` +
+`synchronous=FULL`, reads each one back, and refuses to run on any mismatch. The service then
+syncs the world directory after opening. No ledger name is created or removed while the world
+runs.
+
+### 4. Economy policy version 1 (DEF-6, economic half)
+
+- Balances are exact microlitres per material, in the owner's personal stock. There is no residue.
+- Topsoil, Dirt, Stone, Deep Stone, Bedrock and Iron Ore pay; Air, Unknown and Fill do not.
+- Tool 0 pays 100%.
+- **Players place `Fill`** (new catalog material 8). It looks like dirt and never pays, which
+  closes the dig/place/dig mint. Placement stays free, exactly as before.
+- **The owner** is the BLAKE3 of the player's unique net id, captured at registration. No
+  identity means NoEconomy. Owner 1 is server diagnostics.
+- **Base compatibility:** a saved material catalog that is smaller is accepted, because ids are
+  append-only.
+
+### 5. Still open
+
+- Inventory-based placement (a debit) is a GAME decision.
+- Spending, crafting and transfers.
+- Backups and ledger GC.
+- Durable player identity, which needs a real login.

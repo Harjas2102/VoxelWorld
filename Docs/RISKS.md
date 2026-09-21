@@ -34,8 +34,16 @@ Severity / probability scale: **High · Medium · Low**.
   and reconstructs modified chunks from snapshot + ops since, without replaying full
   server history and without visible divergence.
 - **Owner / task:** T-101B (sub-step 1E)
-- **Result:** *open*
-- **Decision:** *open*
+- **Result — CP-019, mitigated for the common case.** P-008 (D-044) is built.
+  - Edited chunks are sent as Zlib snapshots, nearest first, with backpressure. A dug chunk is
+    about 0.3–5 KB on the wire.
+  - Multi-round `MP.Convergence`, where every round after a map change is a join onto a saved,
+    edited world, passes 3 rounds with an observer.
+  - `-DropOp` proves a lost op is detected and repaired.
+  - Snapshot install costs the client 16–25 ms per chunk after the bulk `WriteRegion` fix.
+  - **Still open: E-6.** A heavily dug region with a joiner arriving mid-edit has not been
+    measured. A 100-chunk region would cost about 2 s of cumulative client stalls.
+- **Decision:** D-044 (technical). The risk stays open until E-6 is measured.
 
 ## R-003 — Terrain save growth and compaction
 
@@ -85,7 +93,18 @@ Severity / probability scale: **High · Medium · Low**.
   Add volumes with the appropriate material, and no physical volume for Paint. The
   reference linear occupancy map is documented, not calibrated against the production
   kernel. E-1 and DEF-6 remain open; these tests do not validate economic conservation.
-- **Decision:** *open*
+- **Result — CP-019, the mechanic works on the production plugin (P-009, P-010).**
+  - Every edit measures signed per-material volume from the plugin's own per-voxel old and new
+    values. **E-1:** within 2.4% of the rendered hole at the 2 m player dig, and within 0.5% from
+    radius 6 up.
+  - A dig across a stone/ore boundary splits the same total to the microlitre.
+  - Credits are settled into a crash-safe ledger; the kill test's audit matches the journal after
+    every hard kill.
+  - **Known leak, not a mint:** placing and then re-digging the same sphere recovers about 79%,
+    because Add and Remove are not exact inverses at the boundary. Players place Fill, which never
+    pays, so there is no mint.
+- **Decision:** D-045 and D-046 (technical). Closed for measurement accuracy; the economic tuning
+  of placement is a later GAME decision.
 
 ## R-005 — PCG / foliage invalidation after edits
 
@@ -133,6 +152,12 @@ Severity / probability scale: **High · Medium · Low**.
   renderer, no plugin and no editor, so it is the cheapest possible cross-platform signal and
   it would have caught nothing this time — the Flush bug is a durability bug, not a
   correctness one — which is itself worth knowing when deciding what evidence to trust.
+- **CP-019 — two more things only Linux can check.**
+  - P-007's `flock` lease, with its inode check, has never been compiled.
+  - UE's SQLite runs on UE's own file layer (`SQLITE_OS_OTHER`, no shared memory). It silently
+    refused plain WAL on Windows, and the ledger now requires EXCLUSIVE + WAL + FULL and reads
+    each back. Whether Linux behaves identically is unverified.
+  - The first Linux build must run `WriterLease`, `Settlement.*` and `Storage.PlatformDevice`.
 - **Owner / task:** T-101B (architecture check) → Phase 4 (build proof)
 - **Result:** *open, and broadened at CP-015 by a confirmed instance.*
 - **Decision:** *open*
@@ -561,3 +586,32 @@ D-028 was written for. Keep writing the breadcrumb *before* the risky half, not 
   single-author work.*
 - **Decision:** *open, and now cheap to close either way. The Director may accept the residual
   and move on; that is his call and not a thing to re-litigate.*
+
+- **CP-019 — four more R3 increments by a single author.** T-128 through T-131 (P-007 to P-010)
+  were written and self-reviewed by Claude under the Director's standing instruction.
+  - The self-reviews found real defects before they counted as evidence: a multiplayer material
+    check that passed a deliberately broken build; E-1 first compared against the wrong truth; a
+    database close with a live statement, which crashed; and SQLite's silent WAL fallback.
+  - Each headline claim was mutation-tested: the lease, the join/resync path, snapshot materials,
+    and the boot settlement pass.
+  - None of P-005 to P-010 has had a cross-vendor read. That is the cheapest remaining way to
+    find what one author reads past.
+
+## R-017 — Player identity is not yet durable
+
+- **Severity:** Medium — inventories are keyed by owner, and an owner that changes between
+  sessions is a player who loses everything they dug.
+- **Probability:** High until a real login exists. The owner is the BLAKE3 of the player's unique
+  net id, and the project runs on Unreal's Null online subsystem, whose ids are per machine at
+  best.
+- **Evidence so far (CP-019):**
+  - Three clients on one machine got distinct ids.
+  - The ids stayed the same across server travel.
+  - Survival across a game restart, or on another machine, is unmeasured.
+- **Mitigation:** adopt a real identity (Steam or EOS) before inventories matter to players. That
+  choice costs nothing but is platform-facing, so it is a Director decision when the time comes.
+  Until then the ledger's rows are correct but their owner key may not follow the person.
+- **Owner / task:** Phase 4 (multiplayer vertical slice)
+- **Result:** *open*
+- **Decision:** *open*
+

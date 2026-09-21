@@ -5,11 +5,64 @@
 
 ---
 
-**Checkpoint:** CP-018 · **Date:** 2026-09-21
+**Checkpoint:** CP-019 · **Date:** 2026-09-21
 **Phase:** 1 — Terrain Feasibility
 **Expected next agent:** either (D-028)
-**Current task:** T-128 — the exclusive-writer lease (P-003 §5): a second server pointed at the
-same world must be refused, not allowed to write beside the first.
+**Current task:** T-132 — gate item 8, the edit stress profile, together with E-6: thousands of
+operations and a joiner arriving mid-edit, measuring server and client frame time, rebuild
+latency, save growth, bandwidth, memory and settlement throughput against 96 ops/s. That is the
+last gate-critical measurement before 1F's backend decision.
+
+## What happened at CP-019
+
+**Four increments. The world can't be written by two servers, players who join see the saved
+world, the ground knows what it is made of, and digging pays, crash-safely.** Each has a spec
+with its own evidence and self-review.
+
+| | |
+|---|---|
+| **T-128** (D-043, P-007) | **Exclusive-writer lease.** An OS lock on `writer.lock`, taken before the world's existence is checked. With real processes, a second server is refused with `StoreBusy` and changes no save byte; after the first is killed hard, a third opens the world. Mutation-tested |
+| **T-129** (D-044, P-008) | **Join-in-progress; DEF-3 resolved.** Found by T-128's regression run: after a map change on a saved world, clients received no edits, because only never-edited chunks could be subscribed. Build step 5 is now built: ordered snapshots (a dug chunk is 0.3–5 KB), a per-chunk replica rule, and a resync that repairs. MP passes 3 rounds with an observer; `-DropOp` proves repair. A bulk `WriteRegion` cut client install to 16–25 ms per chunk and **boot restore at 256 chunks from 4.4 s to 0.9 s** |
+| **T-130** (D-045, P-009) | **Materials and physical yield.** Exact game-material ids, read back from the generator's colours, so nothing on screen changed and K9's config switch waits for the Director. Signed per-material yield on the real plugin. **E-1: +2.4% of the rendered hole at the 2 m dig.** The MP harness gained material hashes, mutation-tested |
+| **T-131** (D-046, P-010) | **The settlement ledger; DEF-1 resolved for terrain.** Credits are decided before the journal write, recorded in it, and settled into SQLite (new module `EntityStore`, UE's `SQLiteCore` plugin enabled). Boot settles (W, H]. A missing ledger is refused, and so is an old copy. **8 hard kills: the audit matched the journal every time, and 5 journaled-but-unpaid records were paid at boot, once each.** Mutation-tested. Players now place `Fill`, which never pays: no mint |
+
+**Evidence (final source, T-131):** 42/42 TerrainCore automation. Kill test PASS. `MP.Convergence`
+passes 3 rounds with an observer, with the ledger audit passing after each round. `-DropOp` PASS.
+`Test-TerrainCheckpoint.py`, `Test-TerrainRetention.py` (256 hashes), `Test-TerrainLease.py` and
+`Terrain.AdapterChecks` (pinned density fixtures unchanged) all pass. A world saved before T-130
+boots hash-identical and gets a ledger. Both targets build.
+
+**Three findings worth knowing without reading the specs:**
+- **UE's bundled SQLite can't use normal WAL.** It runs on UE's file layer, which has no shared
+  memory, and silently stays in DELETE mode, which creates a journal file on every transaction.
+  The ledger now requires EXCLUSIVE + WAL + FULL and reads all three back.
+- **Placing then re-digging recovers only about 79%** (the Add/Remove boundary isn't symmetric).
+  That is a leak, not a mint.
+- **Player identity isn't durable yet** (new R-017). Inventories are keyed by the online
+  subsystem's id, and the Null subsystem is per machine at best. A real login is a Phase 4
+  Director decision.
+
+**Process:** writer and reviewer were the same agent for all four (R-016). Every headline claim
+was mutation-tested, and each self-review caught a defect before it counted: a vacuous material
+check, E-1 measured against the wrong truth, a crash on a database close, and the silent WAL
+fallback. Cross-vendor review of P-005 to P-010 remains the cheapest open improvement.
+
+## Drift checks (VISION.md, run at CP-019)
+
+**NO FLAG MOVED.**
+- **Server authority:** untouched. Credits, placement material and owner are server state; a
+  client can request a resync, but its bandwidth is bounded (P-008 §7 notes it has no rate
+  limit yet).
+- **D-011 / D-025:** `EntityStore` includes no plugin header, and TerrainCore's `Build.cs` is
+  unchanged. The one new dependency, UE's `SQLiteCore`, is logged as D-046 and implements D-012.
+  No MCP plugin was touched.
+- **Player-facing:**
+  - A second server on the same world now refuses instead of corrupting it.
+  - Multiplayer players see saved terrain after a restart or map change, which they did not
+    before.
+  - Freshly placed terrain is coloured Fill (dirt's colour, one invisible step apart), where it
+    used to keep whatever material the voxel had.
+- **Pillar 1:** strengthened. The server remembers what was dug, and who dug it.
 
 ## What happened at CP-018
 
@@ -801,11 +854,11 @@ the roadmap was reordered around a terrain feasibility gate. Reviews archived in
 
 ## What exists right now
 
-**C++ (builds from source; current at CP-014):**
+**C++ (builds from source; tree updated at CP-019):**
 
 ```text
 Source/
-  VoxelWorld.Target.cs             Game target      | BuildSettingsVersion.V6
+  VoxelWorld.Target.cs             Game target      | BuildSettingsVersion.V7
   VoxelWorldEditor.Target.cs       Editor target
   VoxelWorld/                      primary game module — depends on TerrainCore ONLY
     TerrainInteractionLibrary.*    Blueprint nodes; intent through the owning controller
@@ -828,11 +881,20 @@ Source/
     Public/TerrainPersistenceFormat.h   schema-2 primitives — PERMANENT FORMAT (P-004)
     Public/TerrainPersistenceRecords.h  schema-2 record bodies — PERMANENT FORMAT
     Public/TerrainPersistenceIndex.h    96-bit chunk-key index + object-store seam
+    Public/TerrainStorage.h        device seam (incl. the writer lease), containers, slot pairs
+    Public/TerrainWorldStore.h     a world directory: create, open, publish; holds the lease
+    Public/TerrainJournalWriter.h  the journal; TerrainCheckpoint.h / TerrainRetention.h
+    Public/TerrainChunkSnapshot.h  join-in-progress snapshot codec + assembler (P-008)
+    Public/TerrainReplica.h        the client's per-chunk sync rule (DEF-3)
+    Public/TerrainSettlement.h     ledger interface, registry, policy v1, worker (P-010)
     Private/                       the implementations, plus TerrainPersistenceDump.cpp
-    Private/Tests/                 24 automation cases (§6.1)
+    Private/Tests/                 automation cases; the suite totals 42 with EntityStore's
+  EntityStore/                     THE ONLY module that links SQLite (UE SQLiteCore, D-046)
+    Private/EntityLedger.*         schema-1 ledger: EXCLUSIVE + WAL + FULL, read back
+    Private/Tests/                 Settlement.Ledger / .Policy / .CommitCrash
   TerrainBackendVPLegacy/          THE ONLY module that may include plugin headers
     Private/VPLegacyBackend.*      canonical W/B, complete-cell semantics, thread guards
-    Private/VPLegacyDensityGenerator.*  immutable shared field lifetime (AR-7)
+    Private/VPLegacyDensityGenerator.*  immutable shared field lifetime (AR-7); material colours = ids
 ```
 
 - **`UTerrainService` is no longer a skeleton.** It owns backend lifetime, connection
