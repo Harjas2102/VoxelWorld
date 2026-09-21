@@ -49,6 +49,10 @@ void UTerrainService::TickService()
 		NextSubscriptionUpdate=Now+.5;
 	}
 	EditQueue.Pump(Now,QueueCallbacks());
+
+	// After the pump, never inside it: a capture taken mid-transaction would not be a cut.
+	MaybeCaptureCheckpoint();
+
 	TickMultiplayerTest();
 }
 ETerrainEditRejection UTerrainService::QuantiseRequest(const FTerrainEditRequest& R, FTerrainOp& Op) const
@@ -69,7 +73,7 @@ bool UTerrainService::SubmitPlayerEdit(UTerrainStreamComponent* Stream,const FTe
 	if (!IsInGameThread()) { Receipt.Rejection=ETerrainEditRejection::BadRequest; return false; }
     const auto Refuse = [&](ETerrainEditRejection Why)
     { Receipt.Rejection=Why; if (Stream) Stream->ClientEditReceipt(Receipt); return false; };
-    if (!IsBackendReady()) return Refuse(State==ETerrainServiceState::Draining ? ETerrainEditRejection::ShuttingDown : ETerrainEditRejection::NotReady);
+    if (!IsBackendReady()) return Refuse((bStorageFaulted || State==ETerrainServiceState::Draining) ? ETerrainEditRejection::ShuttingDown : ETerrainEditRejection::NotReady);
     if (!HasAuthority() || !Stream || !Stream->SourceId || Streams.FindRef(Stream->SourceId).Get()!=Stream)
         return Refuse(ETerrainEditRejection::NoAuthority);
     if (R.RequestId<=0) return Refuse(ETerrainEditRejection::BadRequest);
@@ -91,6 +95,14 @@ ETerrainEditRejection UTerrainService::ValidateOp(const FTerrainOp& Op,const FTe
 		return ETerrainEditRejection::OutOfBounds;
 	if (!TerrainOpCounts(Op,GetDefault<UTerrainSettings>()->MaxVoxelsPerOp,W,Scans)) return ETerrainEditRejection::TooLarge;
 	TArray<FTerrainChunkKey> Keys; if (!TerrainChunkKeysForBox(B,Keys)) return ETerrainEditRejection::TooLarge;
+	// Count the complete prospective footprint before mutation, not just today's set size.
+	// Capture disabled has no dirty-budget gate: otherwise it would eventually deadlock.
+	if (CommitJournal && GetDefault<UTerrainSettings>()->bCheckpointCapture && !bCheckpointDisabled)
+	{
+		int32 Prospective = DirtyChunks.Num();
+		for (const auto& K : Keys) if (!DirtyChunks.Contains(K)) ++Prospective;
+		if (Prospective > TerrainCheckpointDirtyHardBound) return ETerrainEditRejection::QueueFull;
+	}
 	for (const auto& K:Keys)
 	{
 		if (!Backend->IsRegionResident(K)) return ETerrainEditRejection::NotResident;
@@ -136,7 +148,18 @@ FTerrainQueueCallbacks UTerrainService::QueueCallbacks()
 		S.MaxRadiusCm=GetDefault<UTerrainSettings>()->MaxEditRadiusCm;
 	};
 	Cb.Validate=[this](const FTerrainOp& Op,const FTerrainSourceState& S) { return ValidateOp(Op,S); };
-	Cb.Apply=[this](const FTerrainOp& Op,FTerrainEditResult& R) { return IsBackendReady() && Backend->ApplyOp(Op,R); };
+	Cb.Apply=[this](const FTerrainOp& Op,FTerrainEditResult& R)
+	{
+		if (!IsBackendReady()) return false;
+		if (WorldStore)
+		{
+			FTerrainBox Bounds;
+			TArray<FTerrainChunkKey> Keys;
+			if (!TerrainOpBounds(Op, Bounds) || !TerrainChunkKeysForBox(Bounds, Keys)) return false;
+			for (const auto& K : Keys) LivePersistencePins.Pin(*Backend, K, WorldStore->GetState().Base);
+		}
+		return Backend->ApplyOp(Op,R);
+	};
 	Cb.Commit=[this](const FTerrainOp& Op,const FTerrainEditResult& R,const FTerrainCommitIdentity& Id)
 	{ return CommitOp(Op,R,Id); };
 	Cb.Receipt=[this](uint32 Id,const FTerrainEditReceipt& R)
@@ -187,6 +210,14 @@ bool UTerrainService::CommitOp(const FTerrainOp& Op,const FTerrainEditResult& R,
 	}
 
     NextOpSeq=Op.OpSeq+1;
+
+	// The dirty set is what the next checkpoint will capture. Tracked only when there is
+	// somewhere to capture TO: without a journal there is no checkpoint to owe.
+	if (CommitJournal != nullptr)
+	{
+		for (const auto& K:R.AffectedChunks) DirtyChunks.Add(K, Op.OpSeq);
+	}
+
 	TArray<uint8> Bytes; SerializeTerrainOp(Op,Bytes);
 	for (const auto& Entry:Streams)
 	{

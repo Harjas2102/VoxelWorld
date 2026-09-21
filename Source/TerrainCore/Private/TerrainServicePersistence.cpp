@@ -3,6 +3,7 @@
 #include "TerrainService.h"
 #include "TerrainCommitJournal.h"
 #include "TerrainJournalReplay.h"
+#include "TerrainCheckpoint.h"
 #include "TerrainWorldField.h"
 #include "TerrainSettings.h"
 #include "TerrainCore.h"
@@ -29,12 +30,20 @@
  *   5. replay the journal onto the fresh backend, before a single client can connect;
  *   6. only then attach the journal, so the first thing recorded is the first NEW edit.
  *
- * THE FAILURE POLICY, chosen deliberately. If any of that fails, the world still runs and the
- * journal is NOT attached, and the log says so at Error. The alternative -- refusing to start
- * -- turns a recoverable save problem into an unplayable game, and the Director is the person
- * who would hit it. A server that runs without saving is a bad day; a server that will not
- * start is a worse one, and a server that quietly writes into the wrong world's history is
- * the worst of the three and is the one case this refuses outright.
+ * THE FAILURE POLICY, and it is not the one this file started with. If the store will not
+ * open, the recorded base is not this world's, restore fails, replay fails or the sequence
+ * cannot be seeded, **terrain access is closed** -- the world boots and terrain refuses edits
+ * with `ShuttingDown`.
+ *
+ * The earlier policy was to run unsaved, on the reasoning that a server which will not start
+ * is worse than one which does not save. That reasoning was wrong about what the player
+ * experiences. A saved world that fails to load and then runs unsaved presents a PRISTINE
+ * world as though it were theirs: they dig for an hour, nothing is recorded, and the only
+ * warning was a log line nobody was reading. Refusing the edit is noticed in seconds, and it
+ * cannot make the situation worse. P-003 §3 says the same thing about a base mismatch --
+ * refuse boot, never reinterpret through the currently configured generator.
+ *
+ * A failed CHECKPOINT is deliberately not in that list: see MaybeCaptureCheckpoint.
  */
 
 namespace
@@ -151,9 +160,10 @@ void UTerrainService::OpenWorldStore(UWorld& InWorld)
 	if (!Result.IsOk())
 	{
 		UE_LOG(LogTerrainCore, Error,
-			TEXT("Terrain world store at '%s' could not be %s (%s). THIS SESSION WILL NOT BE SAVED."),
+			TEXT("Terrain world store at '%s' could not be %s (%s). TERRAIN ACCESS IS CLOSED; restart after repairing the save or configuration."),
 			*Directory, bExisting ? TEXT("opened") : TEXT("created"), *Result.ToString());
 		CloseWorldStore();
+		bStorageFaulted = true;
 		return;
 	}
 
@@ -165,17 +175,33 @@ void UTerrainService::OpenWorldStore(UWorld& InWorld)
 		UE_LOG(LogTerrainCore, Error,
 			TEXT("Terrain world at '%s' was made by a different world shape (seed, generator, ")
 			TEXT("voxel size, bounds or material catalog). Replaying its edits would corrupt it, ")
-			TEXT("so it is left untouched and THIS SESSION WILL NOT BE SAVED. Migration is offline ")
+			TEXT("so it is left untouched and TERRAIN ACCESS IS CLOSED; restart after repairing the save or configuration. Migration is offline ")
 			TEXT("and is not built; start a different WorldStoreName to play."),
 			*Directory);
 		CloseWorldStore();
+		bStorageFaulted = true;
 		return;
 	}
 
-	// 5. Replay before anyone can connect. Note the backend is freshly initialised here and
-	//    nothing has edited it, which is exactly the precondition replay requires.
+	// 5. Restore the checkpoint, THEN replay what came after it. P-003 §3's terrain pass in
+	//    order: without the restore, replay would rebuild from the beginning of history even
+	//    though a cut exists, and with it replay only covers (G, H].
 	if (bExisting)
 	{
+		FTerrainRestoreStats RestoreStats;
+		const FTerrainStoreResult Restored =
+			TerrainRestoreCheckpoint(*WorldStore, *Backend, *RevisionIndex, RestoreStats);
+		if (!Restored.IsOk())
+		{
+			UE_LOG(LogTerrainCore, Error,
+				TEXT("Terrain world at '%s' could not restore its checkpoint (%s). The world on ")
+				TEXT("disk is left untouched and TERRAIN ACCESS IS CLOSED; restart after repairing the save or configuration."),
+				*Directory, *Restored.ToString());
+			CloseWorldStore();
+			bStorageFaulted = true;
+			return;
+		}
+
 		FTerrainReplayStats Stats;
 		const FTerrainStoreResult Replayed =
 			TerrainReplayJournal(*WorldStore, *Backend, *RevisionIndex, Stats);
@@ -183,26 +209,39 @@ void UTerrainService::OpenWorldStore(UWorld& InWorld)
 		{
 			UE_LOG(LogTerrainCore, Error,
 				TEXT("Terrain world at '%s' could not be replayed (%s). The world on disk is left ")
-				TEXT("untouched and THIS SESSION WILL NOT BE SAVED."),
+				TEXT("untouched and TERRAIN ACCESS IS CLOSED; restart after repairing the save or configuration."),
 				*Directory, *Replayed.ToString());
 			CloseWorldStore();
+			bStorageFaulted = true;
 			return;
 		}
 
-		// The replay interest is deliberately still held; see TerrainJournalReplay.h. Nothing
-		// releases it, because with no checkpoint capture releasing it would discard the world
-		// that was just rebuilt on any backend that evicts.
+		// Tail edits still belong to the next cut, including chunks not touched this session.
+		DirtyChunks = MoveTemp(Stats.DirtyChunks);
+		if (Settings->bCheckpointCapture && DirtyChunks.Num() > TerrainCheckpointDirtyHardBound)
+		{
+			UE_LOG(LogTerrainCore, Error, TEXT("Checkpoint capture cannot boot with %d dirty chunks "
+				"(limit %d). Restart with bCheckpointCapture=false; offline compaction is not built."),
+				DirtyChunks.Num(), TerrainCheckpointDirtyHardBound);
+			CloseWorldStore();
+			bStorageFaulted = true;
+			return;
+		}
+
 		UE_LOG(LogTerrainCore, Log,
-			TEXT("Terrain world '%s' restored: %d edits replayed to OpSeq %llu in %.3f s."),
-			*Settings->WorldStoreName, Stats.OpsApplied, Stats.LastOpSeq, Stats.Seconds);
+			TEXT("Terrain world '%s' restored: %d chunks from the checkpoint at G=%llu, then %d ")
+			TEXT("edits replayed to OpSeq %llu (%.3f s restore + %.3f s replay)."),
+			*Settings->WorldStoreName, RestoreStats.ChunksRestored,
+			WorldStore->GetState().Checkpoint.G, Stats.OpsApplied, Stats.LastOpSeq,
+			RestoreStats.Seconds, Stats.Seconds);
 
 		if (Stats.Seconds > 5.0)
 		{
 			// The cost the missing capture pump is deferring. Said out loud so it is noticed
 			// as it grows rather than after a startup becomes unbearable.
 			UE_LOG(LogTerrainCore, Warning,
-				TEXT("Terrain replay took %.1f s for %d edits. There is no checkpoint capture yet, ")
-				TEXT("so this grows with every edit ever made (DEF-2)."),
+				TEXT("Terrain replay took %.1f s for %d edits. Capture is opt-in and synchronous; ")
+				TEXT("journal scanning and retention remain unbounded (DEF-2)."),
 				Stats.Seconds, Stats.OpsApplied);
 		}
 	}
@@ -224,9 +263,10 @@ void UTerrainService::OpenWorldStore(UWorld& InWorld)
 	{
 		UE_LOG(LogTerrainCore, Error,
 			TEXT("Terrain world '%s' could not resume at OpSeq %llu: the edit queue has already ")
-			TEXT("assigned sequences. THIS SESSION WILL NOT BE SAVED."),
+			TEXT("assigned sequences. TERRAIN ACCESS IS CLOSED; restart after repairing the save or configuration."),
 			*Settings->WorldStoreName, Resume);
 		CloseWorldStore();
+		bStorageFaulted = true;
 		return;
 	}
 	NextOpSeq = Resume;
@@ -246,4 +286,75 @@ void UTerrainService::CloseWorldStore()
 	WorldJournal.Reset();
 	WorldStore.Reset();
 	StorageDevice.Reset();
+	DirtyChunks.Reset();
+	LivePersistencePins.Reset();
+	bCheckpointDisabled = false;
+}
+
+void UTerrainService::MaybeCaptureCheckpoint()
+{
+	check(IsInGameThread());
+
+	// Nothing to capture into, nothing to capture, or something still executing. The last is
+	// the one that matters: a capture taken while a transaction is part-applied would record a
+	// world that never existed at any single sequence.
+	if (WorldStore == nullptr || !WorldStore->IsOpen() || CommitJournal == nullptr || bStorageFaulted)
+	{
+		return;
+	}
+	if (EditQueue.Depth() != 0)
+	{
+		return;
+	}
+
+	const UTerrainSettings* Settings = GetDefault<UTerrainSettings>();
+	if (!Settings->bCheckpointCapture)
+	{
+		// Off by default because capture is synchronous and measured at ~42 ms per chunk on the
+		// production adapter. See the setting for the trade and for what fixes it.
+		return;
+	}
+
+	if (bCheckpointDisabled)
+	{
+		return;
+	}
+
+	const int32 Trigger = FMath::Clamp(Settings->CheckpointDirtyChunkTrigger, 1, TerrainCheckpointDirtyHardBound);
+	if (DirtyChunks.Num() < Trigger
+		&& WorldStore->GetJournal()->GetHead() - WorldStore->GetState().Checkpoint.G
+			< static_cast<uint64>(FMath::Max(1, Settings->CheckpointOpTrigger)))
+	{
+		return;
+	}
+
+	// G is the committed journal head. A cut claiming to include operations the journal has
+	// not recorded would make replay start after edits nobody wrote down.
+	const FTerrainOpSeq G = WorldStore->GetJournal()->GetHead();
+
+	FTerrainCheckpointStats Stats;
+	const FTerrainStoreResult Captured = TerrainCaptureCheckpoint(
+		*WorldStore, *Backend, *RevisionIndex, DirtyChunks, G,
+		FDateTime::UtcNow().ToUnixTimestamp() * 1000, Stats);
+
+	if (!Captured.IsOk())
+	{
+		// Deliberately NOT a storage fault. The previous root slot is untouched -- publication
+		// writes the inactive one -- and the journal is intact, so the world is still fully
+		// recoverable and simply has more to replay. Closing terrain access would cost the
+		// player their session over the cheapest failure in the system.
+		//
+		// Retrying is not an option either: the trigger is still satisfied, so a synchronous
+		// capture would run every tick. Try once, say so once, keep playing.
+		bCheckpointDisabled = true;
+		UE_LOG(LogTerrainCore, Error,
+			TEXT("Terrain checkpoint at G=%llu failed (%s). The previous checkpoint and the ")
+			TEXT("journal are both intact, so nothing is lost and the world stays playable -- ")
+			TEXT("but this session will take no further checkpoints, and the next startup will ")
+			TEXT("have more to replay."),
+			G, *Captured.ToString());
+		return;
+	}
+
+	DirtyChunks.Reset();
 }

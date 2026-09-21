@@ -807,6 +807,77 @@ ETerrainPersistError TerrainIndexLookup(
 	return ETerrainPersistError::FieldOutOfRange;
 }
 
+namespace
+{
+	ETerrainPersistError EnumerateSubtree(
+		const FTerrainPersistIdentity& Identity,
+		const ITerrainObjectStore& Source,
+		int32 Depth,
+		const uint8* Prefix,
+		const FTerrainDigest& Digest,
+		uint32 Length,
+		TFunctionRef<bool(const FTerrainChunkKey&, const FTerrainIndexLeafValue&)> Visit,
+		bool& bStopped)
+	{
+		FTerrainIndexPage Page;
+		const ETerrainPersistError LoadError =
+			LoadPage(Identity, Source, Digest, Length, Depth, Prefix, Page);
+		if (LoadError != ETerrainPersistError::None)
+		{
+			return LoadError;
+		}
+
+		if (Page.bLeaf)
+		{
+			for (const FTerrainIndexLeafEntry& Entry : Page.Leaves)
+			{
+				FTerrainIndexKey Key;
+				FMemory::Memcpy(Key.Bytes, Prefix, TerrainPersistIndexKeyBytes);
+				Key.Bytes[Depth] = Entry.ByteValue;
+				if (!Visit(TerrainChunkKeyFromIndex(Key), Entry.Value))
+				{
+					bStopped = true;
+					return ETerrainPersistError::None;
+				}
+			}
+			return ETerrainPersistError::None;
+		}
+
+		for (const FTerrainIndexInternalEntry& Entry : Page.Internal)
+		{
+			uint8 ChildPrefix[TerrainPersistIndexKeyBytes];
+			FMemory::Memcpy(ChildPrefix, Prefix, TerrainPersistIndexKeyBytes);
+			ChildPrefix[Depth] = Entry.ByteValue;
+
+			const ETerrainPersistError ChildError = EnumerateSubtree(
+				Identity, Source, Depth + 1, ChildPrefix, Entry.ChildDigest, Entry.ChildLength,
+				Visit, bStopped);
+			if (ChildError != ETerrainPersistError::None || bStopped)
+			{
+				return ChildError;
+			}
+		}
+		return ETerrainPersistError::None;
+	}
+}
+
+ETerrainPersistError TerrainIndexEnumerate(
+	const FTerrainPersistIdentity& Identity,
+	const ITerrainObjectStore& Source,
+	const FTerrainIndexRoot& Root,
+	TFunctionRef<bool(const FTerrainChunkKey&, const FTerrainIndexLeafValue&)> Visit)
+{
+	if (!Root.bHasRootPage)
+	{
+		return ETerrainPersistError::None;
+	}
+
+	uint8 RootPrefix[TerrainPersistIndexKeyBytes] = {};
+	bool bStopped = false;
+	return EnumerateSubtree(
+		Identity, Source, 0, RootPrefix, Root.RootPageDigest, Root.RootPageLength, Visit, bStopped);
+}
+
 ETerrainPersistError TerrainIndexValidate(
 	const FTerrainPersistIdentity& Identity,
 	const ITerrainObjectStore& Source,

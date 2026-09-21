@@ -18,11 +18,9 @@
  * touched by replay from the exact recorded base, and apply whole ops `G < OpSeq <= H` once,
  * in global order, validating before/after revisions and results as it goes.
  *
- * **Checkpoint capture does not exist yet, so G is always 0** and the whole journal is
- * replayed onto a freshly generated base. That is correct and complete for a young world and
- * it is *unbounded*: replay cost grows with every edit ever made, which is precisely the
- * problem checkpoints exist to solve. Measuring when that becomes unacceptable is a gate, not
- * an assumption -- see the limits in the handoff.
+ * Capture can advance G, limiting operations re-applied on restart. The current reader
+ * still scans all retained journal files; startup I/O is not bounded until retention and
+ * checkpoint-aware segment selection are implemented.
  *
  * Never replays an op per chunk (P-003 §3 forbids it): a multi-chunk operation is applied
  * once, whole, exactly as it was applied the first time.
@@ -34,6 +32,8 @@ struct FTerrainReplayStats
 	int32 RecordsRead = 0;
 	/** Operations actually re-applied, i.e. those with `OpSeq > G`. */
 	int32 OpsApplied = 0;
+	/** Changed chunks after G, with their actual last committed sequence. Capture must inherit these. */
+	TMap<FTerrainChunkKey, FTerrainOpSeq> DirtyChunks;
 
 	FTerrainOpSeq FirstOpSeq = 0;
 	FTerrainOpSeq LastOpSeq = 0;
@@ -44,9 +44,6 @@ struct FTerrainReplayStats
 	double Seconds = 0.0;
 };
 
-/** The streaming interest replay takes and deliberately does NOT release. See below. */
-inline constexpr uint32 TerrainReplayInterestId = 0x52504C59;   // 'RPLY'
-
 /**
  * Applies the journal to a freshly initialised backend.
  *
@@ -56,23 +53,18 @@ inline constexpr uint32 TerrainReplayInterestId = 0x52504C59;   // 'RPLY'
  * function cannot check the backend itself -- ITerrainBackend exposes no base identity -- so
  * the caller is responsible for that and the limitation is stated rather than implied.
  *
- * `Revisions` must be empty. Replay reconstructs revisions by bumping them exactly as the
+ * `Revisions` must describe the restored checkpoint (empty only when G=0). Replay bumps them as the
  * live path did, and validates each against the `BeforeRev`/`AfterRev` the record carries:
  * a mismatch means the journal and the backend disagree about history, which is corruption,
  * not a difference to reconcile.
  *
- * Residency: each operation's footprint is made resident through a service-owned interest
- * before it is applied, because a conforming backend refuses an edit it does not have loaded.
+ * Residency: each touched chunk receives a retained backend interest. Restore and replay
+ * use separate reserved ID ranges. These remain until backend shutdown: checkpoint-backed
+ * on-demand reload is not implemented, so releasing them on player departure would lose
+ * authoritative in-memory terrain. Invoke replay once on a fresh, checkpoint-restored backend.
  *
- * **That interest is NOT released when this returns, and the difference matters.** P-003 §3
- * says replay's interests are "released afterwards", which is right in the world P-003
- * describes -- one where a checkpoint holds the restored state, so an evicted chunk simply
- * reloads from its payload. That world does not exist yet: with no capture pump, G is 0 and
- * everything replay rebuilds lives only in backend RAM. Releasing the interest on a backend
- * that evicts would silently discard the whole restored world. The caller must therefore
- * release `TerrainReplayInterestId` only once the world's own streaming interests cover those
- * chunks -- and the fact that this is even a question is one of the concrete reasons the
- * capture pump is required rather than an optimisation.
+ * On success the caller must inherit OutStats.DirtyChunks for the next capture. These are
+ * precisely the changed keys after G, with their last-changing sequences.
  */
 TERRAINCORE_API FTerrainStoreResult TerrainReplayJournal(
 	FTerrainWorldStore& Store,

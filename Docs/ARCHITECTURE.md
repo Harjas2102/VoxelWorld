@@ -938,15 +938,23 @@ broadcasting it, and closes admission with `ShuttingDown` if it cannot — and *
 fresh backend plus a journal reproduces the world that was shut down, proven by chunk-hash
 equality over overlapping edits.
 
-**Edits now survive a restart.** `UTerrainService` opens or creates a world under
-`Saved/Worlds/<WorldStoreName>/` at `BeginPlay` on the authority, replays its journal onto the
-fresh backend **before the queue can admit anything**, seeds the queue's sequence to H+1, and
-then attaches the journal. Measured on the production backend: the same dig touched **257
-voxels on a fresh world and 33 after a restart**, because the earlier excavation was still
-there. `bPersistEdits` (default true) turns it off.
+**Edits survive a restart.** `UTerrainService` opens or creates a world under
+`Saved/Worlds/<WorldStoreName>/` at `BeginPlay` on the authority, restores the checkpoint,
+replays `(G, H]` onto the fresh backend **before the queue can admit anything**, seeds the
+queue's sequence to H+1, and then attaches the journal. If any of that fails, **terrain access
+is closed** rather than serving a pristine world as though it were the saved one.
+`bPersistEdits` (default true) turns persistence off entirely.
 
-**What does not exist.** Checkpoint capture — so G is always 0, startup replays every edit
-ever made, and that cost grows without bound. Also absent: settlement, SQLite, retention, the
+**Checkpoint capture exists and is correct, and defaults to OFF.** A synchronous cut taken
+when the queue is empty; restore then replaces operation replay. It is opt-in because it was
+measured: **~42 ms per chunk solo and ~86 ms under three-client load**, which at P-003 §4's
+own 256-chunk soft trigger projects to **22 seconds** of frozen game. P-003 §4 fails a visible
+multi-second stall and named the cause in advance — the adapter's 32,768-per-voxel `ReadRegion`
+needs a bulk implementation. `bCheckpointCapture` is the Director's trade to make.
+
+**What does not exist.** The incremental copy-before-write capture pump, a bulk adapter
+`ReadRegion`, Empty/SparseDiff compaction (P-003 §6 rules it out until a backend can state its
+own base), settlement, SQLite, retention or GC — **the store only grows** — the
 exclusive-writer lease P-003 §5 requires, and the crash matrix. Build step 4 is not complete
 and DEF-1/2/9 remain open.
 
@@ -1481,6 +1489,7 @@ Run against `FMemoryTerrainBackend`. Seconds, on every build.
 | `Persistence.Storage.ObjectStore` | **Implemented, passing.** Content addressing verified on the way **in and out**: a digest the bytes do not hash to is refused on store, a damaged file fails to load rather than returning bad bytes, a repeated store writes nothing, and a **torn** write leaves a file that does not load and can be deleted and rewritten |
 | `Persistence.Storage.SlotPair` | **Implemented, passing.** Publication alternates; a torn publication is rejected with `BodyChecksumMismatch` while the **other** slot keeps the last acknowledged generation; the retry repairs the damaged slot rather than touching the good one; another world's identity validates neither; publishing before reading is refused rather than guessing |
 | `Persistence.Storage.PlatformDevice` | **Implemented, passing.** Against the real file system: an in-place overwrite **does not truncate**, a wrong-length overwrite is refused with the file intact, an append lands at the end, and an escaping path is refused before it reaches the disk |
+| `Persistence.Checkpoint.Equivalence` | **Implemented, passing — the cut that bounds replay.** Six edits, a capture at G=6, then a restart that restores the cut and replays **none** of them; three more edits and a second restart that replays **exactly three**. Every case ends in chunk-hash equality, because a checkpoint that bounded replay while losing terrain would be worse than none. Also covers a second capture after a replay-restart (the case where a chunk edited before the restart must still reach the next cut), and P-003 §4's sentinel trap: a dirty chunk that is not resident fails the capture rather than being published as unchanged |
 | `Persistence.Commit.Journal` | **Implemented, passing.** What a committed operation becomes as a record: `NoEconomy`; `PhysicalAvailability = Unavailable` with an **empty** list even when the backend reported volumes, because the production adapter's materials are zero and P-003 §2 forbids encoding unknown as a measured zero; changed keys sorted into index-key order rather than footprint order; every changed revision advancing by exactly one; a zero token digest, because protocol 2 does not exist. Also that the queue treats the sequence as **provisional** and does not consume it when a commit is refused, and that a storage-faulted service closes admission with `ShuttingDown`. **Does not cover `CommitOp`'s internal ordering** — see the note below the table |
 | `Persistence.Journal.Writer` | **Implemented, passing.** Create, append, seal and rotate, with every claim about the written bytes checked by the **scanner** rather than by the writer's own state. Covers: state recovered across a reopen; a sequence gap, a repeat and a foreign `WorldTag` all refused; rotation sealing its predecessor and carrying continuity evidence at both ends; a **torn append** closing the writer and still refusing to append after a reopen; an interrupted rotation leaving an ignorable **orphan** with no acknowledged record lost; a newer unanchored **non-empty** segment refusing boot; a named-but-**missing** segment refusing boot rather than reporting an empty journal |
 | `Persistence.WorldStore.Lifecycle` | **Implemented, passing.** Create → open → append → publish checkpoint → reopen, on one directory. A fresh world is **7 files**. Covers: the base descriptor's self-referential digest; root generation advancing; a **torn root publication** leaving the previous checkpoint current with redundancy reported broken, then repaired by republishing; a checkpoint beyond the journal head refusing to open; a cross-wired world (this world's base in front of another world's roots) refused with `WorldMismatch` |
@@ -1530,7 +1539,7 @@ nothing on the command line. The table names the assertion; the prefix names the
 | `Adapter.Determinism` | Same op sequence, same seed, same `HashRegion` over 20 runs, across both threading modes | R-001 |
 | `Yield.Volume` | Remove r = 2 m in homogeneous stone; `Σ Δocc × V` within tolerance of `4/3 π r³` | R-004 |
 | `Yield.MixedGeology` | Partial, overlapping and strata-boundary digs account correctly | R-004 |
-| `Restart.Identity` | Dig, shut down, boot, compare every chunk hash. **Partial evidence at CP-016**: three consecutive real sessions on one world restored correctly and the same dig did less work each time (257 → 33 voxels), and `Persistence.Replay.Equivalence` proves chunk-hash equality headlessly. What is still missing is chunk-hash equality across a restart **on the production backend** | R-003 |
+| `Restart.Identity` | Dig, shut down, boot, compare every chunk hash. **Satisfied for the journal and checkpoint paths.** `Tools/Test-TerrainCheckpoint.py` launches the real game four times against the production backend and compares **all eight affected chunk hashes** across every launch: identical, with capture off and on, and run 4 restores the G=6 cut and replays zero edits. A wrong-base boot closes terrain access and leaves every save file byte-identical. Still outstanding: the same comparison after a *crash* rather than a clean exit, which is `Restart.CrashMatrix` | R-003 |
 | `Restart.CrashMatrix` | Crash injected before and after every durable boundary; no duplicated or missing payout, no durable ore without durable removal | R-003, DEF-1 |
 | `Save.Growth` | 1,000 scripted edits; bytes/edit, snapshot size after compaction, compaction wall time | R-003 |
 

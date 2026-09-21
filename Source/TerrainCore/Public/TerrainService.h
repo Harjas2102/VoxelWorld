@@ -10,6 +10,7 @@
 #include "TerrainEdit.h"
 #include "TerrainEditQueue.h"
 #include "TerrainCommitJournal.h"
+#include "TerrainCheckpoint.h"
 #include "TerrainStreamComponent.h"
 #include "TerrainService.generated.h"
 
@@ -56,7 +57,7 @@ public:
 
 	/** True once a backend has been created and initialized for this world. */
 	UFUNCTION(BlueprintCallable, Category = "Terrain")
-	bool IsBackendReady() const { return IsInGameThread() && State == ETerrainServiceState::Ready && Backend.IsValid(); }
+	bool IsBackendReady() const { return IsInGameThread() && State == ETerrainServiceState::Ready && Backend.IsValid() && !bStorageFaulted; }
 
 	/** The configured backend module name, whether or not it loaded. Diagnostics only. */
 	UFUNCTION(BlueprintCallable, Category = "Terrain")
@@ -197,15 +198,48 @@ private:
 	 * Called once, immediately after the backend becomes Ready and before the queue can admit
 	 * anything, because replay requires a backend nothing has edited yet. Server only.
 	 *
-	 * Never prevents the world from running: every failure leaves the journal unattached and
-	 * says so at Error. A server that runs without saving is a bad day; a server that will not
-	 * start is worse; a server that quietly writes into the wrong world's history is the worst,
-	 * and that is the one case it refuses outright.
+	 * Recovery failure closes terrain access until restart, as required by P-003. A partial
+	 * restore must never be served as a healthy fresh world or accept unsaved edits.
 	 */
 	void OpenWorldStore(UWorld& InWorld);
 
 	/** Detaches the journal and releases the store. Safe to call when nothing was opened. */
 	void CloseWorldStore();
+
+	/**
+	 * Captures a checkpoint when enough has changed and nothing is executing.
+	 *
+	 * Called from the tick, never from inside the pump: capture reads the world as it stands
+	 * and is only a consistent cut if nothing is part-way through an operation. P-003 section 4
+	 * also requires a cut to start between transactions, which "the queue is empty" satisfies
+	 * more strictly than it needs to.
+	 */
+	void MaybeCaptureCheckpoint();
+
+	/**
+	 * Chunks changed since the last checkpoint.
+	 *
+	 * P-003 section 4's dirty-key set, without its banks: with a synchronous capture there is
+	 * no frozen bank to keep separate from a current one, because no edit happens during a
+	 * capture. The hard bound still applies -- admission closes before the set can grow past
+	 * it when capture is enabled. Journal-only mode has no capture budget gate; its
+	 * history and residency remain unbounded prototype costs.
+	 */
+	TMap<FTerrainChunkKey, FTerrainOpSeq> DirtyChunks;
+	FTerrainResidencyPins LivePersistencePins{0x53000000};
+
+	/**
+	 * Set when a capture failed, to stop this session attempting another.
+	 *
+	 * A checkpoint failure is the LEAST severe storage failure there is: the previous root is
+	 * untouched, the journal is intact, and the world remains fully recoverable -- it simply
+	 * has more to replay next time. Closing terrain access over it would cost the player their
+	 * session for a fault that cost nothing. But retrying is not an option either, because the
+	 * trigger would still be satisfied and a synchronous capture would run EVERY TICK.
+	 *
+	 * So: try once, say so once, and keep playing without checkpoints.
+	 */
+	bool bCheckpointDisabled = false;
 
 	TUniquePtr<FTerrainPlatformStorageDevice> StorageDevice;
 	TUniquePtr<FTerrainWorldStore>            WorldStore;
@@ -224,6 +258,7 @@ private:
 #if WITH_DEV_AUTOMATION_TESTS
 	friend class FTerrainRevisionMonotonicTest;
 	friend class FTerrainServiceLifecycleTest;
+	friend class FTerrainCheckpointTest;
 	friend class FTerrainReplayValidationTest;
 	friend class FTerrainCommitJournalTest;
 #endif

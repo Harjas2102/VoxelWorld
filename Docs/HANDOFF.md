@@ -2,6 +2,86 @@
 
 # HANDOFF.md — the world remembers; next is checkpoint capture
 
+## Checkpoint capture — the cut that bounds replay
+
+**Written across two agents.** Claude built the increment; Codex picked it up when the usage
+window ran out, reviewed it, found a data-loss bug and fixed it; Claude verified all of it
+independently and finished. Every number below was re-measured rather than taken on report.
+
+### What it does
+
+`TerrainCaptureCheckpoint` takes a **synchronous global cut at a quiescent moment** — the
+queue empty, nothing part-applied — reads every dirty chunk, writes one immutable Dense
+payload each, path-copies the index and publishes descriptor-then-root.
+`TerrainRestoreCheckpoint` puts them back on a fresh backend and seeds the revision index, so
+replay covers only `(G, H]`.
+
+P-003 §4's copy-before-write fence, dirty banks and background pump are all **absent on
+purpose**: they exist so edits can continue *during* a capture, which this does not attempt.
+A quiescent cut is trivially consistent; the cost is a stall, and the stall is the finding.
+
+**Payloads are always Dense.** P-004 §5.3's Empty/SparseDiff choice needs a comparison against
+the canonically encoded base, which is the *backend's* encoding and which the game cannot
+reproduce. P-003 §6 already ruled on this — the production adapter "cannot claim full-state
+persistence or enable sparse/pristine compaction" — so every captured chunk costs 131,200 B.
+
+### The bug Codex found, which would have lost terrain
+
+After a restart, replay re-applies ops `(G, H]`. Those chunks are dirty **relative to the
+checkpoint**, but the service's dirty set started empty, so the next capture at `G' = H'` wrote
+only chunks edited *in that session*. A chunk edited before the restart and not touched again
+would be carried into the new index at its **old** payload — and then replay from `G'` would
+skip the op that changed it. Silent terrain loss, one restart later.
+
+Fixed by having replay return the chunks it touched, with each chunk's real last OpSeq, and
+the service inherit them. The leaf's `LastOpSeq` is now that op rather than `G`, which is what
+it always should have been.
+
+### Other changes worth knowing
+
+- **Recovery failure now closes terrain access** instead of running unsaved. The earlier
+  policy was mine and it was wrong about the player's experience: a saved world that fails to
+  load and runs unsaved presents a *pristine* world as theirs, and they dig for an hour with
+  only a log line as warning. Refusing the edit is noticed in seconds and cannot make things
+  worse. P-003 §3 says the same about a base mismatch.
+- **A failed checkpoint does not.** It is the cheapest failure in the system — the previous
+  root is untouched, the journal intact, the world fully recoverable — so the session keeps
+  playing and simply takes no further checkpoints. Retrying was not an option: the trigger
+  would still be satisfied and a synchronous capture would run every tick.
+- **Live residency pins** keep every edited chunk resident, so capture can always read them.
+- **The multiplayer harness now uses a per-run world name**, so tests stop writing into the
+  player's `Default` world.
+
+### Verified — every number re-measured
+
+| Check | Result |
+|---|---|
+| Both targets | build clean |
+| Automation | **33 of 33**, exit 0 |
+| `Tools/Test-TerrainCheckpoint.py` | 4 real launches, production backend. Run 4: **restored 8 chunks at G=6, then 0 edits replayed**, all 8 chunk hashes identical across every launch |
+| Wrong-base boot | access closed, **every save file byte-identical** |
+| Multiplayer, capture ON | **`MP.Convergence: PASS clients=3 chunks=4 committed=243`**, with **15 checkpoints published** during the round |
+
+### The measurement, which is the real result
+
+**Capture costs ~42 ms/chunk solo and ~86 ms/chunk under three-client load.** In the
+multiplayer round that was fifteen stalls of ~0.34 s inside thirty seconds — roughly a sixth
+of wall time frozen. At P-003 §4's own soft trigger of 256 chunks it projects to **22 seconds**.
+
+P-003 §4 says a visible multi-second stall under the supported workload **fails**, and it named
+the cause before anyone measured it: *"the current 32,768-per-voxel-call adapter path must gain
+a measured bulk-read implementation before production integration."*
+
+So **`bCheckpointCapture` defaults to false.** Checkpointing is correct and it works; it is not
+yet payable. Journalling is unaffected, so nothing is lost by leaving it off — only replay
+stays unbounded. Turning it on is a real trade and it is the Director's to make.
+
+### What this does not do
+
+No incremental capture pump, no bulk adapter `ReadRegion`, no retention or GC (the store only
+grows — 15 checkpoints wrote 7.9 MB of payloads for 4 chunks' worth of terrain), no
+exclusive-writer lease, and no crash matrix. DEF-1, DEF-2 and DEF-9 remain open.
+
 ## Identity, authority and Git state
 
 - Updated **2026-09-20**. Outgoing **Claude Opus**, who both wrote and reviewed this

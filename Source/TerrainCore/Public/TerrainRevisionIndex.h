@@ -29,6 +29,19 @@ public:
 	 */
 	bool TryBumpRevisions(TConstArrayView<FTerrainChunkKey> AffectedChunks);
 
+	/**
+	 * Seeds revisions from a restored checkpoint (P-003 section 3).
+	 *
+	 * The class refuses assignment and reset so that revision history cannot be silently
+	 * discarded; seeding an EMPTY index from disk is the opposite of discarding, and without
+	 * it a restored world would tell a returning client that every chunk is at revision 0
+	 * while its terrain says otherwise.
+	 *
+	 * Refuses unless the index is empty. Refuses a zero revision: 0 means "never edited", and
+	 * a chunk in a checkpoint has been.
+	 */
+	bool SeedRevisions(TConstArrayView<TPair<FTerrainChunkKey, FTerrainRev>> Restored);
+
 private:
 	TMap<FTerrainChunkKey, FTerrainRev> Revisions;
 

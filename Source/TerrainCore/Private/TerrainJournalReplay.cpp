@@ -5,6 +5,7 @@
 #include "TerrainCore.h"
 #include "TerrainChunk.h"
 #include "TerrainOpGeometry.h"
+#include "TerrainCheckpoint.h"
 
 /**
  * Rebuilding a world from its journal (P-003 §3, terrain pass).
@@ -13,56 +14,38 @@
 namespace
 {
 
-	/** The interest id replay takes. Deliberately NOT released here -- see below. */
-	constexpr uint32 ReplayInterestId = TerrainReplayInterestId;
-
 	/**
-	 * Makes one operation's whole footprint resident.
+	 * Pins every chunk one operation's footprint touches.
 	 *
 	 * A conforming backend refuses an edit it does not have loaded, so without this every
-	 * replayed op would fail. The interest is centred on the op and sized to its footprint
-	 * plus a chunk of margin, because residency is granted per chunk and a footprint that
-	 * merely touches a chunk still needs all of it.
+	 * replayed op would fail. Each chunk gets its own RETAINED pin: a single interest moved
+	 * from op to op would leave every earlier footprint unresident, and on a backend that
+	 * evicts that means the replayed world is discarded as it is being built. An earlier
+	 * version of this file did exactly that and passed only because the ops happened to be
+	 * close enough together that the last interest still covered the first.
 	 */
-	bool MakeFootprintResident(ITerrainBackend& Backend, const FTerrainOp& Op,
-	                           const FTerrainBaseDescriptor& Base)
+	bool PinFootprint(ITerrainBackend& Backend, const FTerrainOp& Op,
+	                  const FTerrainBaseDescriptor& Base, FTerrainResidencyPins& Pins)
 	{
 		FTerrainBox Bounds;
 		if (!TerrainOpBounds(Op, Bounds))
 		{
 			return false;
 		}
-
-		const double VoxelCm = double(Base.VoxelSizeMicrometres) / 10000.0;
-		if (!(VoxelCm > 0.0))
+		if (!(Base.VoxelSizeMicrometres > 0))
 		{
 			return false;
 		}
 
-		// Half-extent of the footprint in voxels, plus one chunk so a partially touched chunk
-		// is fully covered.
-		double HalfExtentVox = 0.0;
-		FVector CentreVox = FVector::ZeroVector;
-		for (int32 Axis = 0; Axis < 3; ++Axis)
+		TArray<FTerrainChunkKey> Keys;
+		if (!TerrainChunkKeysForBox(Bounds, Keys))
 		{
-			const double Low  = double(Bounds.Min[Axis]);
-			const double High = double(Bounds.Max[Axis]);
-			CentreVox[Axis]   = (Low + High) * 0.5;
-			HalfExtentVox     = FMath::Max(HalfExtentVox, (High - Low) * 0.5);
+			return false;
 		}
-		HalfExtentVox += double(TerrainChunkSizeVox);
-
-		FTerrainStreamingInterest Interest;
-		Interest.InterestId = ReplayInterestId;
-		Interest.WorldLocation = FVector(
-			double(Base.OriginWorldMicrometres[0]) / 10000.0 + CentreVox.X * VoxelCm,
-			double(Base.OriginWorldMicrometres[1]) / 10000.0 + CentreVox.Y * VoxelCm,
-			double(Base.OriginWorldMicrometres[2]) / 10000.0 + CentreVox.Z * VoxelCm);
-		Interest.RadiusCm   = HalfExtentVox * VoxelCm * 1.74;   // sphere over a cube's diagonal
-		Interest.bCollision = true;
-		Interest.bRender    = false;
-
-		Backend.SetStreamingInterest(Interest);
+		for (const FTerrainChunkKey& Key : Keys)
+		{
+			Pins.Pin(Backend, Key, Base);
+		}
 		return true;
 	}
 }
@@ -85,8 +68,7 @@ FTerrainStoreResult TerrainReplayJournal(
 	const FTerrainBaseDescriptor&  Base     = Store.GetState().Base;
 	ITerrainStorageDevice&         Device   = Store.GetDevice();
 
-	// Checkpoint capture does not exist, so G is 0 and the whole journal is replayed onto the
-	// freshly generated base. When capture lands this becomes the checkpoint's cut.
+	// The caller has restored the checkpoint; apply only the committed tail after its cut.
 	const FTerrainOpSeq G = Store.GetState().Checkpoint.G;
 	const uint64 ActiveSegmentId = Store.GetJournal()->GetState().ActiveSegmentId;
 
@@ -114,7 +96,9 @@ FTerrainStoreResult TerrainReplayJournal(
 	}
 
 	const uint64 WorldTag = TerrainPersistWorldTag(Identity.World, Identity.Epoch);
+	FTerrainOpSeq TailExpected = G + 1;
 	FTerrainOpSeq Expected = 0;   // 0 until the first record fixes the start of the chain
+	FTerrainResidencyPins Pins(TerrainReplayPinBaseId);
 
 	for (const uint64 SegmentId : OutStats.Segments)
 	{
@@ -195,8 +179,14 @@ FTerrainStoreResult TerrainReplayJournal(
 				continue;
 			}
 
+			if (Record.Op.OpSeq != TailExpected || Record.Op.OpSeq > Store.GetJournal()->GetHead())
+			{
+				return FTerrainStoreResult::Bad(ETerrainPersistError::OrderViolation);
+			}
+			++TailExpected;
+
 			// --- re-apply, whole, exactly once ------------------------------------------------
-			if (!MakeFootprintResident(Backend, Record.Op, Base))
+			if (!PinFootprint(Backend, Record.Op, Base, Pins))
 			{
 				return FTerrainStoreResult::Bad(ETerrainPersistError::FieldOutOfRange);
 			}
@@ -250,24 +240,17 @@ FTerrainStoreResult TerrainReplayJournal(
 			}
 
 			++OutStats.OpsApplied;
+			for (const FTerrainChangedKeyEntry& Entry : Record.ChangedKeys)
+			{
+				OutStats.DirtyChunks.Add(Entry.Key, Record.Op.OpSeq);
+			}
 			Cursor += Length;
 		}
 	}
 
-	// P-003 §3 says replay's residency interests are "released afterwards", and that is right
-	// in the world P-003 describes -- one where a checkpoint holds the restored state, so an
-	// evicted chunk simply reloads from its payload. THAT WORLD DOES NOT EXIST YET. With no
-	// capture pump, G is 0 and everything replay rebuilt lives only in backend RAM, so
-	// releasing the interest on a backend that evicts would silently discard the entire
-	// restored world. The interest is therefore RETAINED and handed to the caller, which must
-	// release it only once the world's own streaming interests cover those chunks.
-	//
-	// This is one of the concrete reasons the capture pump is required rather than an
-	// optimisation, and it is left as a visible seam rather than hidden behind a clear() that
-	// happens to be harmless on the memory backend and destructive on the real one.
-	if (OutStats.LastOpSeq < G)
+	// Pins remain held until backend shutdown: on-demand reload from a checkpoint is not built.
+	if (TailExpected != Store.GetJournal()->GetHead() + 1)
 	{
-		// The checkpoint claims a cut the journal cannot reach. P-003 §3 calls this corruption.
 		return FTerrainStoreResult::Bad(ETerrainPersistError::OrderViolation);
 	}
 

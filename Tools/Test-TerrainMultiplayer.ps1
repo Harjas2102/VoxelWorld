@@ -1,6 +1,7 @@
 <# Dedicated server plus three real clients; exact server/client chunk hashes after a shared edit workload. #>
 [CmdletBinding()]
 param([int]$DurationSeconds=60,[ValidateRange(1,3)][int]$Rounds=1,[int]$Port=17777,[switch]$IncludeObserver,
+      [switch]$CheckpointCapture,
       [string]$Engine='C:\Program Files\Epic Games\UE_5.8')
 $ErrorActionPreference='Stop'
 if ($DurationSeconds -lt 5 -or $DurationSeconds -gt 120) { throw 'Duration must be 5..120 seconds.' }
@@ -14,6 +15,12 @@ try {
     $serverLog=Join-Path $taskLogDir 'Server.log'
     $serverArgs=@('"'+$taskProject+'"','/Game/ThirdPerson/Lvl_ThirdPerson','-server','-nullrhi','-unattended','-nosplash','-nosound',
         '-TerrainMPTest',('-TerrainMPRounds='+$Rounds),('-TerrainMPDuration='+$DurationSeconds),('-port='+$Port),('-seconds='+($DurationSeconds*$Rounds+150)),('-abslog="'+$serverLog+'"'))
+    # Every run gets its own save. Never write test operations into the player's Default world.
+    $serverArgs+=('-ini:Engine:[/Script/TerrainCore.TerrainSettings]:WorldStoreName=MPTest-'+[guid]::NewGuid().ToString('N'))
+    if ($CheckpointCapture) {
+        $serverArgs+='-ini:Engine:[/Script/TerrainCore.TerrainSettings]:bCheckpointCapture=True'
+        $serverArgs+='-ini:Engine:[/Script/TerrainCore.TerrainSettings]:CheckpointOpTrigger=16'
+    }
     if ($IncludeObserver) { $serverArgs+='-TerrainMPExpectObserver' }
     $server=Start-Process -FilePath $taskExe -ArgumentList $serverArgs -WindowStyle Hidden -PassThru
     $taskProcesses.Add($server)

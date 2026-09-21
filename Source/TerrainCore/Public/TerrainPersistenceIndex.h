@@ -201,6 +201,19 @@ struct FTerrainIndexValidation
 };
 
 /**
+ * Walks every leaf in ascending key order, calling Visit for each.
+ *
+ * Restore needs key AND value together. Doing it with Lookup per key would re-read the whole
+ * path from the root for every chunk -- twelve page loads each, for a walk that already has
+ * them in hand. Returning false from Visit stops the walk and is not an error.
+ */
+TERRAINCORE_API ETerrainPersistError TerrainIndexEnumerate(
+	const FTerrainPersistIdentity& Identity,
+	const ITerrainObjectStore& Source,
+	const FTerrainIndexRoot& Root,
+	TFunctionRef<bool(const FTerrainChunkKey&, const FTerrainIndexLeafValue&)> Visit);
+
+/**
  * Walks the whole closure and checks every structural rule in P-004 section 6.2/6.3: declared
  * depth against traversal depth, KeyPrefix against the bytes actually traversed, ordering,
  * counts, lengths and leaf consistency.

@@ -80,8 +80,8 @@ public:
 	 * **Default true: a world that does not remember is not this game** (Pillar 1). Turn it
 	 * off to run the pre-persistence behaviour, which is what every build through step 3 did.
 	 *
-	 * Known limits while DEF-1/2/9 are open, and they are real: there is no checkpoint
-	 * capture, so startup replays EVERY edit ever made and that cost grows without bound;
+	 * Known limits while DEF-1/2/9 are open, and they are real: checkpoint
+	 * capture is opt-in, so default startup re-applies every edit; scanning remains unbounded;
 	 * there is no retention, so the journal only grows; and the crash matrix has not been
 	 * run. Watch the replay time logged at startup.
 	 */
@@ -97,6 +97,43 @@ public:
 	 */
 	UPROPERTY(config, EditAnywhere, Category = "Terrain|Persistence")
 	FString WorldStoreName = TEXT("Default");
+
+	/**
+	 * Whether the server takes checkpoints. **Default false, and the reason is a measurement.**
+	 *
+	 * Checkpoints are what stop startup replay growing without bound, and they work: with them
+	 * on, a restart restores the cut and replays nothing. But capture is currently SYNCHRONOUS,
+	 * and measured on the production adapter it costs **~42 ms per chunk** — 0.36 s to capture
+	 * 8 chunks. At the soft trigger below that projects to roughly **11 seconds of frozen
+	 * game**, and P-003 section 4 is explicit that a visible multi-second stall under the
+	 * supported workload FAILS.
+	 *
+	 * P-003 section 4 also named the cause before it was measured: *"the current
+	 * 32,768-per-voxel-call adapter path must gain a measured bulk-read implementation before
+	 * production integration."* Two things fix this — a bulk `ReadRegion` in the adapter, and
+	 * the incremental copy-before-write pump — and neither is built.
+	 *
+	 * Turning it on is a real trade and it is yours to make: an occasional multi-second freeze
+	 * during play, in exchange for a startup that does not slow down forever. Journalling is
+	 * unaffected either way, so nothing is lost by leaving this off — only replay stays
+	 * unbounded (DEF-2).
+	 */
+	UPROPERTY(config, EditAnywhere, Category = "Terrain|Persistence")
+	bool bCheckpointCapture = false;
+
+	/**
+	 * Dirty chunks that trigger a checkpoint, when `bCheckpointCapture` is on.
+	 *
+	 * P-003 section 4's soft trigger is 256. A larger value means rarer, longer stalls and a
+	 * smaller one means more frequent, shorter ones; at ~42 ms per chunk neither is good, which
+	 * is the point the measurement is making.
+	 */
+	UPROPERTY(config, EditAnywhere, Category = "Terrain|Persistence", meta = (ClampMin = "1"))
+	int32 CheckpointDirtyChunkTrigger = 256;
+
+	/** Also capture after this many commits, so repeated edits to a few chunks trigger a cut. */
+	UPROPERTY(config, EditAnywhere, Category = "Terrain|Persistence", meta = (ClampMin = "1"))
+	int32 CheckpointOpTrigger = 256;
 
 	/** Default streaming interest radius for UTerrainStreamingComponent, in centimetres. */
 	UPROPERTY(config, EditAnywhere, Category = "Terrain|Streaming", meta = (ClampMin = "0"))

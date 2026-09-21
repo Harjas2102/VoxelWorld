@@ -168,6 +168,7 @@ void UTerrainService::CreateBackend(UWorld& InWorld)
 	// that nothing has edited yet, and a client that connected mid-replay would be told about
 	// a world that was still being rebuilt.
 	OpenWorldStore(InWorld);
+	if (!IsBackendReady()) return;
 
 	FTerrainSourceState Admin;
 	EditQueue.RegisterSource(1,Admin);
@@ -279,7 +280,7 @@ bool UTerrainService::RequestEdit(const FTerrainEditRequest& Request, FTerrainEd
 	OutReceipt = {};
 	if (!IsBackendReady())
 	{
-		OutReceipt = Reject(State == ETerrainServiceState::Draining ? ETerrainEditRejection::ShuttingDown : ETerrainEditRejection::NotReady);
+		OutReceipt = Reject((bStorageFaulted || State == ETerrainServiceState::Draining) ? ETerrainEditRejection::ShuttingDown : ETerrainEditRejection::NotReady);
 		return false;
 	}
 	if (!HasAuthority()) { OutReceipt = Reject(ETerrainEditRejection::NoAuthority); return false; }
@@ -525,6 +526,17 @@ static void RunTerrainSelfTest(UWorld* World)
 	}
 	const FTerrainChunkKey Key = TerrainChunkKeyForVoxel(Voxel);
 	const FTerrainRev RevBefore = Service->GetRevision(Key);
+	// Compare these eight touched chunk hashes across separate real process launches.
+	const auto LogHashes = [&](const TCHAR* Phase)
+	{
+		for (int32 Z = -1; Z <= 0; ++Z) for (int32 Y = -1; Y <= 0; ++Y) for (int32 X = -1; X <= 0; ++X)
+		{
+			const FTerrainChunkKey Probe(Key.X + X, Key.Y + Y, Key.Z + Z);
+			UE_LOG(LogTerrainCore, Display, TEXT("Terrain.SelfTest.Hash %s (%d,%d,%d)=%016llx"),
+				Phase, Probe.X, Probe.Y, Probe.Z, Service->HashChunk(Probe));
+		}
+	};
+	LogHashes(TEXT("before"));
 
 	FTerrainPointSample Before;
 	Check(Service->QueryPoint(Voxel, Before), TEXT("QueryPoint answers before the edit"));
@@ -569,6 +581,8 @@ static void RunTerrainSelfTest(UWorld* World)
 	Service->RequestEdit(Place, PlaceReceipt);
 	Check(PlaceReceipt.bApplied && PlaceReceipt.VoxelsTouched > 0, TEXT("Add placed material"));
 	Check(PlaceReceipt.OpSeq > DigReceipt.OpSeq, TEXT("OpSeq is monotonic across operations"));
+
+	LogHashes(TEXT("after"));
 
 	// --- the admission limits, which are the half that must refuse ------------------------
 	FTerrainEditRequest TooBig = Dig;
