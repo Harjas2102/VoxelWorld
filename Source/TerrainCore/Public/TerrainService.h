@@ -11,6 +11,7 @@
 #include "TerrainEditQueue.h"
 #include "TerrainCommitJournal.h"
 #include "TerrainCheckpoint.h"
+#include "TerrainRetention.h"
 #include "TerrainStreamComponent.h"
 #include "TerrainService.generated.h"
 
@@ -223,6 +224,12 @@ private:
 	void FinishCapture();
 
 	/**
+	 * Advances the background retention collector by one step, or starts a cycle when one is owed
+	 * and no capture is running (DEF-9). Game thread, from TickService.
+	 */
+	void MaybeCollect();
+
+	/**
 	 * Chunks changed since the last checkpoint.
 	 *
 	 * P-003 section 4's dirty-key set, without its banks: with a synchronous capture there is
@@ -255,6 +262,10 @@ private:
 	 * about to change captured first, from its pre-edit state, by `NoticeWrite`.
 	 */
 	FTerrainCapturePump CapturePump;
+
+	/** Background retention (DEF-9). A cycle is owed after each successful publication. */
+	FTerrainRetentionCollector RetentionCollector;
+	bool bRetentionOwed = false;
 
 	TUniquePtr<FTerrainPlatformStorageDevice> StorageDevice;
 	TUniquePtr<FTerrainWorldStore>            WorldStore;

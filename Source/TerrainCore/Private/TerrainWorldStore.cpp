@@ -413,6 +413,10 @@ FTerrainStoreResult FTerrainWorldStore::PublishCheckpoint(
 		return FTerrainStoreResult::Io(PublishResult);
 	}
 
+	// A new root names objects: that is a reference, and the retention collector must not delete
+	// across it (P-003 §5). Stores already moved the epoch; this makes publication itself explicit.
+	Objects.BumpReferenceEpoch();
+
 	State.Root       = Root;
 	State.Checkpoint = ToPublish;
 

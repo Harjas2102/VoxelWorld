@@ -367,6 +367,67 @@ private:
 
 // ---- the content-addressed object store ---------------------------------
 
+/** Where an object's bytes are, within a container or a pre-P-005 pack file. */
+struct FTerrainObjectLocation
+{
+	int64 Offset = 0;   // absolute, within the file
+	int32 Length = 0;
+};
+
+/**
+ * Builds a P-004 §13.3 pack image: bodies back to back, a manifest, a trailer.
+ *
+ * The one encoder for the format, used by capture batches and by the retention collector's
+ * copy frames alike, so there is exactly one place that decides what a pack looks like.
+ */
+class TERRAINCORE_API FTerrainPackImageBuilder
+{
+public:
+	void Reset() { Body.Reset(); Entries.Reset(); }
+	int32 Num() const { return Entries.Num(); }
+	int64 BodyBytes() const { return Body.Num(); }
+	/** Appends one object; the caller has already verified Bytes hash to Digest. */
+	void Add(const FTerrainDigest& Digest, TArrayView<const uint8> Bytes);
+	/** Writes the finished image. The builder is left unchanged. */
+	void Finish(TArray<uint8>& OutImage) const;
+
+private:
+	TArray<uint8> Body;
+	TArray<TPair<FTerrainDigest, FTerrainObjectLocation>> Entries;   // offsets into Body, in add order
+};
+
+/**
+ * A read-only copy of the object store's location map, for work off the game thread.
+ *
+ * The retention collector marks and copies on a worker thread (P-003 §5: "bounded I/O buffers
+ * off the game thread"). It must never touch the live store's maps, which the game thread keeps
+ * changing, so it reads through this: the maps as they were at the moment the cycle captured
+ * its epoch, over the same device. Every location in it names bytes inside a frame that was
+ * already durable at that moment; appends never change such bytes, and the only thing that
+ * could -- truncating a container -- is done by the collector itself, after it has finished
+ * reading that container.
+ */
+class TERRAINCORE_API FTerrainObjectSnapshot final : public ITerrainObjectStore
+{
+public:
+	virtual bool LoadObject(const FTerrainDigest& Digest, TArray<uint8>& OutBytes) const override;
+	virtual bool StoreObject(const FTerrainDigest&, TArrayView<const uint8>) override { return false; }
+
+	ITerrainStorageDevice& GetDevice() const { return Device; }
+
+	/** Reads one range and verifies it hashes to Digest. Thread-safe on the platform device. */
+	static bool LoadVerified(const ITerrainStorageDevice& Device, const FString& Path,
+		const FTerrainObjectLocation& Where, const FTerrainDigest& Digest, TArray<uint8>& OutBytes);
+
+private:
+	friend class FTerrainFileObjectStore;
+	explicit FTerrainObjectSnapshot(ITerrainStorageDevice& InDevice) : Device(InDevice) {}
+
+	ITerrainStorageDevice& Device;
+	TArray<TMap<FTerrainDigest, FTerrainObjectLocation>> Containers;
+	TMap<FTerrainDigest, TPair<uint64, FTerrainObjectLocation>> LegacyPacks;
+};
+
 /**
  * Immutable objects on a device, named by their BLAKE3 digest and nothing else.
  *
@@ -471,23 +532,65 @@ public:
 	 */
 	int64 ContainerDeadBytes(int32 ContainerIndex, const TSet<FTerrainDigest>& Live) const;
 
+	/** Every object byte indexed in this container, live or not. */
+	int64 ContainerObjectBytes(int32 ContainerIndex) const
+	{
+		return ContainerIndex >= 0 && ContainerIndex < TerrainStoragePaths::ContainerCount
+			? Containers[ContainerIndex].ObjectBytes : 0;
+	}
+
 	/**
 	 * Makes an empty container active, if there is one and the active container is not already
 	 * empty. Policy, not correctness: any container is a valid home for any frame (P-005 §4.5).
 	 */
 	bool RotateActiveToEmpty();
 
+	// ---- what the retention collector needs (P-003 §5, T-127) ---------------------------
+
 	/**
-	 * Copies every Live object resolving into this container into one new frame in the active
-	 * container, flushes it, reads every copy back through the verifying path, and only then
-	 * truncates this container to zero (P-005 §5 step 3).
-	 *
-	 * Refuses the active container (it would copy into itself and then cut itself), and refuses
-	 * while a batch is open. A failure before the truncation changes nothing that matters: the
-	 * originals are untouched, and a copy that became durable is a harmless duplicate.
+	 * Bumped by every StoreObject -- a new write **or a deduplicated hit** -- and by every root
+	 * publication. P-003 §5: *"capture a root/pin epoch, stop deletion if it changes, and never
+	 * delete an object created after the captured epoch"*, and a publication *"cannot resurrect an
+	 * unpinned orphan by content hash"*. A dedup hit is exactly that resurrection: a capture can
+	 * make a new root name an object the collector has already judged dead. So any reference at
+	 * all moves the epoch, and the collector deletes nothing across a moved epoch.
 	 */
-	ETerrainStorageResult CompactContainer(
-		int32 ContainerIndex, const TSet<FTerrainDigest>& Live, int32& OutKept, int32& OutDropped);
+	uint64 GetReferenceEpoch() const { return ReferenceEpoch; }
+	void BumpReferenceEpoch() { ++ReferenceEpoch; }
+
+	/** The location map as it stands, for the collector's worker. Game thread. */
+	TSharedRef<FTerrainObjectSnapshot> MakeReadSnapshot() const;
+
+	/**
+	 * What must be copied before a source can go.
+	 *
+	 * For a container: Live digests whose resolving copy is in it and that the active container
+	 * does not already hold, in container order; OutDropped counts everything else it indexes.
+	 * For INDEX_NONE (the pre-P-005 files): Live digests no container holds, in digest order.
+	 */
+	void GetSurvivors(int32 ContainerIndex, const TSet<FTerrainDigest>& Live,
+		TArray<FTerrainDigest>& OutSurvivors, int32& OutDropped) const;
+
+	/** Where this container's first copy of Digest is, if it has one. */
+	bool FindInContainer(int32 ContainerIndex, const FTerrainDigest& Digest, FTerrainObjectLocation& OutWhere) const;
+
+	/**
+	 * Appends a pack image built elsewhere as one frame in the active container.
+	 *
+	 * The image is validated first (P-004 §13.4) -- it was built on another thread, and a frame
+	 * this store would refuse to read back must not be written. Does **not** move the reference
+	 * epoch: the collector's copies are not new references, they are the same bytes moving.
+	 * An open capture batch is no obstacle: it lives in memory until CommitBatch, which appends
+	 * after whatever this wrote.
+	 */
+	ETerrainStorageResult AppendPreparedImage(TArrayView<const uint8> Image);
+
+	/**
+	 * Cuts a container to zero. Refuses the active one. The caller has already made every live
+	 * object in it durable and verified elsewhere; this only performs the cut. If the device
+	 * reports failure the container is rescanned, so the map describes what is really there.
+	 */
+	ETerrainStorageResult TruncateContainer(int32 ContainerIndex);
 
 	// ---- pre-P-005 files: read and migrate, never write --------------------------------
 
@@ -500,23 +603,14 @@ public:
 	/** Every pre-P-005 pack id on the device, ascending, readable or not. */
 	ETerrainStorageResult ListPacks(TArray<uint64>& OutPackIds) const;
 
-	/**
-	 * Copies every Live object that currently resolves through a loose file or a pre-P-005
-	 * pack into one frame in the active container and flushes it; **then** deletes every
-	 * loose object and every pre-P-005 pack (P-005 §5 step 1).
-	 *
-	 * Removing a name is safe where creating one is not: if a removal is lost to a power cut,
-	 * the file comes back holding a byte-identical duplicate.
-	 */
-	ETerrainStorageResult MigrateLegacy(const TSet<FTerrainDigest>& Live,
-		int32& OutMigrated, int32& OutFilesDeleted, int64& OutBytesDeleted);
+	/** Removes one pre-P-005 file whose live contents are already durable in a container. */
+	ETerrainStorageResult DeleteLegacyFile(const FString& RelativePath);
+
+	/** Forgets every pre-P-005 pack location, once the files are gone. */
+	void ForgetLegacyPacks() { LegacyPacks.Reset(); }
 
 private:
-	struct FObjectLocation
-	{
-		int64 Offset = 0;   // absolute, within the container or pack file
-		int32 Length = 0;
-	};
+	using FObjectLocation = FTerrainObjectLocation;
 
 	struct FContainerState
 	{
@@ -529,8 +623,8 @@ private:
 	static bool ParsePackImage(TArrayView<const uint8> Image,
 		TArray<TPair<FTerrainDigest, FObjectLocation>>& OutEntries);
 
-	/** Builds a pack image from the open batch. */
-	void BuildBatchImage(TArray<uint8>& OutImage) const;
+	/** Appends a validated image as one frame to the active container, and indexes it. */
+	ETerrainStorageResult AppendFrame(TArrayView<const uint8> Image);
 
 	ETerrainStorageResult ScanContainer(int32 ContainerIndex);
 	ETerrainStorageResult LoadLegacyPacks();
@@ -548,6 +642,8 @@ private:
 
 	/** Pre-P-005 packs: digest -> (pack id, location). Read-only. */
 	TMap<FTerrainDigest, TPair<uint64, FObjectLocation>> LegacyPacks;
+
+	uint64 ReferenceEpoch = 0;
 
 	bool          bBatchOpen = false;
 	TArray<uint8> BatchBuffer;

@@ -1,5 +1,9 @@
 """Measure object retention with three distinct captures and verify restart hashes.
 
+Default: background retention OFF, three captures, then an explicit Terrain.Reclaim is measured.
+--background: background retention ON (the production default); every capture after the first
+must be followed by a completed background cycle, and the save must stay bounded.
+
 Uses a unique world and preserves it and every log. Does not touch existing saves.
 """
 import argparse
@@ -14,6 +18,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--engine', default=r'C:\Program Files\Epic Games\UE_5.8')
     parser.add_argument('--chunks', type=int, default=256)
+    parser.add_argument('--background', action='store_true')
     args = parser.parse_args()
     if not 1 <= args.chunks <= 4096:
         parser.error('--chunks must be 1..4096')
@@ -28,7 +33,8 @@ def main():
             '/Game/ThirdPerson/Lvl_ThirdPerson', '-game', '-nullrhi', '-unattended',
             '-nosplash', '-nosound', '-TerrainRetentionExperiment', ini + f'WorldStoreName={name}',
             ini + f'CheckpointDirtyChunkTrigger={args.chunks}',
-            ini + 'CheckpointOpTrigger=1000000']
+            ini + 'CheckpointOpTrigger=1000000',
+            ini + f'bBackgroundRetention={args.background}']
 
     def run(label, commands, seconds=3, extra=()):
         log = logs / (label + '.log')
@@ -66,12 +72,28 @@ def main():
             raise RuntimeError('Successive workload generations have identical terrain')
         previous = current
         generations.append(current)
+        if args.background and index > 0:
+            cycle = re.findall(r'\*\*\*\* Terrain.Retention: (.+?) \*\*\*\*', text)
+            if not cycle or not cycle[-1].startswith('complete'):
+                raise RuntimeError(f'No completed background retention cycle after capture {index+1}')
+            print(f'  background cycle: {cycle[-1]}', flush=True)
         print(f'Capture {index+1}: G={expected}, {match.group(4)} voxels changed, '
               f'{len(current)} restored hashes verified', flush=True)
 
     def file_hashes():
         return {str(p.relative_to(save)): hashlib.sha256(p.read_bytes()).hexdigest()
                 for p in save.rglob('*') if p.is_file()}
+
+    if args.background:
+        total = sum(p.stat().st_size for p in save.rglob('*') if p.is_file())
+        # Two retained generations of ~33.6 MB each, plus journal and pages; three would be ~101 MB.
+        if total > 80_000_000:
+            raise RuntimeError(f'Background retention left the save at {total} bytes')
+        if hashes(run('Restart', 'Terrain.StressCaptureHashes')) != generations[-1]:
+            raise RuntimeError('Restart after background retention changed terrain')
+        print(f'PASS (background): save {total} bytes after three generations; all {args.chunks} '
+              f'hashes survive restart. Logs: {logs}\nSave preserved: {save}', flush=True)
+        return
 
     before_files = file_hashes()
     before_bytes = sum(p.stat().st_size for p in save.rglob('*') if p.is_file())

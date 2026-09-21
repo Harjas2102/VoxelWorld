@@ -52,6 +52,7 @@ void UTerrainService::TickService()
 
 	// After the pump, never inside it: a capture taken mid-transaction would not be a cut.
 	MaybeCaptureCheckpoint();
+	MaybeCollect();
 
 	TickMultiplayerTest();
 }

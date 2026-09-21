@@ -163,6 +163,24 @@ public:
 	UPROPERTY(config, EditAnywhere, Category = "Terrain|Persistence", meta = (ClampMin = "1"))
 	int32 CheckpointOpTrigger = 256;
 
+	/**
+	 * Reclaim superseded checkpoint data in the background after each checkpoint (DEF-9).
+	 *
+	 * Without it the save only grows: each checkpoint at the 256-chunk trigger leaves about 33 MB
+	 * of superseded payloads behind. The collector marks and copies on a worker thread and does
+	 * only short steps on the game thread; it deletes nothing if a capture references anything
+	 * mid-cycle (P-003 §5's epoch rule). Turning it off loses nothing but disk space.
+	 */
+	UPROPERTY(config, EditAnywhere, Category = "Terrain|Persistence")
+	bool bBackgroundRetention = true;
+
+	/**
+	 * Largest retention copy frame, in megabytes. Bounds the worker's buffer and the one
+	 * game-thread append per step -- the only retention step whose cost scales with data.
+	 */
+	UPROPERTY(config, EditAnywhere, Category = "Terrain|Persistence", meta = (ClampMin = "0.0625", ClampMax = "256.0"))
+	double RetentionFrameMegabytes = 4.0;
+
 	/** Default streaming interest radius for UTerrainStreamingComponent, in centimetres. */
 	UPROPERTY(config, EditAnywhere, Category = "Terrain|Streaming", meta = (ClampMin = "0"))
 	double DefaultInterestRadiusCm = 10000.0;

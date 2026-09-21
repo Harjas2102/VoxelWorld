@@ -12,6 +12,9 @@
 #include "ITerrainDensityField.h"
 #include "TerrainChunk.h"
 #include "TerrainPersistenceFixtures.h"
+#include "HAL/FileManager.h"
+#include "Misc/Paths.h"
+#include "Misc/ScopeExit.h"
 
 /**
  * TerrainCore.Persistence.Retention -- deleting what nothing refers to, and nothing else.
@@ -199,7 +202,7 @@ bool FTerrainRetentionTest::RunTest(const FString& Parameters)
 	}
 
 	// Compare actual restored values, including the older slot selected by ordinary Open().
-	auto VerifyRestore = [&](FTerrainMemoryStorageDevice& Disk, FTerrainOpSeq ExpectedG,
+	auto VerifyRestore = [&](ITerrainStorageDevice& Disk, FTerrainOpSeq ExpectedG,
 		const TMap<FTerrainChunkKey, uint64>& Hashes) -> bool
 	{
 		FTerrainWorldStore Opened(Disk);
@@ -345,6 +348,172 @@ bool FTerrainRetentionTest::RunTest(const FString& Parameters)
 		TestEqual(TEXT("and touches nothing"), Blocked.ContainersCompacted + Blocked.LegacyFilesDeleted, 0);
 
 		Store.GetObjects().AbandonBatch();
+	}
+
+	// ===== the epoch rule, at every step of a cycle (P-003 §5, T-127) ========================
+	// A cycle is interrupted after N game-thread steps, for every N, in two ways a capture can
+	// interfere: a dedup store (the reference that could resurrect a dead object) and an open
+	// capture batch. From the moment of interference, NOTHING may be cut or deleted -- and both
+	// generations must still restore exactly.
+	{
+		int32 FullSteps = 0;
+		{
+			FTerrainMemoryStorageDevice Copy = Device;
+			FTerrainWorldStore Opened(Copy);
+			if (!Opened.Open().IsOk()) { return false; }
+			FTerrainRetentionSettings Small;
+			Small.MaxFrameBytes = 64 * 1024;   // many frames, so there are many steps to interrupt
+			Small.bInline = true;
+			FTerrainRetentionCollector Collector;
+			if (!Collector.Begin(Opened, Small).IsOk()) { AddError(TEXT("Cycle did not start")); return false; }
+			while (!Collector.Tick()) {}
+			FullSteps = Collector.Stats().GameThreadSteps;
+			TestTrue(TEXT("An undisturbed cycle completes"), Collector.Result().IsOk() && !Collector.Stats().bAbandonedForEpoch);
+			TestTrue(TEXT("in bounded frames, several of them"), Collector.Stats().FramesAppended > 1);
+		}
+		TestTrue(TEXT("The cycle has enough steps to be worth interrupting"), FullSteps >= 5);
+
+		int32 Interrupted = 0;
+		for (int32 Mode = 0; Mode < 2; ++Mode)
+		{
+			for (int32 After = 0; After < FullSteps; ++After)
+			{
+				FTerrainMemoryStorageDevice Copy = Device;
+				FTerrainFaultDevice Counter(Copy);
+				FTerrainWorldStore Opened(Counter);
+				if (!Opened.Open().IsOk()) { return false; }
+
+				FTerrainRetentionSettings Small;
+				Small.MaxFrameBytes = 64 * 1024;
+				Small.bInline = true;
+				FTerrainRetentionCollector Collector;
+				if (!Collector.Begin(Opened, Small).IsOk()) { return false; }
+
+				bool bEnded = false;
+				for (int32 Step = 0; Step < After && !bEnded; ++Step) { bEnded = Collector.Tick(); }
+				if (bEnded) { continue; }
+
+				const int32 CutsBefore = Counter.OpCount(ETerrainStorageOp::Truncate);
+				if (Mode == 0)
+				{
+					// The dangerous kind of reference: storing an object that already exists writes
+					// nothing, and names it all the same.
+					TArray<uint8> Bytes;
+					const FTerrainDigest Existing = Opened.GetState().Root.DescriptorDigest;
+					if (!Opened.GetObjects().LoadObject(Existing, Bytes)) { return false; }
+					Opened.GetObjects().StoreObject(Existing, Bytes);
+				}
+				else
+				{
+					Opened.GetObjects().BeginBatch();   // a capture has started and named nothing yet
+				}
+				while (!Collector.Tick()) {}
+				++Interrupted;
+
+				TestEqual(FString::Printf(TEXT("Mode %d after %d steps: nothing is cut once a capture interferes"), Mode, After),
+					Counter.OpCount(ETerrainStorageOp::Truncate), CutsBefore);
+				TestEqual(TEXT("and nothing is deleted"), Counter.OpCount(ETerrainStorageOp::Delete), 0);
+				if (Mode == 0)
+				{
+					TestTrue(TEXT("A moved epoch abandons the cycle"), Collector.Stats().bAbandonedForEpoch);
+				}
+				else
+				{
+					Opened.GetObjects().AbandonBatch();
+				}
+				if (!VerifyRestore(Copy, 12, HashesAtG12)) { return false; }
+				FTerrainMemoryStorageDevice Fallback = Copy;
+				if (!BreakNewestSlot(Fallback) || !VerifyRestore(Fallback, 8, HashesAtG8)) { return false; }
+			}
+		}
+		AddInfo(FString::Printf(TEXT("Epoch matrix: a %d-step cycle interrupted at %d points, two ways; ")
+			TEXT("no cut or deletion after any interruption, both generations restored every time."),
+			FullSteps, Interrupted));
+	}
+
+	// ===== the background collector: a worker thread, over a real disk =======================
+	{
+		const FString DiskRoot = FPaths::ConvertRelativePathToFull(
+			FPaths::ProjectSavedDir() / TEXT("Automation") / TEXT("TerrainRetentionBackground"));
+		IFileManager::Get().DeleteDirectory(*DiskRoot, /*RequireExists=*/false, /*Tree=*/true);
+		ON_SCOPE_EXIT { IFileManager::Get().DeleteDirectory(*DiskRoot, false, true); };
+
+		auto CopyToDisk = [&](FTerrainPlatformStorageDevice& Disk) -> bool
+		{
+			TArray<FString> Paths;
+			Device.GetPaths(Paths);
+			for (const FString& Path : Paths)
+			{
+				const FString Directory = FPaths::GetPath(Path);
+				if ((!Directory.IsEmpty() && Disk.EnsureDirectory(Directory) != ETerrainStorageResult::Ok)
+					|| Disk.WriteNew(Path, *Device.Find(Path)) != ETerrainStorageResult::Ok)
+				{
+					return false;
+				}
+			}
+			return true;
+		};
+		auto RunInBackground = [&](FTerrainRetentionCollector& Collector) -> bool
+		{
+			const double Deadline = FPlatformTime::Seconds() + 60.0;
+			while (!Collector.Tick())
+			{
+				if (FPlatformTime::Seconds() > Deadline) { AddError(TEXT("Background cycle did not finish")); Collector.Abandon(); return false; }
+				FPlatformProcess::Sleep(0.001f);
+			}
+			return true;
+		};
+
+		// (a) undisturbed: it completes, off-thread, in bounded frames, and both generations survive.
+		{
+			FTerrainPlatformStorageDevice Disk(DiskRoot / TEXT("A"));
+			if (!CopyToDisk(Disk)) { AddError(TEXT("Copy to disk failed")); return false; }
+			FTerrainWorldStore Opened(Disk);
+			if (!Opened.Open().IsOk()) { AddError(TEXT("Disk world did not open")); return false; }
+
+			FTerrainRetentionSettings Background;
+			Background.MaxFrameBytes = 64 * 1024;
+			FTerrainRetentionCollector Collector;
+			TestTrue(TEXT("A background cycle starts"), Collector.Begin(Opened, Background).IsOk());
+			if (!RunInBackground(Collector)) { return false; }
+			TestTrue(TEXT("and completes"), Collector.Result().IsOk() && !Collector.Stats().bAbandonedForEpoch);
+			TestTrue(TEXT("compacting for real"), Collector.Stats().ContainersCompacted > 0);
+			TestTrue(TEXT("in several bounded frames"), Collector.Stats().FramesAppended > 1);
+			AddInfo(FString::Printf(TEXT("Background cycle on disk: %d frames, %lld bytes reclaimed, %d game-thread ")
+				TEXT("steps, longest %.4f s, %.3f s wall."),
+				Collector.Stats().FramesAppended, Collector.Stats().BytesReclaimed, Collector.Stats().GameThreadSteps,
+				Collector.Stats().LongestGameThreadStepSeconds, Collector.Stats().Seconds));
+
+			if (!VerifyRestore(Disk, 12, HashesAtG12)) { return false; }
+		}
+
+		// (b) disturbed mid-flight by a dedup store while the worker is marking: abandoned, nothing cut.
+		{
+			FTerrainPlatformStorageDevice Disk(DiskRoot / TEXT("B"));
+			if (!CopyToDisk(Disk)) { return false; }
+			FTerrainWorldStore Opened(Disk);
+			if (!Opened.Open().IsOk()) { return false; }
+			TArray<int64> SizesBefore;
+			for (int32 Index = 0; Index < TerrainStoragePaths::ContainerCount; ++Index)
+			{
+				SizesBefore.Add(Disk.Size(TerrainStoragePaths::Container(Index)));
+			}
+
+			FTerrainRetentionCollector Collector;
+			TestTrue(TEXT("A second background cycle starts"), Collector.Begin(Opened, FTerrainRetentionSettings()).IsOk());
+			TArray<uint8> Bytes;
+			const FTerrainDigest Existing = Opened.GetState().Root.DescriptorDigest;
+			Opened.GetObjects().LoadObject(Existing, Bytes);
+			Opened.GetObjects().StoreObject(Existing, Bytes);   // the game thread references while the worker marks
+			if (!RunInBackground(Collector)) { return false; }
+			TestTrue(TEXT("The cycle is abandoned"), Collector.Stats().bAbandonedForEpoch);
+			for (int32 Index = 0; Index < TerrainStoragePaths::ContainerCount; ++Index)
+			{
+				TestTrue(TEXT("and no container shrank"),
+					Disk.Size(TerrainStoragePaths::Container(Index)) >= SizesBefore[Index]);
+			}
+			if (!VerifyRestore(Disk, 12, HashesAtG12)) { return false; }
+		}
 	}
 
 	// ===== the sweep =======================================================================

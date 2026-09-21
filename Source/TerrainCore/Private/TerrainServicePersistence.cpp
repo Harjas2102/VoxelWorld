@@ -283,6 +283,11 @@ void UTerrainService::CloseWorldStore()
 {
 	check(IsInGameThread());
 
+	// Retention first: its worker reads the store's device. Abandon waits for it and deletes
+	// nothing; any copies it made are harmless duplicates.
+	RetentionCollector.Abandon();
+	bRetentionOwed = false;
+
 	// Abandon any capture BEFORE the store goes away: the pump holds raw pointers to the store
 	// and backend for as long as it is running, and it has an open pack batch to discard.
 	// Nothing it buffered was ever durable, so the world simply still owes a checkpoint.
@@ -302,16 +307,6 @@ void UTerrainService::CloseWorldStore()
 void UTerrainService::ReclaimStore()
 {
 	check(IsInGameThread());
-	// R-015 no longer gates this: since P-005 compaction creates and removes no names. What
-	// still gates it is DEF-9 -- the pass is synchronous on the game thread, scheduled by hand,
-	// and has none of P-003 section 5's retention pins or epoch protocol.
-	if (!FParse::Param(FCommandLine::Get(), TEXT("TerrainRetentionExperiment")))
-	{
-		UE_LOG(LogTerrainCore, Warning,
-			TEXT("Terrain.Reclaim: disabled pending production retention (DEF-9: incremental, ")
-			TEXT("off-thread, pinned). Isolated test worlds may opt in with -TerrainRetentionExperiment."));
-		return;
-	}
 
 	if (WorldStore == nullptr || !WorldStore->IsOpen())
 	{
@@ -325,7 +320,15 @@ void UTerrainService::ReclaimStore()
 			TEXT("Terrain.Reclaim: a checkpoint capture is in flight. Try again once it lands."));
 		return;
 	}
+	if (RetentionCollector.IsActive())
+	{
+		UE_LOG(LogTerrainCore, Warning,
+			TEXT("Terrain.Reclaim: a background retention cycle is already running."));
+		return;
+	}
 
+	// A whole cycle, synchronously: the diagnostic form. It stalls this frame for as long as the
+	// cycle takes; the background collector exists so that play never has to.
 	FTerrainRetentionStats Stats;
 	const FTerrainStoreResult Result = TerrainReclaimStore(*WorldStore, Stats);
 	if (!Result.IsOk())
@@ -346,6 +349,61 @@ void UTerrainService::ReclaimStore()
 		Stats.LiveObjects, Stats.LegacyObjectsMigrated, Stats.LegacyFilesDeleted,
 		Stats.ContainersCompacted, Stats.ObjectsDropped, Stats.bRotated ? TEXT("yes") : TEXT("no"),
 		Stats.BytesReclaimed, Stats.Seconds);
+}
+
+void UTerrainService::MaybeCollect()
+{
+	check(IsInGameThread());
+
+	if (RetentionCollector.IsActive())
+	{
+		if (!RetentionCollector.Tick())
+		{
+			return;
+		}
+		const FTerrainRetentionStats& Stats = RetentionCollector.Stats();
+		if (!RetentionCollector.Result().IsOk())
+		{
+			// Not a storage fault: a failed cycle deletes nothing it has not already copied and
+			// verified. It is not retried this session, so a persistent error cannot loop.
+			bRetentionOwed = false;
+			UE_LOG(LogTerrainCore, Warning,
+				TEXT("Terrain retention cycle failed (%s). Nothing live was lost; the save keeps ")
+				TEXT("its garbage until the next session."), *RetentionCollector.Result().ToString());
+			return;
+		}
+		UE_LOG(LogTerrainCore, Display,
+			TEXT("**** Terrain.Retention: %s; %d live, %d containers compacted, %d migrated, %lld bytes ")
+			TEXT("reclaimed in %.3f s; %d game-thread steps, longest %.4f s ****"),
+			Stats.bAbandonedForEpoch ? TEXT("abandoned (a capture moved the epoch)") : TEXT("complete"),
+			Stats.LiveObjects, Stats.ContainersCompacted, Stats.LegacyObjectsMigrated,
+			Stats.BytesReclaimed, Stats.Seconds, Stats.GameThreadSteps,
+			Stats.LongestGameThreadStepSeconds);
+		if (Stats.bAbandonedForEpoch)
+		{
+			bRetentionOwed = true;   // try again after the capture that interrupted it
+		}
+		return;
+	}
+
+	const UTerrainSettings* Settings = GetDefault<UTerrainSettings>();
+	if (!bRetentionOwed || !Settings->bBackgroundRetention || CapturePump.IsActive()
+		|| WorldStore == nullptr || !WorldStore->IsOpen() || bStorageFaulted)
+	{
+		return;
+	}
+
+	FTerrainRetentionSettings Retention;
+	Retention.MaxFrameBytes = static_cast<int64>(
+		FMath::Clamp(Settings->RetentionFrameMegabytes, 0.0625, 256.0) * 1024.0 * 1024.0);
+	const FTerrainStoreResult Started = RetentionCollector.Begin(*WorldStore, Retention);
+	bRetentionOwed = false;
+	if (!Started.IsOk())
+	{
+		UE_LOG(LogTerrainCore, Warning,
+			TEXT("Terrain retention did not start (%s); the save keeps its garbage for now."),
+			*Started.ToString());
+	}
 }
 
 void UTerrainService::MaybeCaptureCheckpoint()
@@ -422,6 +480,8 @@ void UTerrainService::FinishCapture()
 {
 	if (CapturePump.Result().IsOk())
 	{
+		// A new root supersedes the older retained one: what only that one named is now garbage.
+		bRetentionOwed = true;
 		return;
 	}
 
