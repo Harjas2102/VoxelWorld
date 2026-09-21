@@ -93,9 +93,12 @@ deliberately removing arbitrary terrain manipulation from Pillar 1).
   reclaimed, and every mutating write has been crash-injected with recovery landing on an
   exact point in real history. **The server remembers.**
   R-015 closed by construction at CP-017 (T-126): an open world creates no file names.
-  *Not done: settlement and its SQLite ledger (build step 6, which is what DEF-1 needs);
-  production retention — the pass is synchronous and still gated, now for DEF-9 alone
-  (**T-127, next**); journal trimming, which must rotate within a pre-created segment ring.*
+  Background retention runs by default since CP-018 (T-127): DEF-9 closed for
+  payloads and index pages.
+  *Not done:*
+  - *the exclusive-writer lease (**T-128, next**);*
+  - *journal trimming, which must rotate within a pre-created segment ring;*
+  - *settlement and its SQLite ledger (build step 6, which is what DEF-1 needs).*
 - **1E** — Join-in-progress, chunk relevancy, compression/batching only as needed.
 - **1F** — Stress profile, collision, foliage, nav, streaming → **decide the backend**.
 
@@ -224,6 +227,19 @@ T-101B sub-step 1D, which requires the multiplayer-capable version instead.
 
 ## Done
 
+- **T-127** *(CP-018)* **Background retention — DEF-9 closed for payloads and pages.**
+  `FTerrainRetentionCollector`:
+  - marks, builds frames of at most 4 MB and verifies on a worker, over a snapshot of the
+    location map;
+  - takes only bounded game-thread steps;
+  - enforces P-003 §5's epoch rule (dedup hits move the epoch; a moved epoch abandons the
+    cycle before any cut);
+  - compacts a container only when at least 25% of it is dead.
+
+  On by default; the experiment flag is gone. 37/37 automation. The epoch matrix covers 80
+  interruption points and was mutation-tested. In the real game the save held at 67.8 MB over
+  three generations, with a longest step of 7.9 ms; the multiplayer run completed 30 of 30
+  cycles. **D-042**, spec **P-006**.
 - **T-126** *(CP-017)* **Namespace durability — R-015 closed by construction.** P-003's
   container mode: objects are frames in four pre-created `containers/c.N` files (40-byte
   self-locating header + unchanged pack image); an append cuts a torn tail first; retention

@@ -5,11 +5,62 @@
 
 ---
 
-**Checkpoint:** CP-017 · **Date:** 2026-09-21
+**Checkpoint:** CP-018 · **Date:** 2026-09-21
 **Phase:** 1 — Terrain Feasibility
 **Expected next agent:** either (D-028)
-**Current task:** T-127 — production retention (DEF-9): incremental, off-thread, with P-003 §5's
-retention pins and epoch protocol, so `Terrain.Reclaim` can leave the experiment flag.
+**Current task:** T-128 — the exclusive-writer lease (P-003 §5): a second server pointed at the
+same world must be refused, not allowed to write beside the first.
+
+## What happened at CP-018
+
+**The save cleans itself up in the background. DEF-9 is closed for payloads and index pages.**
+One increment, T-127 (**D-042**, spec `Docs/proposals/P-006-background-retention.md`).
+
+`FTerrainRetentionCollector` runs a retention cycle after every successful checkpoint.
+- **Off the game thread:** marking both roots, building copy frames of at most 4 MB, and reading
+  every copy back all run on a `UE::Tasks` worker. It reads a snapshot of the location map and
+  never touches the live store.
+- **On the game thread:** only short steps, one per service tick — plan, append one frame, cut
+  one container, or delete a few pre-P-005 files.
+- **P-003 §5's epoch rule, which is the whole safety argument.** Every `StoreObject` moves a
+  reference epoch — a deduplicated hit most of all, because that is how a capture could
+  resurrect an object already judged dead — and so does every root publication. Any
+  destructive step first requires an unchanged epoch and no open capture batch; otherwise the
+  cycle is abandoned and retried after the next publication.
+- **Worth compacting.** A container is compacted only when at least 25% of its bytes are dead.
+  Without that threshold, a real run copied 67 MB of live data to reclaim nothing.
+- **Defaults.** `bBackgroundRetention` defaults on, and `-TerrainRetentionExperiment` is gone.
+
+| Evidence (final source) | |
+|---|---|
+| TerrainCore automation | **37/37** |
+| Epoch matrix | a 40-step cycle interrupted after every step, two ways (dedup store, open batch): **no cut or delete after any of 80 interruptions**, both generations restored each time. **Mutation-tested**: with the pre-cut check removed it fails at steps 37–38 |
+| Background cycle on a real disk, worker thread | 18 bounded frames, longest game-thread step 2.7 ms |
+| `Test-TerrainRetention.py --background` (real game) | after capture 2 the cycle declines (one 0.1 ms step); after capture 3 it reclaims 33.8 MB, longest step **7.9 ms**; the save holds at 67.8 MB over three generations, and all 256 hashes survive a restart |
+| `Test-TerrainRetention.py` (explicit) | PASS, 101,658,644 → 67,824,998 bytes |
+| `MP.Convergence -CheckpointCapture` | PASS: 486 commits, 30 checkpoints, **30 background cycles completed**, 0 abandoned, 0 failed, no terrain warnings |
+| `Test-TerrainCheckpoint.py` | PASS, wrong-base boot still byte-unchanged |
+| Real pre-P-005 world migrated through the collector | PASS, 2,824 objects, hashes identical |
+
+**What remains.**
+- **Retention pins.** P-003 §5 wants explicit pins for backup, migration and sync consumers.
+  None of those exist yet. The epoch rule is the hook: a pin must move the epoch and join the
+  mark.
+- **Game-thread step.** The 7.9 ms longest step is one 4 MB append plus its flush; it scales
+  with `RetentionFrameMegabytes`.
+- **Other open items.** The exclusive-writer lease (next), journal trimming, and a Linux build.
+- **Review.** Writer and reviewer were the same agent. The self-review found the wasted-copy
+  policy (in a real-game log) and a Windows sharing hazard, where a worker read could have
+  blocked a capture's append (found in design). Both are fixed.
+
+## Drift checks (VISION.md, run at CP-018)
+
+**NO FLAG MOVED.**
+- **Server authority:** untouched; the collector runs only on the authority's store.
+- **D-011 and `Build.cs`:** untouched; `UE::Tasks` is Core.
+- **Player-facing:** for the first time, background work runs during play. Its measured
+  game-thread cost is at most 7.9 ms per step, at the checkpoint cadence, and is configurable.
+- **Pillar 1:** strengthened. The server remembers, and its save no longer grows without bound.
 
 ## What happened at CP-017
 

@@ -1,82 +1,60 @@
 # HANDOFF
 
-**Checkpoint:** CP-017 · **Date:** 2026-09-21 · **Branch:** `main`
-**Agents:** Claude (Opus 5) wrote and self-reviewed T-126 under the Director's standing
-instruction (writer = reviewer; weaker evidence than a cross-vendor review — see below).
+**Checkpoint:** CP-018 · **Date:** 2026-09-21 · **Branch:** `main`
+**Agents:** Claude (Opus 5) wrote and self-reviewed T-126 (CP-017) and T-127 (CP-018) under
+the Director's standing instruction. Writer and reviewer were the same agent, which is weaker
+evidence than a cross-vendor review.
 **Expected next agent:** either (D-028).
 
 ---
 
 ## Where the project is
 
-**R-015 is closed by construction.** After bootstrap, an open world creates and removes no file
-names, so its crash safety no longer rests on whether a new directory entry survives a power cut.
-Spec: `Docs/proposals/P-005-namespace-durability-containers.md`. Ruling: **D-041**.
+**The server remembers, and its save no longer grows without bound.**
+- **CP-017 (D-041, P-005):** an open world creates and removes no file names. R-015 is closed
+  by construction.
+- **CP-018 (D-042, P-006):** a background collector reclaims superseded checkpoint data after
+  every checkpoint. It works on a worker thread, and the game thread takes only bounded steps.
+  P-003 §5's epoch rule means it deletes nothing once a capture has referenced anything since
+  its mark.
 
-- Objects are **frames** in four pre-created files `containers/c.0`–`c.3`. A frame is a 40-byte
-  header that names its own offset, followed by an **unchanged** P-004 §13.3 pack image.
-- A capture is one append. **An append first truncates any torn tail** back to the last valid
-  frame. Without that rule, a frame written after garbage would be named by a root but
-  invisible to the next boot's scan.
-- The boot scan stops at the first bad header. A frame with a good header but a bad body is
-  skipped.
-- Retention copies live objects into the active container, flushes, verifies, and then
-  truncates the source. Pre-P-005 `objects/` and `packs/` are read, migrated, and never
-  written.
+## Evidence for CP-018 (re-run on the final source)
 
-## Evidence (re-run on the final source)
-
-- **37/37** TerrainCore automation.
-- Retention test asserts **0 `WriteNew` and 0 `Delete`** after bootstrap across three captures
-  and a full compaction.
-- `Persistence.CrashMatrix`: 48 injections.
-  - 28 recovered exactly.
-  - 20 refused, all inside world creation (the first 11 writes, 4 of which pre-create the pool).
-  - 0 landed on a state that never existed.
-- `Tools/Test-TerrainRetention.py` PASS: 101,658,644 → 67,823,846 bytes.
-  - All 256 hashes survive reclaim and restart.
-  - **The file-name set is identical before and after reclaim on a real disk.**
-- Migration of copies of two real pre-P-005 worlds (`RetentionTest-781145c776e9`,
-  `MPTest-34819678…`): 2,824 and 78 live objects moved, every legacy file removed, hashes
-  identical across open, migration and restart, and a second sweep reclaims 0 bytes.
-- `Tools/Test-TerrainCheckpoint.py` PASS, including the wrong-base boot leaving every save file
-  byte-unchanged.
-- `Tools/Test-TerrainMultiplayer.ps1` PASS, both plain and with `-CheckpointCapture`: 485
-  commits, 30 checkpoints, 3 of them via copy-before-write, no terrain warnings.
-- Publish at the 256-chunk trigger: 0.032–0.033 s (0.035 s at CP-016).
-- **Not re-run:** `Terrain.SelfTest` and `Adapter.DensityContract`. Neither touches the storage
-  code that changed.
-
-## Self-review (same agent wrote it — say so to any reviewer)
-
-Three defects were found before any test ran, all fixed:
-
-1. An append after a torn tail would have published an unscannable frame.
-2. A corrupt body in the middle of a container would have hidden every later frame.
-3. Migration reported gross bytes rather than net.
-
-**A cross-agent review of P-005 and `TerrainStorage.cpp`'s container section is worth doing** when
-Codex is next available. It is the same exposure R-016 described for P-004.
+- **37/37** TerrainCore automation. It includes an **epoch matrix**: a 40-step cycle interrupted
+  after every step, by a dedup store or an open capture batch — 80 cases, no cut or delete after
+  any interruption, and both generations restored every time.
+  - **The matrix is sensitive.** With the pre-cut epoch check disabled, it fails at steps 37
+    and 38.
+- **Threaded cycle on a real disk:** 18 frames, with a longest game-thread step of 2.7 ms.
+- **`Tools/Test-TerrainRetention.py --background`:** the save holds at 67.8 MB over three
+  generations, reclaim takes a longest step of 7.9 ms, and all 256 hashes survive a restart.
+- **Explicit mode:** PASS.
+- **`Tools/Test-TerrainMultiplayer.ps1 -CheckpointCapture`:** 486 commits, 30 checkpoints and
+  30 completed background cycles; none abandoned or failed.
+- **`Tools/Test-TerrainCheckpoint.py`:** PASS.
+- **Migration:** a real pre-P-005 world migrated through the collector with identical hashes.
+- **Not re-run:** `Terrain.SelfTest` and `Adapter.DensityContract`. Neither touches this code.
 
 ## What is NOT done, stated plainly
 
-- **The Linux `fsync(dir)` branch in `FTerrainPlatformStorageDevice::SyncDirectory` has never
-  been compiled.** The first Linux build must compile it and run `Storage.PlatformDevice`.
-- **Windows bootstrap window.** Directory sync after world creation is `FlushFileBuffers` on a
-  directory handle. NTFS accepted it here, but Microsoft does not document it. A loss makes the
-  world refuse to open; it never opens wrong.
-- **DEF-9: production retention.** `Terrain.Reclaim` is still behind
-  `-TerrainRetentionExperiment`, now for that reason alone. It is a 0.3 s synchronous pass on the
-  game thread at 256 chunks, run by hand, with no pins or epochs.
-- **Journal `Rotate` still creates a name.** Production never calls it. Trimming must rotate
-  within a pre-created segment ring instead (commented in `TerrainJournalWriter.h`).
-- `Contains()` still checks the old loose-object path on disk for each new object, the same cost
-  as CP-016. Not yet optimised.
+- **T-128, the exclusive-writer lease** (P-003 §5). Nothing stops two servers from opening the
+  same `WorldStoreName` and writing side by side. This is next.
+- **Journal trimming.** The journal grows forever: about 49 KB per checkpoint interval. It needs
+  a pre-created segment ring, because `Rotate` creates a name (P-005 §8).
+- **Retention pins.** No backup, migration or sync consumer exists. When one does, its pin must
+  move the reference epoch and join the mark (D-042 §4).
+- **Linux has never been built.** The first build must compile P-005's `fsync(dir)` and run
+  `Storage.PlatformDevice`.
+- **Windows bootstrap window** after world creation (P-005 §6): best-effort directory sync only.
 - **DEF-1:** settlement and SQLite (build step 6).
+- **Cross-agent review of P-005 and P-006** is worth doing when Codex is next available.
 
 ## Next safe action
 
-**T-127: production retention (DEF-9).** P-003 §5 specifies it: an incremental, off-thread
-collector with retention pins and an epoch protocol, so reclaim can run without a game-thread
-stall and without the experiment flag. The container layer already gives it a cheap unit of work:
-compact one container per step.
+**T-128 — the exclusive-writer lease.** Before the store admits anything, it should take an
+exclusive OS-level lock on a pre-created lock file in the world directory, held for the life of
+the store. A second server opening the same world must be refused, with a clear log line and
+terrain access closed — never allowed to write. Keep the rule from P-005: the lock file is
+created at bootstrap, not at runtime. On Windows the lock is a share-mode-exclusive handle; on
+Unix it is `flock`. Afterwards, Phase 1's gate items 1C (material yield) and 1E
+(join-in-progress) are what remain before the backend decision.

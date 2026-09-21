@@ -1050,12 +1050,25 @@ exists. After bootstrap an open world creates and removes no names; the device s
 `packs/` are read and migrated by retention, never written. Retention remains behind
 `-TerrainRetentionExperiment` for DEF-9 alone.
 
-**What does not exist.** Production retention (the pass is synchronous on the
-game thread, scheduled by hand, and is not P-003 §5's incremental off-thread collector with pins
-and epochs); journal trimming; spread publication (still one step, 0.035 s at the trigger);
+**Background retention (CP-018, D-042, P-006).** `FTerrainRetentionCollector` runs a cycle
+after every successful checkpoint.
+- **Off the game thread:** marking both on-disk roots, building copy frames of at most 4 MB, and
+  read-back verification run on a `UE::Tasks` worker over an `FTerrainObjectSnapshot`.
+- **On the game thread:** every mutation — plan, append one frame, cut one container, delete a
+  few pre-P-005 files — one step per service tick.
+- **P-003 §5's epoch:** `ReferenceEpoch` moves on every `StoreObject` (dedup hits included) and
+  every publication, and any destructive step requires it unchanged, with no open capture
+  batch. A moved epoch abandons the cycle.
+- **Threshold:** only containers at least 25% dead are compacted.
+- **Defaults:** `bBackgroundRetention` is on by default; `Terrain.Reclaim` runs a cycle inline.
+- **Not built:** explicit retention pins, because no consumer exists yet. When one does, its pin
+  must move the epoch.
+
+**What does not exist.** Journal trimming; spread publication (still one step, 0.035 s at the trigger);
 Empty/SparseDiff compaction (P-003 §6 rules it out until a backend can state its own base);
-settlement; SQLite; and the exclusive-writer lease P-003 §5 requires. Build step 4 is not
-complete: **DEF-1 and DEF-9 remain open**, and `Restart.CrashMatrix`'s payout half needs
+settlement; SQLite; and the exclusive-writer lease P-003 §5 requires (T-128). Build step 4 is
+not complete: **DEF-1 remains open** (DEF-9 is closed for payloads and index pages; journal
+trimming remains), and `Restart.CrashMatrix`'s payout half needs
 settlement at build step 6.
 
 - **Commit:** journal append + durable flush precedes terrain broadcast and

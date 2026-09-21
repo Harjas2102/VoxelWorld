@@ -1578,3 +1578,39 @@ body fails is skipped rather than ending the scan, so bit rot cannot hide later 
   pre-created ring.
 - No schema-2 byte table, golden vector or record changed.
 
+## D-042 — Background retention: the epoch rule, abandon rather than reconcile (2026-09-21)
+
+**Recorded:** CP-018 · **Class:** technical (per **D-023**) · **Architect ruling, logged
+not asked** · **Scope:** T-127, DEF-9 · **Status:** ACCEPTED · **Spec:** P-006
+
+### 1. Ruling
+
+Retention runs in the background by default (`bBackgroundRetention = true`), after every
+successful checkpoint.
+- **Worker:** marks, builds frames of at most 4 MB, and verifies, reading only a snapshot of the
+  location map.
+- **Game thread:** does every mutation, one bounded step at a time.
+- **The experiment flag is removed.** `Terrain.Reclaim` remains, as an inline diagnostic.
+
+### 2. The epoch rule
+
+`FTerrainFileObjectStore::ReferenceEpoch` moves on every `StoreObject` — including a dedup hit,
+which is P-003 §5's "resurrection by content hash" — and on every root publication. Planning,
+every append and every cut or delete require an unchanged epoch; a cut or delete also requires
+no open capture batch. A moved epoch **abandons** the cycle rather than merging new references
+into the mark: captures are minutes apart and a cycle takes about 0.55 s, so abandonment is rare
+(0 of 30 cycles in the multiplayer run), and a rule that only ever stops is easier to prove than
+one that reconciles.
+
+### 3. Policy
+
+A container is compacted only when at least 25% of its object bytes are dead. Pre-P-005 files
+are always migrated.
+
+### 4. Deferred
+
+- **Explicit retention pins:** no consumer exists yet. When one does, its pin must move the
+  epoch and join the mark.
+- **Journal trimming.**
+- **The exclusive-writer lease** (T-128).
+
