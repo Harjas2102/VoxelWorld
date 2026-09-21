@@ -1,87 +1,82 @@
-→ No action. For your reading only.
-
 # HANDOFF
 
-**Checkpoint:** CP-016 · **Date:** 2026-09-21 · **Branch:** `main`
-**Agents:** Claude (Opus 5) implementing T-120…T-123 and T-125; Codex reviewing and repairing
-T-124 (**D-028**).
-**Expected next agent:** either.
+**Checkpoint:** CP-017 · **Date:** 2026-09-21 · **Branch:** `main`
+**Agents:** Claude (Opus 5) wrote and self-reviewed T-126 under the Director's standing
+instruction (writer = reviewer; weaker evidence than a cross-vendor review — see below).
+**Expected next agent:** either (D-028).
 
 ---
 
 ## Where the project is
 
-**Build step 4 is done for terrain. The server remembers.** An edit is journalled durably
-before it is broadcast; a checkpoint bounds replay; capture is incremental and on by default;
-the store can be reclaimed; and the recovery protocol has been attacked at every write point.
+**R-015 is closed by construction.** After bootstrap, an open world creates and removes no file
+names, so its crash safety no longer rests on whether a new directory entry survives a power cut.
+Spec: `Docs/proposals/P-005-namespace-durability-containers.md`. Ruling: **D-041**.
 
-CP-015 recorded that VISION's Pillar 1 — *"the server remembers everything at next login"* —
-was still false, and said two checkpoints with that sentence false was acceptable only while
-the work was real. It was. **That flag is now clear.**
+- Objects are **frames** in four pre-created files `containers/c.0`–`c.3`. A frame is a 40-byte
+  header that names its own offset, followed by an **unchanged** P-004 §13.3 pack image.
+- A capture is one append. **An append first truncates any torn tail** back to the last valid
+  frame. Without that rule, a frame written after garbage would be named by a root but
+  invisible to the next boot's scan.
+- The boot scan stops at the first bad header. A frame with a good header but a bad body is
+  skipped.
+- Retention copies live objects into the active container, flushes, verifies, and then
+  truncates the source. Pre-P-005 `objects/` and `packs/` are read, migrated, and never
+  written.
 
-## Evidence (all re-run on the committed source)
+## Evidence (re-run on the final source)
 
 - **37/37** TerrainCore automation.
-- `Terrain.SelfTest` PASS · `Adapter.DensityContract` **20/20**, fixture hashes unchanged.
-- `Tools/Test-TerrainCheckpoint.py` PASS — four real game launches, all eight affected chunk
-  hashes identical across every launch, run 4 restores the cut and replays **zero** edits, and
-  a wrong-base boot closes terrain access leaving every save file byte-identical.
-- `Tools/Test-TerrainMultiplayer.ps1` PASS — 3 clients, 244 commits, 15 checkpoints, 2 chunks
-  taken by copy-before-write, **0 stalls**.
-- `Tools/Test-TerrainRetention.py` PASS — three genuinely distinct generations,
-  **101,658,408 → 67,823,838 bytes**, all 256 hashes surviving reclamation *and* restart.
-- `Terrain.StressCapture` at the real 256-chunk trigger: **0.162 s**, reproduced twice.
+- Retention test asserts **0 `WriteNew` and 0 `Delete`** after bootstrap across three captures
+  and a full compaction.
+- `Persistence.CrashMatrix`: 48 injections.
+  - 28 recovered exactly.
+  - 20 refused, all inside world creation (the first 11 writes, 4 of which pre-create the pool).
+  - 0 landed on a state that never existed.
+- `Tools/Test-TerrainRetention.py` PASS: 101,658,644 → 67,823,846 bytes.
+  - All 256 hashes survive reclaim and restart.
+  - **The file-name set is identical before and after reclaim on a real disk.**
+- Migration of copies of two real pre-P-005 worlds (`RetentionTest-781145c776e9`,
+  `MPTest-34819678…`): 2,824 and 78 live objects moved, every legacy file removed, hashes
+  identical across open, migration and restart, and a second sweep reclaims 0 bytes.
+- `Tools/Test-TerrainCheckpoint.py` PASS, including the wrong-base boot leaving every save file
+  byte-unchanged.
+- `Tools/Test-TerrainMultiplayer.ps1` PASS, both plain and with `-CheckpointCapture`: 485
+  commits, 30 checkpoints, 3 of them via copy-before-write, no terrain warnings.
+- Publish at the 256-chunk trigger: 0.032–0.033 s (0.035 s at CP-016).
+- **Not re-run:** `Terrain.SelfTest` and `Adapter.DensityContract`. Neither touches the storage
+  code that changed.
 
-## The six increments
+## Self-review (same agent wrote it — say so to any reviewer)
 
-| | | |
-|---|---|---|
-| T-120 | D-035 | Bulk adapter `ReadRegion`. P-003 §4 named it as the cause of the capture stall; **it was 1.5% of it.** |
-| T-121 | D-036 | **Packs** — one file, one flush per capture instead of 59. The obvious fix (a deferred flush barrier) was measured first and is *slower*. 0.197 s → 0.010 s. |
-| T-122 | D-037 | Measured capture at its **real** trigger: 0.162 s, not the extrapolated 1.5 s. Default flipped on. |
-| T-123 | D-038 | **Incremental capture pump — DEF-2 closed.** Copy-before-write needs no copy. Longest unbroken step 0.162 s → 0.035 s. |
-| T-124 | D-039 | **Object retention + pack compaction.** 33.8 MB reclaimed on a real world. **Gated off** pending R-015. |
-| T-125 | D-040 | **The crash matrix.** Every mutating write failed in turn; every recovery landed on an exact point in real history. |
+Three defects were found before any test ran, all fixed:
+
+1. An append after a torn tail would have published an unscannable frame.
+2. A corrupt body in the middle of a container would have hidden every later frame.
+3. Migration reported gross bytes rather than net.
+
+**A cross-agent review of P-005 and `TerrainStorage.cpp`'s container section is worth doing** when
+Codex is next available. It is the same exposure R-016 described for P-004.
 
 ## What is NOT done, stated plainly
 
-- **R-015 — durable name publication on Windows.** Unproved, and now the gate on **two**
-  things: letting retention run for real, and extending the crash matrix's claims from *lost
-  writes* to *power loss*. Nothing in-process can settle it.
-- **DEF-1** — needs settlement and its SQLite ledger (build step 6). This is also the missing
-  half of `Restart.CrashMatrix`: *"no duplicated or missing payout, no durable ore without
-  durable removal."*
-- **DEF-9** — retention exists but is a synchronous, hand-scheduled diagnostic, not P-003 §5's
-  incremental off-thread collector with pins and an epoch protocol.
-- Journal trimming (correctly deprioritised: ~49 KB per checkpoint interval against 33 MB of
-  payloads), spread publication (one step, 0.035 s), Empty/SparseDiff compaction (P-003 §6
-  blocks it until a backend can state its own base), and the exclusive-writer lease.
+- **The Linux `fsync(dir)` branch in `FTerrainPlatformStorageDevice::SyncDirectory` has never
+  been compiled.** The first Linux build must compile it and run `Storage.PlatformDevice`.
+- **Windows bootstrap window.** Directory sync after world creation is `FlushFileBuffers` on a
+  directory handle. NTFS accepted it here, but Microsoft does not document it. A loss makes the
+  world refuse to open; it never opens wrong.
+- **DEF-9: production retention.** `Terrain.Reclaim` is still behind
+  `-TerrainRetentionExperiment`, now for that reason alone. It is a 0.3 s synchronous pass on the
+  game thread at 256 chunks, run by hand, with no pins or epochs.
+- **Journal `Rotate` still creates a name.** Production never calls it. Trimming must rotate
+  within a pre-created segment ring instead (commented in `TerrainJournalWriter.h`).
+- `Contains()` still checks the old loose-object path on disk for each new object, the same cost
+  as CP-016. Not yet optimised.
+- **DEF-1:** settlement and SQLite (build step 6).
 
 ## Next safe action
 
-**R-015.** It is the highest-value open item in the persistence stack and it unblocks two
-things at once. It needs an *external* experiment — power-loss-class testing of name creation
-(a VM with host-level power control, or equivalent) — or an explicit decision to adopt P-003's
-preallocated-container mode instead. **The container fallback costs no stored bytes**, because
-no schema-2 field contains a path, which is why it remains the cheap escape and why choosing
-it is not a rewrite.
-
-This is a judgement about acceptable risk on a player's save data, so it is worth the
-Director's attention rather than being ruled silently.
-
-## What this checkpoint learned about its own process
-
-Three predictions were acted on and wrong before being measured (P-003 §4 on where capture time
-went; D-035 on the fsync barrier; D-036 on the trigger cost). Then a measurement **ran, passed,
-and measured nothing**, because repeating `Add` on solid terrain is idempotent — caught by
-Codex, not by me. Then the crash matrix showed the last form: a test asserting only that
-recovery *succeeds* would have passed on a world that came back wrong.
-
-**Assert the state, not the absence of an error, and check that the thing you varied actually
-varied.**
-
-R-016 also got its first real evidence: T-124 is the first R3 increment to go through a genuine
-second reader, and it found **six defects**, two of them recovery-critical — a mark that
-*added* payload digests instead of *loading* them, and a fallback test that *computed* its
-comparison hashes and never *compared* them. Both looked like checks. Neither would have been
-caught by their author, because their author already believed what they were supposed to prove.
+**T-127: production retention (DEF-9).** P-003 §5 specifies it: an incremental, off-thread
+collector with retention pins and an epoch protocol, so reclaim can run without a game-thread
+stall and without the experiment flag. The container layer already gives it a cheap unit of work:
+compact one container per step.

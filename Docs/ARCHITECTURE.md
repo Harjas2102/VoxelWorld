@@ -1039,8 +1039,18 @@ history; the other 12 refused, and all of those were crashes *during world creat
 established world was made unopenable by any single crash.** It models lost writes, not power
 loss: that is R-015 and remains unproven.
 
-**What does not exist.** R-015 namespace durability — now the single gate holding back both
-real retention and any power-loss claim; production retention (the pass is synchronous on the
+**Containers — R-015 closed by construction (CP-017, D-041, P-005).** Objects are no longer
+files. Every object is a frame in one of four pre-created files `containers/c.0`–`c.3`: a
+40-byte header that names its own offset, then an unchanged P-004 §13.3 pack image. A capture is
+one append; an append first truncates any torn tail to the last valid frame; boot scans frames
+from offset 0 and stops at the first bad header. Retention copies live objects into the active
+container, flushes, verifies, then truncates the source, so the compaction hazard above no longer
+exists. After bootstrap an open world creates and removes no names; the device surface gained
+`ReadRange`, shrink-only `Truncate` and bootstrap-only `SyncDirectory`. Pre-P-005 `objects/` and
+`packs/` are read and migrated by retention, never written. Retention remains behind
+`-TerrainRetentionExperiment` for DEF-9 alone.
+
+**What does not exist.** Production retention (the pass is synchronous on the
 game thread, scheduled by hand, and is not P-003 §5's incremental off-thread collector with pins
 and epochs); journal trimming; spread publication (still one step, 0.035 s at the trigger);
 Empty/SparseDiff compaction (P-003 §6 rules it out until a backend can state its own base);

@@ -476,9 +476,20 @@ D-028 was written for. Keep writing the breadcrumb *before* the risky half, not 
 - **Owner / task:** build step 4. **This is now the highest-value open item in the persistence
   stack**: it blocks retention running for real, and it is what would extend the crash
   matrix's claims from lost writes to power loss.
-- **Result:** *open — containment demonstrated exhaustively at CP-016; durability still
-  unproved, and now gating two features rather than one.*
-- **Decision:** *open*
+- **CP-017 — CLOSED BY CONSTRUCTION (D-041, P-005).** The question was not answered; it was
+  made irrelevant. Objects are frames appended to four pre-created containers, compaction
+  truncates instead of deleting, and an open world creates and removes no names — asserted as a
+  count (0 and 0 across three captures and a full compaction) and checked on a real disk (the
+  file-name set is identical before and after reclamation). After bootstrap, the crash matrix's
+  lost-write model is the power-loss model under the per-file flush contract.
+- **Residuals, kept visible:** (1) the per-file flush contract itself, which every acknowledged
+  edit already relied on; (2) on Windows, the seconds after world creation — bootstrap names are
+  synced with `FlushFileBuffers` on directory handles, accepted by NTFS here but undocumented;
+  a loss there makes the world refuse to open, never open wrong; (3) the Unix `fsync(dir)` branch
+  is not yet compiled on Linux; (4) journal `Rotate` still creates a name and is barred from
+  production until trimming uses a pre-created ring.
+- **Result:** *closed at CP-017 by construction; residuals above.*
+- **Decision:** **D-041**
 
 ## R-016 — R3 work reviewed by its own author
 

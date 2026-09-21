@@ -5,10 +5,60 @@
 
 ---
 
-**Checkpoint:** CP-016 · **Date:** 2026-09-21
+**Checkpoint:** CP-017 · **Date:** 2026-09-21
 **Phase:** 1 — Terrain Feasibility
-**Expected next agent:** either (D-028 — whichever is available; this checkpoint alternated
-mid-increment and that worked, see D-039)
+**Expected next agent:** either (D-028)
+**Current task:** T-127 — production retention (DEF-9): incremental, off-thread, with P-003 §5's
+retention pins and epoch protocol, so `Terrain.Reclaim` can leave the experiment flag.
+
+## What happened at CP-017
+
+**R-015 is closed by construction: an open world no longer creates or removes a file name.**
+One increment, T-126 (**D-041**, spec `Docs/proposals/P-005-namespace-durability-containers.md`).
+
+Nothing run on this machine could prove that a newly created directory entry survives a power
+cut on Windows (Windows 11 Home has no Hyper-V for a power-cut rig), and POSIX says `fsync` on a
+file does not cover its name on the Linux ship target either. So the store stopped needing it:
+P-003's **container mode**. Every object is now a frame in one of four pre-created files
+`containers/c.0`–`c.3`; a frame is a 40-byte self-locating header plus an **unchanged** P-004
+§13.3 pack image, so no stored byte table changed. A capture is still one durable write — an
+append instead of a new file. Retention copies live objects into the active container, flushes,
+verifies, and only then truncates the old one; the only thing a power cut can undo is the space
+saving. Pre-P-005 `objects/` and `packs/` are read, migrated by retention, and never written.
+
+| Evidence (final source) | |
+|---|---|
+| TerrainCore automation | **37/37** |
+| Names after bootstrap (retention test, 3 captures + full compaction) | **0 created, 0 removed** |
+| `Persistence.CrashMatrix` | 48 injections: 28 exact recoveries, 20 refusals **all during world creation**, 0 wrong states |
+| `Test-TerrainRetention.py` | PASS, 101,658,644 → 67,823,846 bytes, 256 hashes through reclaim + restart, **file-name set identical on a real disk** |
+| Migration of two real pre-P-005 worlds (copies) | 2,824 and 78 live objects moved, every legacy file removed, hashes identical across open/migrate/restart |
+| `Test-TerrainCheckpoint.py` | PASS, wrong-base boot still byte-unchanged |
+| `MP.Convergence` | PASS; with captures every 16 ops: 485 commits, 30 checkpoints, 3 via copy-before-write |
+| Publish at the 256-chunk trigger | 0.032–0.033 s (0.035 s at CP-016) |
+
+**What remains trusted, not proved.** The per-file flush contract (file contents and length) —
+the same one every acknowledged edit already relied on. On Windows only, the seconds after world
+creation: bootstrap names are synced with `FlushFileBuffers` on directory handles, which NTFS
+accepted here but does not document. On Unix that sync is `fsync` on the directory, which POSIX
+does document — **but that branch has not yet been compiled on Linux**.
+
+**Retention stays behind `-TerrainRetentionExperiment`**, now because of DEF-9 alone: it is a
+0.3 s synchronous pass on the game thread at 256 chunks, run by hand, without pins or epochs.
+Journal `Rotate` still creates a name and is documented as not-for-production; trimming must use
+a pre-created segment ring.
+
+Writer and reviewer were the same agent (standing instruction). The self-review found three
+defects before any test ran: an append after a torn tail would have published an unscannable
+frame; one corrupt body mid-container would have hidden every later frame; and migration
+reported gross rather than net bytes. All fixed.
+
+## Drift checks (VISION.md, run at CP-017)
+
+**NO FLAG MOVED.** Nothing is player-facing. Server authority, the D-011 boundary and
+`Build.cs` are untouched; the platform code added to `TerrainCore` is OS-level
+(`FlushFileBuffers`, `fsync`), not plugin. Pillar 1 (*the server remembers*) is strengthened:
+after bootstrap, its power-loss argument no longer rests on an unproved filesystem property.
 
 ## What happened at CP-016
 

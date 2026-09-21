@@ -1537,3 +1537,44 @@ honest model of *lost writes*, and it is **not** power loss: whether a file's na
 power cut is **R-015**, unproven, and no amount of in-process injection can speak to it. The
 matrix proves the protocol handles the failures it is given; R-015 is about whether the platform
 gives it the failures we assume.
+
+## D-041 — Namespace durability: container mode, not a power-loss rig (2026-09-21)
+
+**Recorded:** CP-017 · **Class:** technical (per **D-023**) · **Architect ruling, logged
+not asked** · **Scope:** T-126, R-015 · **Status:** ACCEPTED · **Spec:** P-005
+
+### 1. Ruling
+
+R-015 is settled by **removing the dependency**, not by measuring it. The object store adopts
+P-003 §4's container mode: four pre-created files `containers/c.0`–`c.3`; objects are written
+as frames (a 40-byte header naming its own offset, then an unchanged P-004 §13.3 pack image);
+an append cuts a torn tail before writing; retention copies live objects into the active
+container, flushes, verifies, then truncates. After bootstrap, an open world creates and removes
+no names.
+
+### 2. Why not the alternatives
+
+A power-loss rig (no Hyper-V on Windows 11 Home) could only ever show a failure on one disk,
+never prove its absence. Relying on NTFS log ordering is common practice and undocumented, and
+says nothing about Linux, where `fsync` on a file explicitly does not cover its name. Container
+mode needs only the per-file flush contract every acknowledged edit already relies on. It removes
+a risk rather than accepting one, so under D-023 it is logged, not escalated.
+
+### 3. Deviations from P-003's wording, stated
+
+The container **count** is fixed; each grows by append rather than being zero-preallocated —
+append is the journal's primitive, not an unproven one. A frame whose header validates but whose
+body fails is skipped rather than ending the scan, so bit rot cannot hide later frames.
+
+### 4. Consequences
+
+- R-015 closed by construction. Residuals: the per-file flush contract; on Windows, the bootstrap
+  window after world creation (directory sync is best effort). Unix directory sync is `fsync`,
+  not yet compiled on Linux.
+- `ITerrainStorageDevice` gains `ReadRange`, `Truncate` (shrink-only, mutating, part of the crash
+  matrix's sequence) and `SyncDirectory` (bootstrap only).
+- Retention's gate changes reason: DEF-9, not R-015. It stays behind `-TerrainRetentionExperiment`.
+- Journal `Rotate` must not be used from production as written; trimming must rotate within a
+  pre-created ring.
+- No schema-2 byte table, golden vector or record changed.
+

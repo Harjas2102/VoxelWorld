@@ -92,9 +92,10 @@ deliberately removing arbitrary terrain manipulation from Pillar 1).
   checkpoint bounds replay, capture is incremental and on by default, the store can be
   reclaimed, and every mutating write has been crash-injected with recovery landing on an
   exact point in real history. **The server remembers.**
+  R-015 closed by construction at CP-017 (T-126): an open world creates no file names.
   *Not done: settlement and its SQLite ledger (build step 6, which is what DEF-1 needs);
-  production retention — the pass is synchronous and gated off pending R-015 (DEF-9);
-  journal trimming; and R-015 itself, which is the gate on both.*
+  production retention — the pass is synchronous and still gated, now for DEF-9 alone
+  (**T-127, next**); journal trimming, which must rotate within a pre-created segment ring.*
 - **1E** — Join-in-progress, chunk relevancy, compression/batching only as needed.
 - **1F** — Stress profile, collision, foliage, nav, streaming → **decide the backend**.
 
@@ -223,6 +224,14 @@ T-101B sub-step 1D, which requires the multiplayer-capable version instead.
 
 ## Done
 
+- **T-126** *(CP-017)* **Namespace durability — R-015 closed by construction.** P-003's
+  container mode: objects are frames in four pre-created `containers/c.N` files (40-byte
+  self-locating header + unchanged pack image); an append cuts a torn tail first; retention
+  copies, flushes, verifies, then truncates; pre-P-005 files are read and migrated, never
+  written. After bootstrap an open world creates **0** names and removes **0** (asserted).
+  37/37 automation; crash matrix 48 injections, 0 wrong states; real-disk retention PASS with an
+  identical file-name set; two real old worlds migrated with identical hashes. **D-041**, spec
+  **P-005**.
 - **T-125** *(CP-016)* **The crash matrix.** P-003 §8's *"inject at every write"*, taken
   literally: a scripted session of nine edits and two checkpoints replayed **once per mutating
   write**, failing that write and only that write, hard and torn. `FTerrainFaultDevice` gained
