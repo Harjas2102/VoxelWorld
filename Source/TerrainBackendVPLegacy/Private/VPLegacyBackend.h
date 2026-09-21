@@ -40,18 +40,18 @@ class UVoxelSimpleInvokerComponent;
  *    Paint is unsupported because a game material id has no plugin index to map onto until
  *    fork K9 lands at build step 6. An unsupported op is refused, never approximated.
  *
- *  - FTerrainEditResult::Removed is left EMPTY. Yield is build step 6 and DEF-6 is open;
- *    §2.3 records that FModifiedVoxelValue "carries no material", so producing per-material
- *    volumes needs a separate bulk material read AND the K9 id/index table. Returning a
- *    plausible-looking number from the RGB material config the world currently uses would be
- *    inventing the economy, which §4.2 explicitly moved above the backend to prevent.
- *    bRecordModifiedValues is nonetheless always on (§4.3) and VoxelsTouched is real.
+ *  - FTerrainEditResult::Removed is MEASURED (P-009, T-130): signed per game material, from the
+ *    plugin's own per-voxel old/new values and one bulk material read, with the occupancy
+ *    function the reference backend uses. Physical volume only: tool efficiency and every other
+ *    economic conversion stay above the backend (§4.2, DEF-6's economic half).
  *
- *  - ReadRegion / WriteRegion / HashRegion move DENSITY ONLY, through the plugin's public
- *    per-voxel data tools, in the §4.7 dense layout. Materials are written as zero for the
- *    same K9 reason. This is a working convergence oracle and a working region transfer for
- *    density; it is NOT the snapshot format, which is build step 4 under K3 and DEF-9. It is
- *    also O(32768) locked accesses per chunk, which is fine for a test and not for a server.
+ *  - Game material ids are exact. The world is on the RGB config and the generator colours each
+ *    voxel by its game id, one distinct colour per catalog entry, so the adapter inverts that
+ *    same colour function (P-009 §3). ReadRegion, WriteRegion, QueryPoint and Add all carry ids.
+ *
+ *  - HashRegion hashes DENSITY ONLY, deliberately: Adapter.DensityContract's pinned fixtures are
+ *    density hashes, and keeping them unchanged is what proves P-009 moved no density sample.
+ *    Materials are verified by the adapter checks' direct ReadRegion comparisons instead.
  *
  *  - FlushPendingWork is a no-op by design, not by omission. §4.5: "rendering and collision
  *    updates remain the plugin's own async work and are explicitly not serialised by us."
@@ -88,6 +88,7 @@ public:
 	virtual bool QueryPoint(const FIntVector& VoxelPos, FTerrainPointSample& Out) const override;
 	virtual void SetStreamingInterest(const FTerrainStreamingInterest& In) override;
 	virtual void ClearStreamingInterest(uint32 InterestId) override;
+	virtual bool MeasuresPhysicalYield() const override;   // P-009
 	//~ End ITerrainBackend Interface
 
 private:
@@ -115,6 +116,9 @@ private:
 
 	/** True only for an actor this backend spawned, which is the only one it may destroy. */
 	bool bSpawnedVoxelWorld = false;
+
+	/** Per-op yield accumulator, reused so an edit does not allocate a map (P-009). */
+	TMap<FTerrainMatId, double> ScratchVolumes;
 
 	/**
 	 * The plugin-side generator, forwarding to FTerrainBackendInit::DensityField (T-108, §4.6).

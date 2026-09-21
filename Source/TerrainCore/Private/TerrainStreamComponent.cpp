@@ -194,9 +194,13 @@ void UTerrainStreamComponent::ClientVerifyTest_Implementation(const TArray<FIntV
 #if !UE_BUILD_SHIPPING
 	if (Keys.Num()>64) return;
 	TArray<uint64> Hashes;
-	if (auto* S=GetWorld()->GetSubsystem<UTerrainService>()) for (const auto& K:Keys) Hashes.Add(S->HashChunk(FTerrainChunkKey(K.X,K.Y,K.Z)));
+	if (auto* S=GetWorld()->GetSubsystem<UTerrainService>())
+	{
+		for (const auto& K:Keys) Hashes.Add(S->HashChunk(FTerrainChunkKey(K.X,K.Y,K.Z)));
+		for (const auto& K:Keys) Hashes.Add(S->HashChunkMaterials(FTerrainChunkKey(K.X,K.Y,K.Z)));
+	}
 	UE_LOG(LogTerrainCore,Display,TEXT("MP.Convergence client %d finished: edits=%d applied=%d failures=%d snapshots=%d dropped=%d chunks=%d"),
-		TestIndex,TestEdits,ReceivedOps,ApplyFailures,SnapshotsApplied,DroppedOps,Hashes.Num());
+		TestIndex,TestEdits,ReceivedOps,ApplyFailures,SnapshotsApplied,DroppedOps,Keys.Num());
 	ServerTestHashes(Hashes,ReceivedOps,ApplyFailures,SnapshotsApplied,DroppedOps);
 #endif
 }

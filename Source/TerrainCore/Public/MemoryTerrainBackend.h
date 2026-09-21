@@ -49,6 +49,7 @@ public:
 	virtual bool IsRegionResident(const FTerrainChunkKey& Key) const override;
 	virtual void FlushPendingWork() override;
 	virtual bool QueryPoint(const FIntVector& Position, FTerrainPointSample& Out) const override;
+	virtual bool MeasuresPhysicalYield() const override { return true; }
 	virtual void SetStreamingInterest(const FTerrainStreamingInterest& In) override;
 	virtual void ClearStreamingInterest(uint32 InterestId) override;
 

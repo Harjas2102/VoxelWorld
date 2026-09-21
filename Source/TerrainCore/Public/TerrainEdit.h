@@ -106,6 +106,25 @@ enum class ETerrainEditRejection : uint8
 };
 
 /** What the caller learns about a request. Metadata only: terrain state is the backend's. */
+/**
+ * Physical volume of one game material that an edit moved (P-009 §2). Positive: removed from the
+ * world. Negative: placed into it. PHYSICAL ONLY -- what the ground gave up, before any tool
+ * efficiency, recovery factor or inventory rule; those belong to the economy (DEF-6, T-131).
+ */
+USTRUCT(BlueprintType)
+struct FTerrainYield
+{
+	GENERATED_BODY()
+
+	/** A game material id (TerrainMaterials.h); 0 means unknown, never air. */
+	UPROPERTY(BlueprintReadOnly, Category = "Terrain")
+	int32 MaterialId = 0;
+
+	/** Microlitres: 1,000,000 per litre, 1e9 per cubic metre. */
+	UPROPERTY(BlueprintReadOnly, Category = "Terrain")
+	int64 MicroLitres = 0;
+};
+
 USTRUCT(BlueprintType)
 struct FTerrainEditReceipt
 {
@@ -135,6 +154,13 @@ struct FTerrainEditReceipt
 
 	UPROPERTY(BlueprintReadOnly, Category = "Terrain")
 	int64 VoxelsTouched = 0;
+
+	/**
+	 * What the edit physically moved, per material, summed over every committed sub-op.
+	 * Empty on a rejection, and empty when the backend does not measure yield.
+	 */
+	UPROPERTY(BlueprintReadOnly, Category = "Terrain")
+	TArray<FTerrainYield> Yield;
 };
 
 /** A world-space ask, before quantisation. The op is what the SERVER makes of it (§4.3). */

@@ -76,6 +76,31 @@ the DEF-3 resolution, the evidence and the self-review are in
   still lists DEF-3 as open. Both need updating at the checkpoint, against P-008.
 - Writer and reviewer were the same agent.
 
+## T-130 breadcrumb (post-CP-018, not yet checkpointed)
+
+**T-130 is implemented, tested and committed. The next `checkpoint` records it.** The spec,
+evidence and self-review are in `Docs/proposals/P-009-materials-and-physical-yield.md`.
+- **Materials are real.** The server knows the game material of every voxel. The adapter recovers
+  the exact id from the colour the generator stores, since every catalog entry has its own
+  colour. So nothing visible changed, and K9's SingleIndex switch is deferred as a Director
+  decision. Checkpoints, snapshots, `QueryPoint` and Add painting all carry ids. Old saves
+  (material 0) load unchanged.
+- **Every edit measures what it moved**, per material, signed (+ removed, − placed), under one
+  shared occupancy definition. The journal now records `Measured` yield, and the requester gets
+  it in `FTerrainEditReceipt::Yield`.
+- **E-1 answered:** yield is within 2.4% of the rendered hole at the 2 m player dig, and within
+  0.5% from radius 6 up.
+- **Found:** placing then re-digging the same sphere recovers only about 79%. It isn't a mint, but
+  it is a T-131 policy question.
+- Evidence: 39/39 automation. `Terrain.AdapterChecks` PASS, with the density pins unchanged.
+  `Terrain.SelfTest` PASS. The old-save boot is hash-identical. `MP.Convergence` passes 2 rounds,
+  3 rounds with an observer, and `-DropOp`, now with **material hashes that were mutation-tested**
+  (they fail when clients ignore snapshot materials). The checkpoint and retention tests pass.
+  Both targets build.
+- `DECISIONS` at the checkpoint needs: the P-009 ruling, including deferring K9's config switch
+  in favour of the colour-keyed id channel.
+- Writer and reviewer were the same agent.
+
 ## What is NOT done, stated plainly
 
 - **E-6 has not been measured:** a heavily dug region with a joiner arriving mid-edit. A client
@@ -92,8 +117,9 @@ the DEF-3 resolution, the evidence and the self-review are in
 
 ## Next safe action
 
-**T-130 — gate item 1C: material queries and resource yield.** The server must measure what an
-edit actually removed, per material, and award it (ARCHITECTURE §4.9, D-011). Today the adapter
-reads no materials back (K9), so snapshots, checkpoints and hashes all carry density only. That
-is the largest remaining hole in the Phase 1 gate. Join-in-progress (1E) is working; what remains
-of it is the E-6 measurement.
+**T-131: the settlement ledger and first inventory, so digging pays** (the second half of gate
+1C, DEF-1 and DEF-6's economic half). The server credits what an edit physically removed, using
+P-003's idempotent entity ledger (SQLite, build step 6). That makes a crash between the journal
+record and the credit neither lose nor duplicate ore. Tool efficiency and the placement debit are
+data, not code. It is R3 and starts with a spec. The item list and conversion numbers are game
+data, so they get sensible placeholder values the Director can retune without code.

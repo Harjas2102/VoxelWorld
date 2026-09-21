@@ -87,7 +87,15 @@ public:
 	void ReceiveSnapshotAck(UTerrainStreamComponent& Stream, const FTerrainChunkKey& Key, uint32 Generation, bool bApplied);
 	bool AcceptPristine(const TArray<FIntVector>& Keys);
 	uint64 HashChunk(const FTerrainChunkKey& Key) const;
+	/**
+	 * Development: a position-sensitive hash of one chunk's game material ids, read back through
+	 * ReadRegion (P-009). HashRegion is density-only on the plugin backend, so this is what lets
+	 * the multiplayer harness prove materials converge too. Zero when the chunk cannot be read.
+	 */
+	uint64 HashChunkMaterials(const FTerrainChunkKey& Key) const;
 	bool IsMultiplayerTest() const;
+	/** Development harness: rounds finished in this process, across server travels. */
+	static int32& MultiplayerRoundsCompleted();
 #if !UE_BUILD_SHIPPING
 	void RunAdapterChecks();
 #endif

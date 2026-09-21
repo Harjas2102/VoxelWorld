@@ -279,6 +279,9 @@ void UTerrainService::OpenWorldStore(UWorld& InWorld)
 
 	// 6. Only now does anything start being recorded, so the first record is the first NEW edit.
 	WorldJournal = MakeUnique<FTerrainWorldStoreJournal>(*WorldStore);
+	// P-009: a backend that measures yield under the shared definition gets its Removed list
+	// recorded as Measured; any other records Unavailable, never a measured zero (P-003 §2).
+	WorldJournal->bPhysicalMeasured = Backend->MeasuresPhysicalYield();
 	SetCommitJournal(WorldJournal.Get());
 
 	// The journal continues the sequence the world already reached, so replayed history is

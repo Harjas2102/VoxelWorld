@@ -36,7 +36,7 @@ namespace
 
 	double Occupancy(int16 Value)
 	{
-		return FMath::Clamp((1.0 - static_cast<double>(Value) / 32767.0) * 0.5, 0.0, 1.0);
+		return TerrainOccupancy(Value);   // the one shared definition (P-009 §2)
 	}
 
 	void Append16(TArray<uint8>& Bytes, uint16 Value)
@@ -360,8 +360,7 @@ bool FMemoryTerrainBackend::ApplyOp(const FTerrainOp& Op, FTerrainEditResult& Ou
 	// Validate and stage every change before writing any data: false is never partial.
 	TArray<FTerrainPendingChange> Changes;
 	TMap<FTerrainMatId, double> Volumes;
-	const double Size = Init.VoxelSizeCm;
-	const double UnitVolume = Size * Size * Size * 1000.0;
+	const double UnitVolume = TerrainVoxelMicroLitres(Init.VoxelSizeCm);
 	for (int32 Z = Bounds.Min.Z; Z < Bounds.Max.Z; ++Z)
 	for (int32 Y = Bounds.Min.Y; Y < Bounds.Max.Y; ++Y)
 	for (int32 X = Bounds.Min.X; X < Bounds.Max.X; ++X)

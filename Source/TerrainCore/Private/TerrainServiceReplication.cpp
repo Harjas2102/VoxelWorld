@@ -6,6 +6,7 @@
 #include "TerrainQuantise.h"
 #include "TerrainSettings.h"
 #include "TerrainChunkSnapshot.h"
+#include "TerrainMaterials.h"
 #include "Engine/World.h"
 #include "EngineUtils.h"
 #include "GameFramework/PlayerController.h"
@@ -152,6 +153,12 @@ FTerrainQueueCallbacks UTerrainService::QueueCallbacks()
 		S.bConnected=IsValid(PC) && IsValid(Pawn) && Stream->bReady;
 		if (Pawn) S.Position=Pawn->GetActorLocation();
 		S.MaxRadiusCm=GetDefault<UTerrainSettings>()->MaxEditRadiusCm;
+		// What a player places is server state, never client input (DEF-7), and stays Unknown
+		// until inventory decides it (DEF-6, T-131). The multiplayer harness alone places iron
+		// ore -- never found at the test depth -- and only in round 1, so the ore later rounds'
+		// clients hold can only have arrived by snapshot: the material hashes then test
+		// snapshot materials rather than a repeat of the edit script.
+		S.PlacementMaterial=(IsMultiplayerTest() && MultiplayerRoundsCompleted()==0) ? FTerrainMatId(ETerrainMaterial::IronOre) : FTerrainMatId(0);
 	};
 	Cb.Validate=[this](const FTerrainOp& Op,const FTerrainSourceState& S) { return ValidateOp(Op,S); };
 	Cb.Apply=[this](const FTerrainOp& Op,FTerrainEditResult& R)
@@ -338,6 +345,19 @@ void UTerrainService::PumpSnapshots()
 }
 uint64 UTerrainService::HashChunk(const FTerrainChunkKey& Key) const
 { return IsBackendReady() ? Backend->HashRegion(Key) : 0; }
+uint64 UTerrainService::HashChunkMaterials(const FTerrainChunkKey& Key) const
+{
+	FTerrainRegionData Region;
+	if (!IsBackendReady() || !Backend->ReadRegion(Key,Region) || Region.Payload.Num()!=TerrainChunkSampleCount*4) return 0;
+	uint64 Hash=0x9e3779b97f4a7c15ULL;   // nonzero even for an all-Unknown chunk
+	for (int32 I=0;I<TerrainChunkSampleCount;++I)
+	{
+		const uint64 Id=uint64(Region.Payload[(TerrainChunkSampleCount+I)*2]) | uint64(Region.Payload[(TerrainChunkSampleCount+I)*2+1])<<8;
+		uint64 V=(uint64(I)<<32) ^ Id;
+		V=(V^(V>>30))*0xbf58476d1ce4e5b9ULL; V=(V^(V>>27))*0x94d049bb133111ebULL; Hash+=V^(V>>31);
+	}
+	return Hash;
+}
 
 void UTerrainService::RefreshSubscriptions(UTerrainStreamComponent& Stream)
 {

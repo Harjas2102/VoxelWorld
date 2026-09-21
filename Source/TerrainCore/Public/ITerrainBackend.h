@@ -81,4 +81,13 @@ public:
 
 	virtual void SetStreamingInterest  (const FTerrainStreamingInterest& In) = 0;
 	virtual void ClearStreamingInterest(uint32 InterestId) = 0;
+
+	/**
+	 * True when ApplyOp's Removed list is a measurement under P-009 §2: signed per-material
+	 * volume, removal attributed to the pre-edit material, placement to Op.MaterialId, occupancy
+	 * by TerrainOccupancy. A backend that cannot say that returns false, and the journal then
+	 * records "unavailable" rather than a measured zero (P-003 §2). Not one of §4.3's eleven
+	 * methods: a capability query with a safe default, so an older backend is honest by default.
+	 */
+	virtual bool MeasuresPhysicalYield() const { return false; }
 };

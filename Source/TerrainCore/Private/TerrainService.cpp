@@ -1,6 +1,7 @@
 // Copyright VoxelWorld. See Docs/ARCHITECTURE.md.
 
 #include "TerrainService.h"
+#include "TerrainMaterials.h"
 #include "TerrainBackendRegistry.h"
 #include "TerrainChunk.h"
 #include "TerrainCheckpoint.h"
@@ -736,6 +737,10 @@ static void RunTerrainSelfTest(UWorld* World)
 
 	FTerrainPointSample Before;
 	Check(Service->QueryPoint(Voxel, Before), TEXT("QueryPoint answers before the edit"));
+	// P-009: the probe is buried under the shelf, in generated rock, so its material is known.
+	Check(Before.MaterialId > ETerrainMaterial::Air && Before.MaterialId < ETerrainMaterial::Count,
+		TEXT("QueryPoint reports a real game material"));
+	UE_LOG(LogTerrainCore, Display, TEXT("Terrain.SelfTest: material at the probe is %s"), TerrainMaterialName(Before.MaterialId));
 	UE_LOG(LogTerrainCore, Display, TEXT("Terrain.SelfTest: voxel (%d,%d,%d) chunk (%d,%d,%d) rev %u, density %.4f, resident %d"),
 		Voxel.X, Voxel.Y, Voxel.Z, Key.X, Key.Y, Key.Z, RevBefore, Before.Density, Before.bResident ? 1 : 0);
 
@@ -756,6 +761,14 @@ static void RunTerrainSelfTest(UWorld* World)
 	Check(DigReceipt.ChunksAffected > 0, TEXT("at least one chunk was reported affected"));
 	Check(DigReceipt.VoxelsTouched > 0, TEXT("the plugin kernel actually changed voxels"));
 	Check(Service->GetRevision(Key) > RevBefore, TEXT("the chunk revision advanced"));
+	int64 Removed = 0, Placed = 0;
+	for (const FTerrainYield& Y : DigReceipt.Yield)
+	{
+		(Y.MicroLitres > 0 ? Removed : Placed) += Y.MicroLitres;
+		UE_LOG(LogTerrainCore, Display, TEXT("Terrain.SelfTest.Yield dig %s %.3f L"),
+			TerrainMaterialName(FTerrainMatId(Y.MaterialId)), double(Y.MicroLitres) / 1.0e6);
+	}
+	Check(Removed > 0 && Placed == 0, TEXT("the dig measured removed material, and placed none"));
 
 	FTerrainPointSample After;
 	Service->QueryPoint(Voxel, After);
@@ -776,6 +789,9 @@ static void RunTerrainSelfTest(UWorld* World)
 	FTerrainEditReceipt PlaceReceipt;
 	Service->RequestEdit(Place, PlaceReceipt);
 	Check(PlaceReceipt.bApplied && PlaceReceipt.VoxelsTouched > 0, TEXT("Add placed material"));
+	int64 PlaceRemoved = 0, PlacePlaced = 0;
+	for (const FTerrainYield& Y : PlaceReceipt.Yield) (Y.MicroLitres > 0 ? PlaceRemoved : PlacePlaced) += Y.MicroLitres;
+	Check(PlacePlaced < 0 && PlaceRemoved == 0, TEXT("the placement measured placed volume, and removed none"));
 	Check(PlaceReceipt.OpSeq > DigReceipt.OpSeq, TEXT("OpSeq is monotonic across operations"));
 
 	LogHashes(TEXT("after"));

@@ -58,6 +58,54 @@ namespace
 		return X + TerrainChunkSizeVox * Y + TerrainChunkSizeVox * TerrainChunkSizeVox * Z;
 	}
 
+	/**
+	 * The material id channel (P-009 §3). The world renders on the plugin's RGB config, and the
+	 * generator colours each voxel by its GAME material id through TerrainMaterialDebugColor --
+	 * one distinct colour per catalog entry. So the stored colour IS the id, exactly: this table
+	 * is that function's inverse, built from the very same call the generator makes, and the
+	 * adapter never has to guess. A colour outside the table is Unknown (0), never "nearest".
+	 *
+	 * Deliberately not K9's SingleIndex switch: that changes how terrain renders, which K9 itself
+	 * makes a Director decision. Saved chunks and the wire carry game ids, never colours, so the
+	 * switch can happen later without touching a stored byte.
+	 */
+	struct FMaterialTable
+	{
+		FVoxelMaterial ById[ETerrainMaterial::Count];
+		bool bUnique = true;
+		FMaterialTable()
+		{
+			for (int32 Id = 0; Id < ETerrainMaterial::Count; ++Id)
+			{
+				ById[Id] = FVoxelMaterial::CreateFromColor(TerrainMaterialDebugColor(static_cast<FTerrainMatId>(Id)));
+			}
+			for (int32 A = 1; A < ETerrainMaterial::Count; ++A)
+			for (int32 B = A + 1; B < ETerrainMaterial::Count; ++B)
+			{
+				bUnique &= !(ById[A].GetR() == ById[B].GetR() && ById[A].GetG() == ById[B].GetG() && ById[A].GetB() == ById[B].GetB());
+			}
+		}
+	};
+	const FMaterialTable& MaterialTable() { static const FMaterialTable Table; return Table; }
+
+	bool IsCatalogMaterial(FTerrainMatId Id) { return Id > ETerrainMaterial::Unknown && Id < ETerrainMaterial::Count; }
+
+	FVoxelMaterial VoxelMaterialFor(FTerrainMatId Id) { return MaterialTable().ById[IsCatalogMaterial(Id) ? Id : 0]; }
+
+	FTerrainMatId GameMaterialFor(const FVoxelMaterial& M)
+	{
+		const FMaterialTable& Table = MaterialTable();
+		for (int32 Id = 1; Id < ETerrainMaterial::Count; ++Id)
+		{
+			const FVoxelMaterial& T = Table.ById[Id];
+			if (T.GetR() == M.GetR() && T.GetG() == M.GetG() && T.GetB() == M.GetB())
+			{
+				return static_cast<FTerrainMatId>(Id);
+			}
+		}
+		return ETerrainMaterial::Unknown;
+	}
+
 	/** Avalanche then commutative sum: order-independent, position-sensitive (DEF-5). */
 	uint64 Mix(uint64 V)
 	{
@@ -65,6 +113,13 @@ namespace
 		V = (V ^ (V >> 27)) * 0x94d049bb133111ebULL;
 		return V ^ (V >> 31);
 	}
+}
+
+bool FVPLegacyBackend::MeasuresPhysicalYield() const
+{
+	// Exact ids need one colour per catalog entry. If two ever collide, yield cannot say which
+	// material it measured, so the backend stops claiming a measurement (P-009 §3).
+	return MaterialTable().bUnique;
 }
 
 FVPLegacyBackend::~FVPLegacyBackend()
@@ -119,6 +174,13 @@ bool FVPLegacyBackend::Initialize(const FTerrainBackendInit& InInit)
 	}
 
 	bInitialized = true;
+
+	if (!MaterialTable().bUnique)
+	{
+		UE_LOG(LogTerrainBackendVPLegacy, Error,
+			TEXT("Two terrain materials share a colour, so material ids cannot be recovered exactly. ")
+			TEXT("Yield is reported as unavailable until the palette is fixed (P-009 §3)."));
+	}
 
 	UE_LOG(LogTerrainBackendVPLegacy, Log,
 		TEXT("FVPLegacyBackend ready on '%s': voxel %.1f cm, world %d voxels, created=%s, role=%s."),
@@ -395,6 +457,7 @@ bool FVPLegacyBackend::ApplyOp(const FTerrainOp& Op, FTerrainEditResult& Out)
 	for (const auto& Key : Keys) if (!IsRegionResident(Key)) return false;
 	const FVoxelIntBox Bounds(Footprint.Min,Footprint.Max);
 	ScratchModified.Reset();
+	ScratchVolumes.Reset();
 	{
 		auto& WorldData = Actor->GetData();
 		FVoxelWriteScopeLock Lock(WorldData,Bounds,FUNCTION_FNAME);
@@ -413,7 +476,38 @@ bool FVPLegacyBackend::ApplyOp(const FTerrainOp& Op, FTerrainEditResult& Out)
 			{ Value = Op.Kind == ETerrainOpKind::Remove ? FVoxelValue::Empty() : FVoxelValue::Full(); });
 		}
 		ScratchModified = MoveTemp(Data.ModifiedValues);
+
+		// P-009 §2, the measurement DEF-6 asked for. Signed per material: removal (occupancy
+		// fell) is attributed to the voxel's pre-edit material -- Remove never changes material,
+		// so reading it now reads it as it was -- and placement (occupancy rose) to
+		// Op.MaterialId, which is also painted there when it names a catalog material (§4.10.3).
+		// Same occupancy function and rounding as FMemoryTerrainBackend, the reference.
+		FVoxelMutableDataAccelerator Accelerator(WorldData, Bounds);
+		const double UnitVolume = TerrainVoxelMicroLitres(Init.VoxelSizeCm);
+		const bool bPaint = Op.Kind == ETerrainOpKind::Add && IsCatalogMaterial(Op.MaterialId);
+		const FVoxelMaterial Placed = VoxelMaterialFor(Op.MaterialId);
+		for (const FModifiedVoxelValue& Modified : ScratchModified)
+		{
+			const double Delta = TerrainOccupancy(QuantiseDensity(Modified.OldValue))
+				- TerrainOccupancy(QuantiseDensity(Modified.NewValue));
+			if (Delta > 0.0)
+			{
+				ScratchVolumes.FindOrAdd(GameMaterialFor(Accelerator.Get<FVoxelMaterial>(Modified.Position, 0))) += Delta * UnitVolume;
+			}
+			else if (Delta < 0.0)
+			{
+				ScratchVolumes.FindOrAdd(Op.MaterialId) += Delta * UnitVolume;
+				if (bPaint) Accelerator.SetMaterial(Modified.Position, Placed);
+			}
+		}
 	}
+	for (const auto& Entry : ScratchVolumes)
+	{
+		const int64 Rounded = FMath::RoundToInt64(Entry.Value);
+		if (Rounded != 0) Out.Removed.Add({Entry.Key, Rounded});
+	}
+	ScratchVolumes.Reset();
+	Out.Removed.Sort([](const FTerrainMaterialVolume& A, const FTerrainMaterialVolume& B) { return A.MaterialId < B.MaterialId; });
 	TSet<FTerrainChunkKey> Affected;
 	for (const FModifiedVoxelValue& Modified : ScratchModified)
 	{
@@ -479,8 +573,11 @@ bool FVPLegacyBackend::QueryPoint(const FIntVector& VoxelPos, FTerrainPointSampl
 	float Value = 0.f;
 	UVoxelDataTools::GetValue(Value, Actor, VoxelPos);
 
+	FVoxelMaterial Material;
+	UVoxelDataTools::GetMaterial(Material, Actor, VoxelPos);
+
 	Out.Density = FMath::Clamp(Value, -1.f, 1.f);
-	Out.MaterialId = 0;   // K9, build step 6. Zero is "unknown", not "air".
+	Out.MaterialId = GameMaterialFor(Material);   // exact, or Unknown (P-009 §3)
 	Out.bResident = true;
 	return true;
 }
@@ -510,9 +607,6 @@ bool FVPLegacyBackend::ReadRegion(const FTerrainChunkKey& Key, FTerrainRegionDat
 	uint8* const Density  = Out.Payload.GetData();
 	uint8* const Material = Density + TerrainChunkSampleCount * 2;
 
-	// Materials are K9 / build step 6 and are not read back yet, so the upper half is zero. It
-	// is zeroed once here instead of through 32,768 append calls.
-	FMemory::Memzero(Material, TerrainChunkSampleCount * 2);
 
 	{
 		// ONE lock and ONE accelerator for the whole chunk.
@@ -544,6 +638,11 @@ bool FVPLegacyBackend::ReadRegion(const FTerrainChunkKey& Key, FTerrainRegionDat
 			const uint16 Quantised = static_cast<uint16>(QuantiseDensity(Value));
 			Density[Index * 2]     = static_cast<uint8>( Quantised       & 0xFFu);
 			Density[Index * 2 + 1] = static_cast<uint8>((Quantised >> 8) & 0xFFu);
+			// The game material id, through the same accelerator (P-009 §3).
+			const FTerrainMatId Id = GameMaterialFor(Accelerator.Get<FVoxelMaterial>(
+				ChunkBox.Min.X + X, ChunkBox.Min.Y + Y, ChunkBox.Min.Z + Z, 0));
+			Material[Index * 2]     = static_cast<uint8>( Id       & 0xFFu);
+			Material[Index * 2 + 1] = static_cast<uint8>((Id >> 8) & 0xFFu);
 		}
 	}
 
@@ -598,14 +697,21 @@ bool FVPLegacyBackend::WriteRegion(const FTerrainRegionData& In)
 		for (int32 Y = 0; Y < TerrainChunkSizeVox; ++Y)
 		for (int32 X = 0; X < TerrainChunkSizeVox; ++X)
 		{
-			const int16 Stored = static_cast<int16>(Read16(In.Payload, LocalIndex(X, Y, Z) * 2));
-			Accelerator.SetValue(Bounds.Min.X + X, Bounds.Min.Y + Y, Bounds.Min.Z + Z,
-				FVoxelValue(static_cast<float>(Stored) / VPLegacyValueScale));
+			const int32 Index = LocalIndex(X, Y, Z);
+			const int16 Stored = static_cast<int16>(Read16(In.Payload, Index * 2));
+			const FIntVector P(Bounds.Min.X + X, Bounds.Min.Y + Y, Bounds.Min.Z + Z);
+			Accelerator.SetValue(P.X, P.Y, P.Z, FVoxelValue(static_cast<float>(Stored) / VPLegacyValueScale));
+			// Unknown (0) means "no material recorded" -- every save written before P-009 -- and
+			// leaves the voxel's material as it is rather than painting it an unmapped colour.
+			const FTerrainMatId Id = Read16(In.Payload, (TerrainChunkSampleCount + Index) * 2);
+			if (IsCatalogMaterial(Id))
+			{
+				Accelerator.SetMaterial(P.X, P.Y, P.Z, VoxelMaterialFor(Id));
+			}
 		}
 	}
 	FVoxelToolHelpers::UpdateWorld(Actor, VoxelBounds);
 
-	// Materials in the payload are ignored: nothing writes non-zero ones yet (K9, step 6).
 	return true;
 }
 

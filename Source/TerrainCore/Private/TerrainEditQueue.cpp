@@ -150,6 +150,13 @@ void FTerrainEditQueue::Pump(double Now, const FTerrainQueueCallbacks& Cb, int32
 			++NextOpSeq;
 			Job.Receipt.bApplied = true; Job.Receipt.OpSeq = int64(Op.OpSeq);
 			Job.Receipt.VoxelsTouched += Result.VoxelsTouched; Job.Receipt.ChunksAffected += Result.AffectedChunks.Num();
+			for (const FTerrainMaterialVolume& Volume : Result.Removed)
+			{
+				FTerrainYield* Entry = Job.Receipt.Yield.FindByPredicate(
+					[&](const FTerrainYield& Y) { return Y.MaterialId == int32(Volume.MaterialId); });
+				if (!Entry) { Entry = &Job.Receipt.Yield.AddDefaulted_GetRef(); Entry->MaterialId = int32(Volume.MaterialId); }
+				Entry->MicroLitres += Volume.MicroLitres;
+			}
 			S.ReservedCharge -= Job.ChargePerPart;
 			if (S.State.Charges >= 0) S.State.Charges -= Job.ChargePerPart;
 			--S.Pending; --PendingCount; ++Job.Next;

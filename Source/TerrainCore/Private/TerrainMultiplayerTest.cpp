@@ -2,6 +2,7 @@
 #include "TerrainService.h"
 #include "TerrainCore.h"
 #include "TerrainChunk.h"
+#include "TerrainMaterials.h"
 #include "Engine/World.h"
 #include "EngineUtils.h"
 #include "GameFramework/PlayerController.h"
@@ -11,6 +12,11 @@
 #include "Misc/Parse.h"
 #include "TimerManager.h"
 
+int32& UTerrainService::MultiplayerRoundsCompleted()
+{
+	static int32 Rounds=0;   // survives server travel, which replaces the subsystem
+	return Rounds;
+}
 bool UTerrainService::IsMultiplayerTest() const
 {
 #if !UE_BUILD_SHIPPING
@@ -58,7 +64,17 @@ void UTerrainService::TickMultiplayerTest()
 		// Whole chunks around the complete 5m test region, including untouched positions.
 		TerrainChunkKeysForBox(FTerrainBox(FIntVector(-168,-8,-14),FIntVector(-152,8,0)),MPKeys);
 		TArray<FIntVector> WireKeys;
+		// Density hashes, then material hashes (P-009): both must converge.
 		for (const auto& K:MPKeys) { MPHashes.Add(HashChunk(K)); WireKeys.Add(FIntVector(K.X,K.Y,K.Z)); }
+		for (const auto& K:MPKeys) MPHashes.Add(HashChunkMaterials(K));
+		int64 Ore=0;
+		for (const auto& K:MPKeys)
+		{
+			FTerrainRegionData Region;
+			if (Backend->ReadRegion(K,Region)) for (int32 I=0;I<TerrainChunkSampleCount;++I)
+				Ore+=(uint16(Region.Payload[(TerrainChunkSampleCount+I)*2]) | uint16(Region.Payload[(TerrainChunkSampleCount+I)*2+1])<<8)==ETerrainMaterial::IronOre;
+		}
+		UE_LOG(LogTerrainCore,Display,TEXT("MP.Materials: %lld iron-ore samples in the test chunks (painted in round 1 only)"),Ore);
 		bMPVerifying=true;
 		for (auto* S:Players) S->ClientVerifyTest(WireKeys);
 	}
@@ -85,7 +101,7 @@ void UTerrainService::ReceiveTestHashes(UTerrainStreamComponent* Stream,const TA
             EditQueue.MaxQueueAgeSeconds()*1000.,EditQueue.MaxApplySeconds()*1000.);
 		UE_LOG(LogTerrainCore,Display,TEXT("MP.Snapshots sent=%d bytes=%lld"),SnapshotsSent,SnapshotBytesSent);
 		UE_LOG(LogTerrainCore,Display,TEXT("**** MP.Convergence: %s clients=%d chunks=%d committed=%llu ****"),MPFailures ? TEXT("FAIL") : TEXT("PASS"),MPReports,MPKeys.Num(),EditQueue.NextSequence()-1);
-        static int32 CompletedRounds=0;
+        int32& CompletedRounds=MultiplayerRoundsCompleted();
         int32 Rounds=1; FParse::Value(FCommandLine::Get(),TEXT("TerrainMPRounds="),Rounds);
         if (!MPFailures && ++CompletedRounds<FMath::Clamp(Rounds,1,3))
         {
