@@ -1,75 +1,86 @@
 # HANDOFF
 
-**Last session:** CP-015 · T-121 · 2026-09-20 · Claude (Opus 5)
-**Branch:** `main` · **Tests:** 34/34 TerrainCore automation, `Terrain.SelfTest` PASS,
-`Adapter.DensityContract` 20/20, `Test-TerrainCheckpoint.py` PASS, `MP.Convergence` PASS
-(3 clients, 243 commits, **zero stall warnings**).
+**Last session:** CP-015 · T-122 · 2026-09-20 · Claude (Opus 5)
+**Branch:** `main` · **Tests:** 34/34 TerrainCore automation, `Test-TerrainCheckpoint.py` PASS,
+`MP.Convergence` PASS (3 clients, 243 commits), `Terrain.StressCapture` at the real trigger
+twice.
 
 ---
 
-## What shipped: objects are written in packs
+## What shipped: the measurement, and the default flips
 
-The checkpoint stall was 85% index path-copy: 49 durably written pages holding about **7 KB
-between them**, costing 0.168 s. A durable write is one `fsync`, and an `fsync` costs **~3 ms
-regardless of size** — a 160-byte index page costs what a megabyte costs.
+D-036 left `bCheckpointCapture` false for a stated reason — *"the measurement has not been
+taken."* The trigger is 256 dirty chunks; every harness dirtied four or eight. So the harness
+now exists.
 
-**I measured the three candidates before building any of them**, which mattered, because the
-one D-035 ruled for first does not work:
+`Terrain.StressCapture` dirties exactly `CheckpointDirtyChunkTrigger` chunks through the real
+`RequestEdit` path and lets the ordinary pump fire the capture. **Two things it taught by
+failing first**, both worth knowing before touching it:
 
-| Strategy over 49 small files | Time |
+- **It runs over ~80 seconds, not one frame.** The queue rate limits each source to three
+  intents a second; a first attempt to issue 256 edits in a frame was refused 253 times with
+  `RateLimited`. That limit is anti-griefing and correct. Spreading them is also the truthful
+  shape — 256 dirty chunks accumulate from many players over minutes on a real server.
+- **It adds rather than removes.** The first working run dirtied nothing: a `Remove` in empty
+  air modifies no voxels, so no chunk is affected, so nothing is dirty and no capture fires. It
+  looked like a silent failure and was really a test placing edits in the sky.
+
+### The number
+
+**256 chunks, 33,587,200 bytes, 1,155 index pages, in 0.162 s** — 0.6 ms/chunk.
+
+| Phase | Time |
 |---|---|
-| write each and flush it (what existed) | 151.6 ms |
-| **hold the handles, flush them all at the end** | **155.8 ms** |
-| write and close each, then reopen and flush | 55.6 ms |
-| **one file, one flush** | **2.3 ms** |
+| read 256 chunks | 0.089 s (55%) |
+| encode + BLAKE3 | 0.005 s |
+| store payloads | 0.026 s |
+| **1,155 index pages** | **0.016 s** |
+| pack write + root slot | 0.025 s |
 
-A deferred barrier buys nothing — `FlushFileBuffers` is per file whenever you call it. The cost
-was never *when* the store syncs; it is **how many files it syncs**, and a capture synced 59.
+Reproduced at 0.165 s on a second run with no settings overrides, which also confirms the new
+default takes effect. The index line is the packs result in miniature: 1,155 durable pages in
+0.016 s, where before D-036 that alone would have been ~3.5 s of `fsync`.
 
-So a capture now buffers its payloads, index pages and descriptor into **one pack** (P-004 §13),
-written and flushed once, strictly before the root slot. Two `fsync`s per capture instead of 59.
-Content addressing is untouched — objects are still named by and verified against their BLAKE3
-digest, loose or packed — so no other section's byte tables moved.
+**D-036 extrapolated 1.5 s. The truth is nine times better** — the third wrong projection in
+this checkpoint, after P-003 §4 (reading was the cost: it was 1.5%) and D-035 (a deferred fsync
+barrier was the fix: it was 4 ms slower).
 
-| | before | after |
-|---|---|---|
-| warm solo capture, 8 chunks | 0.197 s | **0.010 s** |
-| three-client load, 4 chunks | 0.14–0.25 s | **0.026–0.035 s** |
-| stall warnings per 30 s MP round | 15, ~0.34 s each | **0** |
+### The ruling
 
-Restore works across process restarts: the four-launch harness restores 8 chunks from a pack
-written by an earlier process, replays zero edits, and all eight chunk hashes are identical.
+**`bCheckpointCapture` defaults to true** (D-037). 0.162 s is an order of magnitude inside
+P-003 §4's multi-second gate, and the trade inverted: off means startup replay grows without
+bound forever; on costs an occasional sixth of a second.
 
-**Crash containment is the same argument §12 always made.** The pack is flushed before the root
-slot that names anything in it, so a pack failing its trailer checks belongs to a capture that
-never published: ignored in full, explicitly not an error, because refusing to open over it
-would turn collectable garbage into a dead world. Tested — torn trailer, flipped body bit, id
-reuse, abandoned batch, loose/packed coexistence.
+Also: the stall warning moved from 0.1 s to 0.5 s — at 0.1 s it fired on every healthy capture
+while announcing a gate failure that had not happened. And `RejectionName` gained the six enum
+values it was missing (`OutOfReach`, `ToolUnavailable`, `PermissionDenied`, `NotResident`,
+`RateLimited`, `UnsafePlacement`), all of which printed as `Unknown` — which is what hid the
+rate limiter for two runs.
 
-## Next: measure a capture at its real trigger
+## The tail this does not fix
 
-`bCheckpointCapture` is still **false**, but the reason changed from *"the measurement failed
-the gate"* to **"the measurement has not been taken."**
+Capture runs only when the queue is empty, and admission closes at 4,096 dirty chunks. A server
+busy enough that the queue never drains would accumulate toward that bound and then take a
+capture roughly sixteen times this one — about **2.6 s**, back inside what P-003 §4 fails —
+while refusing edits until it drained.
 
-Reading is the dominant phase again (~75% of a capture under load). Extrapolating 4 chunks to
-the 256-chunk trigger gives roughly 1.5 s — not multi-second, and not evidence. **This
-checkpoint has now twice acted on a plausible projection and been wrong**: P-003 §4 predicted
-reading was the cost (it was 1.5%), and D-035 predicted the fsync barrier was the fix (it was
-4 ms slower). So build a harness that actually dirties 256 chunks, measure, and *then* decide
-the default.
+Nothing observed goes near it: a 30-second three-client round reaches 243 ops and 4 dirty
+chunks and takes **no checkpoint at all**. But it is a real shape, and it is exactly what the
+pump exists to prevent.
 
 ## Remaining queue
 
 1. ~~Bulk adapter `ReadRegion`~~ — done (T-120, D-035).
-2. ~~Index write amplification~~ — done (T-121, D-036), and it was a file-count problem.
-3. **Measure capture at the 256-chunk trigger** — the gate on `bCheckpointCapture`.
-4. Incremental capture pump — now genuinely the right lever, since reading is dominant again.
+2. ~~Index write amplification~~ — done (T-121, D-036); it was a file-count problem.
+3. ~~Measure capture at the real trigger~~ — done (T-122, D-037); default now on.
+4. **Incremental copy-before-write pump (DEF-2)** — next. For the first time it is aimed at the
+   phase that actually dominates (reading, 55%), and it closes the 4,096-chunk tail above.
 5. Retention / GC — **the store still only grows, and a pack cannot be reclaimed object by
-   object** (P-004 §13.6). Retention now has to reason about packs, not just loose objects.
+   object** (P-004 §13.6).
 6. Crash matrix.
 
 ## Standing note
 
-Both increments this session were cheap to price and expensive to guess at. The fsync
-comparison took three minutes and saved building the wrong fix. Measure the obvious thing
-before you build it.
+Three projections this checkpoint, all reasonable, all wrong, each cheaper to measure than to
+argue about. The phase times are logged on every capture and `Terrain.StressCapture` reproduces
+the trigger run in 80 seconds. Measure before building, and measure again after.

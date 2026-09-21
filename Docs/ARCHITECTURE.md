@@ -972,15 +972,32 @@ objects are still named by and verified against their BLAKE3 digest, loose or pa
 stall warnings** (previously 15 stalls of ~0.34 s in a 30 s round). A torn pack is ignored
 rather than fatal, because it belongs to a capture that never published; that case is tested.
 
-Capture is **still off by default**, and the reason is now a measurement that has not been
-taken rather than one that failed: at the 256-chunk trigger reading dominates (~75% of capture
-under load) and the projection is roughly 1.5 s, which is not multi-second but is not proven
-either. **Flipping `bCheckpointCapture` requires measuring a capture at its real trigger**, not
-extrapolating from four chunks — which is the mistake this checkpoint made twice already
-(**D-035**, **D-036**).
+**Capture is measured at its real trigger, and is now ON by default (D-037).**
+`Terrain.StressCapture` dirties exactly `CheckpointDirtyChunkTrigger` chunks through the real
+`RequestEdit` path and lets the ordinary pump fire the capture. It runs over ~80 seconds rather
+than one frame because the queue rate limits each source to three intents a second — which is
+also the truthful shape, since 256 dirty chunks accumulate from many players over minutes on a
+real server.
 
-**What does not exist.** A capture measurement at the real trigger, the incremental
-copy-before-write pump (now genuinely the right lever, since reading is again dominant),
+**256 chunks, 33,587,200 bytes, 1,155 index pages, in 0.162 s** — 0.6 ms per chunk: read 0.089,
+encode 0.005, store 0.026, index 0.016, publish 0.025. Reproduced at 0.165 s with no settings
+overrides. The index line is the packs result in miniature: 1,155 durable pages in 0.016 s,
+where before they would have been ~3.5 s of `fsync` on their own.
+
+D-036 had extrapolated this at *"roughly 1.5 s"* — **nine times worse than the truth**, and the
+third wrong projection in this checkpoint. That is why the default flipped only after the
+harness existed.
+
+0.162 s is an order of magnitude inside P-003 §4's multi-second gate, and the trade has
+inverted: capture off means startup replay grows without bound forever, capture on costs an
+occasional sixth of a second. **The tail is not fixed.** Capture runs only when the queue is
+empty and admission closes at 4,096 dirty chunks, so a server busy enough never to drain would
+accumulate toward that bound and then take a ~2.6 s capture while refusing edits. Nothing
+observed goes near it — a 30-second three-client round reaches 243 ops and 4 dirty chunks and
+takes no checkpoint at all — but it is what the incremental pump exists to prevent.
+
+**What does not exist.** The incremental copy-before-write pump — now the next increment, and
+for the first time aimed at the phase that actually dominates (reading, 55% of capture) —
 Empty/SparseDiff compaction (P-003 §6 rules it out until a backend can state its own base),
 settlement, SQLite, retention or GC — **the store only grows, and packs cannot be reclaimed
 object by object** — the exclusive-writer lease P-003 §5 requires, and the crash matrix. Build

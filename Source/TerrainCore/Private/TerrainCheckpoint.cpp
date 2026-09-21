@@ -242,7 +242,12 @@ FTerrainStoreResult TerrainCaptureCheckpoint(
 		OutStats.ReadSeconds, OutStats.EncodeSeconds, OutStats.StoreSeconds,
 		OutStats.IndexSeconds, OutStats.PublishSeconds);
 
-	if (OutStats.Seconds > 0.1 && OutStats.ChunksWritten > 0)
+	// Half a second: well above the 0.162 s a full 256-chunk capture measures at (D-036), and
+	// well below the multi-second stall P-003 §4 actually fails. The old threshold was 0.1 s,
+	// which now fires on every healthy capture at the trigger -- a warning that cries wolf on
+	// the normal case trains people to ignore it, and it claimed a gate failure that was not
+	// one.
+	if (OutStats.Seconds > 0.5 && OutStats.ChunksWritten > 0)
 	{
 		// P-003 §4: a visible multi-second stall under the supported workload FAILS. Capture is
 		// synchronous, so this is the number that decides whether the incremental
@@ -255,9 +260,10 @@ FTerrainStoreResult TerrainCaptureCheckpoint(
 		// phase times are printed on every capture so the next person does not have to guess.
 		const double MillisPerChunk = OutStats.Seconds * 1000.0 / double(OutStats.ChunksWritten);
 		UE_LOG(LogTerrainCore, Warning,
-			TEXT("Checkpoint stalled the game thread for %.2f s over %d chunks (%.1f ms/chunk). ")
-			TEXT("P-003 §4 fails a visible multi-second stall. Phases: read %.3f, encode %.3f, ")
-			TEXT("store %.3f, index %.3f, publish %.3f -- spread the largest one."),
+			TEXT("Checkpoint stalled the game thread for %.2f s over %d chunks (%.1f ms/chunk), ")
+			TEXT("well above the 0.16 s a full-trigger capture measures at. P-003 §4 fails a ")
+			TEXT("visible multi-second stall, so this is heading for it. Phases: read %.3f, ")
+			TEXT("encode %.3f, store %.3f, index %.3f, publish %.3f -- spread the largest one."),
 			OutStats.Seconds, OutStats.ChunksWritten, MillisPerChunk,
 			OutStats.ReadSeconds, OutStats.EncodeSeconds, OutStats.StoreSeconds,
 			OutStats.IndexSeconds, OutStats.PublishSeconds);

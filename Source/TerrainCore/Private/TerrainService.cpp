@@ -3,6 +3,7 @@
 #include "TerrainService.h"
 #include "TerrainBackendRegistry.h"
 #include "TerrainChunk.h"
+#include "TerrainCheckpoint.h"
 #include "TerrainCore.h"
 #include "TerrainQuantise.h"
 #include "TerrainSettings.h"
@@ -10,6 +11,7 @@
 #include "Engine/World.h"
 #include "Modules/ModuleManager.h"
 #include "TimerManager.h"
+#include "Containers/Ticker.h"
 
 namespace
 {
@@ -30,6 +32,12 @@ namespace
 		case ETerrainEditRejection::QueueFull:         return TEXT("QueueFull");
 		case ETerrainEditRejection::StaleRequest:      return TEXT("StaleRequest");
 		case ETerrainEditRejection::Revalidation:      return TEXT("Revalidation");
+		case ETerrainEditRejection::OutOfReach:        return TEXT("OutOfReach");
+		case ETerrainEditRejection::ToolUnavailable:   return TEXT("ToolUnavailable");
+		case ETerrainEditRejection::PermissionDenied:  return TEXT("PermissionDenied");
+		case ETerrainEditRejection::NotResident:       return TEXT("NotResident");
+		case ETerrainEditRejection::RateLimited:       return TEXT("RateLimited");
+		case ETerrainEditRejection::UnsafePlacement:   return TEXT("UnsafePlacement");
 		default:                                       return TEXT("Unknown");
 		}
 	}
@@ -423,6 +431,150 @@ static FAutoConsoleCommandWithWorldAndArgs GTerrainEditCommand(
 			Receipt.bApplied ? TEXT("YES") : TEXT("no"),
 			RejectionName(Receipt.Rejection),
 			Receipt.OpSeq, Receipt.ChunksAffected, Receipt.VoxelsTouched);
+	}));
+
+// `Terrain.StressCapture` exists because two increments in a row optimised the checkpoint on
+// the strength of a projection, and both projections were wrong (D-035, D-036). The capture
+// trigger is 256 dirty chunks; every harness we had dirties four or eight. Extrapolating the
+// difference is exactly the move that has already failed twice, so this dirties the real
+// number and lets the ordinary trigger fire, and the capture reports its own phase times.
+//
+// **It runs over many seconds, not one frame, and that is not a workaround.** The queue rate
+// limits each source to three intents a second (anti-griefing, and working exactly as it
+// should): a first attempt to issue 256 edits in one frame was refused 253 times with
+// RateLimited. Spreading them is also the truthful shape -- on a real server 256 dirty chunks
+// accumulate from many players over minutes, never from one source in a frame -- and capture
+// cost depends on how many chunks are dirty, not on how they got that way.
+//
+// **It takes no arguments on purpose.** It dirties exactly `CheckpointDirtyChunkTrigger`
+// chunks -- whatever the world is actually configured to fire at -- so the measurement cannot
+// drift from the trigger it is meant to measure. (`-ExecCmds` also mangles arguments
+// containing spaces, which is how that was found.)
+//
+// It is a measurement affordance, not gameplay: authority only, no tool, no reach check, and
+// it goes through RequestEdit like everything else, so what it measures is the real path.
+static FAutoConsoleCommandWithWorld GTerrainStressCaptureCommand(
+	TEXT("Terrain.StressCapture"),
+	TEXT("Terrain.StressCapture  -- dirty CheckpointDirtyChunkTrigger distinct chunks through the "
+		 "real edit path, so a checkpoint capture can be measured at its actual trigger."),
+	FConsoleCommandWithWorldDelegate::CreateLambda([](UWorld* World)
+	{
+		UTerrainService* Service = FindTerrainServiceForCommand(World);
+		if (!Service)
+		{
+			return;
+		}
+
+		struct FStressState
+		{
+			TWeakObjectPtr<UWorld> World;
+			int32  Requested = 0;
+			int32  Next = 0;        // index of the chunk to try next
+			int32  Applied = 0;
+			int32  Rejected = 0;
+			int32  RateLimited = 0;
+			int64  Voxels = 0;
+			double RadiusCm = 0.0;
+			double Started = 0.0;
+			ETerrainEditRejection FirstRejection = ETerrainEditRejection::None;
+		};
+
+		const UTerrainSettings* Settings = GetDefault<UTerrainSettings>();
+		const TSharedRef<FStressState> State = MakeShared<FStressState>();
+		State->World     = World;
+		State->Requested = FMath::Clamp(
+			Settings->CheckpointDirtyChunkTrigger, 1, TerrainCheckpointDirtyHardBound);
+		State->Started   = FPlatformTime::Seconds();
+
+		const double ChunkCm = double(TerrainChunkSizeVox) * double(Settings->VoxelSizeCm);
+		State->RadiusCm = FMath::Min(ChunkCm * 0.25, Settings->MaxEditRadiusCm);
+
+		UE_LOG(LogTerrainCore, Display,
+			TEXT("Terrain.StressCapture: dirtying %d chunks at %.0f cm radius. The queue admits ")
+			TEXT("three intents a second per source, so expect roughly %.0f seconds."),
+			State->Requested, State->RadiusCm, double(State->Requested) / 3.0);
+
+		FTSTicker::GetCoreTicker().AddTicker(FTickerDelegate::CreateLambda(
+			[State](float) -> bool
+			{
+				UWorld* Live = State->World.Get();
+				UTerrainService* LiveService = Live ? Live->GetSubsystem<UTerrainService>() : nullptr;
+				if (!LiveService)
+				{
+					return false;   // world gone: stop ticking
+				}
+
+				const UTerrainSettings* Config = GetDefault<UTerrainSettings>();
+				const double  VoxelCm = double(Config->VoxelSizeCm);
+				const FVector Origin  = Config->TerrainOriginWorld;
+
+				const FTerrainBox Bounds = Config->GetWorldBoundsVox();
+				const int32 MinChunk = FMath::DivideAndRoundUp(Bounds.Min.X, TerrainChunkSizeVox);
+				const int32 MaxChunk = Bounds.Max.X / TerrainChunkSizeVox;
+				const int32 Span     = FMath::Max(1, MaxChunk - MinChunk);
+
+				const int32 Index = State->Next;
+				const FIntVector CentreVox(
+					(MinChunk + (Index % Span)) * TerrainChunkSizeVox + TerrainChunkSizeVox / 2,
+					(MinChunk + ((Index / Span) % Span)) * TerrainChunkSizeVox + TerrainChunkSizeVox / 2,
+					TerrainChunkSizeVox / 2);
+
+				// **Add, not Remove, and that matters.** A Remove in empty air modifies nothing,
+				// so the backend reports no affected chunks, so nothing is marked dirty and the
+				// capture never fires -- which is precisely what the first run of this did.
+				// Adding into air always modifies voxels, so every edit dirties its chunk.
+				FTerrainEditRequest Request;
+				Request.Kind          = ETerrainEditKind::Add;
+				Request.RadiusCm      = State->RadiusCm;
+				Request.WorldLocation = Origin + FVector(
+					(double(CentreVox.X) + 0.5) * VoxelCm,
+					(double(CentreVox.Y) + 0.5) * VoxelCm,
+					(double(CentreVox.Z) + 0.5) * VoxelCm);
+
+				FTerrainEditReceipt Receipt;
+				LiveService->RequestEdit(Request, Receipt);
+
+				if (Receipt.Rejection == ETerrainEditRejection::RateLimited)
+				{
+					// Not a failure and not progress: the bucket is empty, so try the SAME
+					// chunk again next frame rather than skipping it.
+					++State->RateLimited;
+					return true;
+				}
+
+				++State->Next;
+				if (Receipt.bApplied || Receipt.bQueued)
+				{
+					++State->Applied;
+					State->Voxels += Receipt.VoxelsTouched;
+				}
+				else
+				{
+					++State->Rejected;
+					if (State->FirstRejection == ETerrainEditRejection::None)
+					{
+						State->FirstRejection = Receipt.Rejection;
+					}
+				}
+
+				if (State->Next < State->Requested)
+				{
+					return true;
+				}
+
+				// The capture itself is NOT triggered here. It fires from the ordinary pump
+				// once the queue drains and the configured trigger is met, which is the path a
+				// real session takes -- forcing it would measure something no player would
+				// ever experience.
+				UE_LOG(LogTerrainCore, Display,
+					TEXT("**** Terrain.StressCapture: issued=%d applied=%d rejected=%d ")
+					TEXT("rateLimitedRetries=%d voxels=%lld firstRejection=%s in %.1f s. ")
+					TEXT("Capture fires from the pump. ****"),
+					State->Next, State->Applied, State->Rejected, State->RateLimited,
+					State->Voxels, RejectionName(State->FirstRejection),
+					FPlatformTime::Seconds() - State->Started);
+				return false;
+			}));
 	}));
 
 static FAutoConsoleCommandWithWorldAndArgs GTerrainStatusCommand(

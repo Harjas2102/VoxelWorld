@@ -310,8 +310,8 @@ void UTerrainService::MaybeCaptureCheckpoint()
 	const UTerrainSettings* Settings = GetDefault<UTerrainSettings>();
 	if (!Settings->bCheckpointCapture)
 	{
-		// Off by default because capture is synchronous and measured at ~42 ms per chunk on the
-		// production adapter. See the setting for the trade and for what fixes it.
+		// On by default since the cost was measured at the trigger this fires at: 0.162 s for
+		// 256 chunks (D-036). See the setting for the trade and for the tail it does not fix.
 		return;
 	}
 

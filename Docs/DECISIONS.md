@@ -1179,3 +1179,86 @@ happened twice in one checkpoint: **the fix that looks obvious deserves a measur
 is built, not after.** Holding the handles open and flushing at the end is an entirely
 reasonable idea that would have cost a day and bought 4 ms in the wrong direction. It took three
 minutes to price it.
+
+---
+
+## D-037 — Checkpoint capture is on by default, measured at its real trigger (2026-09-20)
+
+**Recorded:** CP-015 · **Class:** technical, but with a player-visible consequence · **Architect
+ruling, logged not asked** · **Scope:** T-122 · **Status:** ACCEPTED
+
+### 1. The measurement that had not been taken
+
+D-036 left `bCheckpointCapture` false for a stated reason: *"the measurement has not been
+taken."* The trigger is 256 dirty chunks and every harness dirtied four or eight. So the
+harness was built.
+
+`Terrain.StressCapture` dirties exactly `CheckpointDirtyChunkTrigger` chunks through the real
+`RequestEdit` path and lets the ordinary pump fire the capture. Two things about it are worth
+recording, because both were discovered by it failing first:
+
+- **It runs over ~80 seconds, not one frame.** The queue rate limits each source to three
+  intents a second, and a first attempt to issue 256 edits in one frame was refused 253 times
+  with `RateLimited`. That limit is anti-griefing and working correctly. Spreading the edits is
+  also the truthful shape: on a real server 256 dirty chunks accumulate from many players over
+  minutes, never from one source in a frame, and capture cost depends on how many chunks are
+  dirty rather than on how they got that way.
+- **It adds rather than removes.** The first working run dirtied nothing, because a `Remove` in
+  empty air modifies no voxels, so the backend reports no affected chunks and nothing is marked
+  dirty. The capture never fired and the run looked like a silent failure.
+
+### 2. The result, and how wrong the projection was
+
+**256 chunks, 33,587,200 bytes, 1,155 index pages, in 0.162 s** — 0.6 ms per chunk.
+
+| Phase | Time |
+|---|---|
+| read 256 chunks | 0.089 s (55%) |
+| encode + BLAKE3 | 0.005 s |
+| store payloads | 0.026 s |
+| **1,155 index pages** | **0.016 s** |
+| pack write + root slot | 0.025 s |
+
+Reproduced at 0.165 s on a second run with no settings overrides at all, which also confirms
+the new default takes effect.
+
+D-036 extrapolated this at *"roughly 1.5 s"*. The real number is **nine times better**. That is
+the third projection in this checkpoint to be wrong — P-003 §4 said reading was the cost (it was
+1.5%), D-035 said a deferred fsync barrier was the fix (it was 4 ms slower), and D-036 said the
+trigger would cost 1.5 s. **Each was reasonable, and each was wrong, and each took far less time
+to measure than to argue about.**
+
+Note the index line: 1,155 durably written pages in 0.016 s, because they share one pack. Before
+D-036 that alone would have been about 3.5 seconds of `fsync`.
+
+### 3. Ruling
+
+**`bCheckpointCapture` defaults to true.**
+
+0.162 s is an order of magnitude inside P-003 §4's multi-second gate, and the trade it was
+guarding has now inverted. Leaving capture off buys a world whose startup replay grows without
+bound and therefore slows down forever; turning it on costs an occasional stall of about a
+sixth of a second. The unbounded cost is worse than the bounded one, and the bounded one is now
+small.
+
+The stall warning's threshold moves from 0.1 s to 0.5 s. At 0.1 s it fired on every healthy
+capture at the trigger while announcing a gate failure that had not happened, and a warning that
+cries wolf on the normal case teaches people to ignore it.
+
+`RejectionName` also gained the six enum values it was missing — `OutOfReach`,
+`ToolUnavailable`, `PermissionDenied`, `NotResident`, `RateLimited`, `UnsafePlacement` — all of
+which previously printed as `Unknown`. That gap is what initially hid the rate limiter.
+
+### 4. The tail this does not fix, stated plainly
+
+Capture runs only when the queue is empty, and admission closes at
+`TerrainCheckpointDirtyHardBound` (4,096) dirty chunks. A server busy enough that the queue
+never drains would accumulate toward that bound and then take a capture roughly sixteen times
+this one — about 2.6 s, back inside the territory P-003 §4 fails — while refusing edits until it
+drained.
+
+Nothing observed so far goes near it: a 30-second three-client round reaches 243 ops and 4 dirty
+chunks, and takes no checkpoint at all. But it is a real shape and it is exactly what the
+incremental copy-before-write pump exists to prevent (DEF-2). **The pump is now the next
+increment**, and for the first time it is aimed at the phase that actually dominates: reading,
+at 55% of capture.

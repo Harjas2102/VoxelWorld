@@ -99,35 +99,40 @@ public:
 	FString WorldStoreName = TEXT("Default");
 
 	/**
-	 * Whether the server takes checkpoints. **Default false, and the reason is a measurement.**
+	 * Whether the server takes checkpoints. **Default true, and the reason is a measurement
+	 * taken at the trigger this actually fires at.**
 	 *
-	 * Checkpoints are what stop startup replay growing without bound, and they work: with them
-	 * on, a restart restores the cut and replays nothing. But capture is currently SYNCHRONOUS,
-	 * and measured on the production adapter it costs **~42 ms per chunk** — 0.36 s to capture
-	 * 8 chunks. At the soft trigger below that projects to roughly **11 seconds of frozen
-	 * game**, and P-003 section 4 is explicit that a visible multi-second stall under the
-	 * supported workload FAILS.
+	 * Checkpoints are what stop startup replay growing without bound: with them on, a restart
+	 * restores the cut and replays nothing. Capture is SYNCHRONOUS, so the only question that
+	 * ever mattered is what it costs, and P-003 section 4 is explicit that a visible
+	 * multi-second stall under the supported workload FAILS.
 	 *
-	 * Capture is **much** cheaper than it was. The adapter's bulk `ReadRegion` landed (D-035) and
-	 * objects are now written in packs — one file, one flush per capture, instead of 59
-	 * (D-036, P-004 §13). Measured: **0.197 s → 0.010 s** solo over 8 chunks, and
-	 * **0.026–0.035 s under three-client load with zero stall warnings**, where a 30-second
-	 * round previously produced 15 stalls of about a third of a second each.
+	 * It used to cost ~42 ms per chunk, which projected to roughly 22 seconds of frozen game at
+	 * the trigger below. Two fixes landed. The adapter gained a bulk `ReadRegion` (**D-035**),
+	 * and objects are now written in packs — one file and one flush per capture instead of 59
+	 * (**D-036**, P-004 section 13).
 	 *
-	 * **It is still off because the measurement that would turn it on has not been taken.**
-	 * The trigger is 256 dirty chunks; the harnesses dirty 4 and 8. Reading is now the dominant
-	 * phase again (~75% of a capture under load) and extrapolating gives roughly 1.5 s, which
-	 * is not multi-second but is not evidence either. Twice this checkpoint a plausible
-	 * projection turned out to be wrong, so this one does not get acted on. Every capture logs
-	 * its own phase times; measure at the real trigger, then decide.
+	 * **Measured at the real 256-chunk trigger, not extrapolated: 0.162 s.** 256 chunks,
+	 * 33,587,200 bytes, 1,155 index pages, at 0.6 ms per chunk — read 0.089, encode 0.005,
+	 * store 0.026, index 0.016, publish 0.025. Note the index: 1,155 durable pages in 0.016 s
+	 * because they share one pack, where before they would have been about 3.5 seconds of
+	 * `fsync` on their own.
 	 *
-	 * Turning it on is a real trade and it is yours to make: an occasional multi-second freeze
-	 * during play, in exchange for a startup that does not slow down forever. Journalling is
-	 * unaffected either way, so nothing is lost by leaving this off — only replay stays
-	 * unbounded (DEF-2).
+	 * That is an order of magnitude inside the gate, so the trade flips. Leaving capture off
+	 * buys a world whose startup slows down forever; turning it on costs an occasional stall
+	 * of about a sixth of a second. `Terrain.StressCapture` reproduces the measurement, and
+	 * every capture logs its own phase times, so this can be rechecked rather than believed.
+	 *
+	 * **The tail is real and is not fixed.** Capture only runs when the queue is empty, and
+	 * admission closes at `TerrainCheckpointDirtyHardBound` (4,096) dirty chunks. A server busy
+	 * enough that the queue never drains would accumulate toward that bound and then take a
+	 * capture roughly sixteen times this one — back into multi-second territory — while
+	 * refusing edits until it drained. That is what the incremental copy-before-write pump is
+	 * for (DEF-2), and it is the next thing capture needs. Set this to false to opt out; the
+	 * journal is unaffected either way and nothing is lost but bounded replay.
 	 */
 	UPROPERTY(config, EditAnywhere, Category = "Terrain|Persistence")
-	bool bCheckpointCapture = false;
+	bool bCheckpointCapture = true;
 
 	/**
 	 * Dirty chunks that trigger a checkpoint, when `bCheckpointCapture` is on.

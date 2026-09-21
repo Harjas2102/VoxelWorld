@@ -806,16 +806,33 @@ Measured: **0.010 s solo, 0.026–0.035 s under three-client load, zero stall wa
 across process restarts — the four-launch harness restores 8 chunks from a pack written by an
 earlier process and replays zero edits, with all eight hashes identical.
 
-**Next: measure a capture at its real trigger.** `bCheckpointCapture` is still false, but the
-reason has changed from "the measurement failed the gate" to **"the measurement has not been
-taken"**. The trigger is 256 dirty chunks and the harnesses dirty 4 and 8. Reading is dominant
-again (~75% under load) and extrapolation gives roughly 1.5 s — not multi-second, not evidence.
-Twice this checkpoint a plausible projection was wrong, so it does not get acted on.
+**T-122 — the measurement, and the default flips.** `Terrain.StressCapture` dirties exactly
+`CheckpointDirtyChunkTrigger` chunks through the real `RequestEdit` path and lets the ordinary
+pump fire the capture. It takes ~80 seconds rather than one frame, because the queue rate limits
+each source to three intents a second — which is also the honest shape, since 256 dirty chunks
+accumulate from many players over minutes on a real server.
 
-After that, in order: the incremental copy-before-write pump — now genuinely the right lever,
-since reading is again the dominant phase — then retention and GC (**the store still only
-grows, and a pack cannot be reclaimed object by object**, P-004 §13.6), then the crash matrix.
-DEF-1/2/9 remain open.
+**256 chunks, 33,587,200 bytes, 1,155 index pages, in 0.162 s** (0.6 ms/chunk): read 0.089,
+encode 0.005, store 0.026, index 0.016, publish 0.025. Reproduced at 0.165 s with no settings
+overrides. D-036 had extrapolated 1.5 s — **nine times worse than the truth**, and the third
+wrong projection of this checkpoint.
+
+So **`bCheckpointCapture` now defaults to true** (**D-037**). 0.162 s is an order of magnitude
+inside P-003 §4's gate, and the trade inverted: off means startup replay grows without bound
+forever, on costs an occasional sixth of a second. The stall warning's threshold moved from
+0.1 s to 0.5 s, since at 0.1 s it fired on every healthy capture while announcing a gate failure
+that had not happened.
+
+**Next: the incremental copy-before-write pump (DEF-2).** For the first time it is aimed at the
+phase that actually dominates — reading, at 55% of capture — and it is what closes the one tail
+that remains: capture runs only when the queue is empty and admission closes at 4,096 dirty
+chunks, so a server busy enough never to drain would accumulate toward that bound and then take
+a ~2.6 s capture while refusing edits. Nothing observed goes near it (a 30-second three-client
+round reaches 243 ops and 4 dirty chunks, and takes no checkpoint at all), but it is a real
+shape.
+
+After that: retention and GC (**the store still only grows, and a pack cannot be reclaimed
+object by object**, P-004 §13.6), then the crash matrix. DEF-1/2/9 remain open.
 
 ## Drift checks (VISION.md, run at CP-015)
 
