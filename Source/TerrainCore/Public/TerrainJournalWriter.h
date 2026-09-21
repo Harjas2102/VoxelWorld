@@ -55,7 +55,7 @@ struct FTerrainStoreResult
 		return Out;
 	}
 
-	FString ToString() const;
+	TERRAINCORE_API FString ToString() const;
 };
 
 /** What the writer knows about the journal right now. */
@@ -121,7 +121,8 @@ public:
 	 * because a journal whose sequence can skip is a journal whose replay can silently omit an
 	 * edit. Both are checked here rather than trusted from above.
 	 */
-	FTerrainStoreResult AppendCommit(const FTerrainJournalCommitRecord& Record);
+	/** OutDigest, when given, receives the P-004 §9.3 record digest of exactly the bytes appended. */
+	FTerrainStoreResult AppendCommit(const FTerrainJournalCommitRecord& Record, FTerrainDigest* OutDigest = nullptr);
 
 	/** Appends the seal record. The segment accepts nothing afterwards. */
 	FTerrainStoreResult Seal(int64 SealedUtcMillis);

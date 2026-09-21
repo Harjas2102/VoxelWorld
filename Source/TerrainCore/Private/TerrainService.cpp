@@ -182,6 +182,7 @@ void UTerrainService::CreateBackend(UWorld& InWorld)
 	if (!IsBackendReady()) return;
 
 	FTerrainSourceState Admin;
+	Admin.PlacementMaterial = ETerrainMaterial::Fill;   // P-010 §3: placement never yields
 	EditQueue.RegisterSource(1,Admin);
 	InWorld.GetTimerManager().SetTimer(ServiceTickHandle,this,&UTerrainService::TickService,0.01f,true);
 	UE_LOG(LogTerrainCore, Log,

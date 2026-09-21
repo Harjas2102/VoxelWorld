@@ -15,6 +15,11 @@
 			"LoadingPhase": "Default"
 		},
 		{
+			"Name": "EntityStore",
+			"Type": "Runtime",
+			"LoadingPhase": "Default"
+		},
+		{
 			"Name": "VoxelWorld",
 			"Type": "Runtime",
 			"LoadingPhase": "Default",
@@ -37,6 +42,10 @@
 		},
 		{
 			"Name": "VoxelFree",
+			"Enabled": true
+		},
+		{
+			"Name": "SQLiteCore",
 			"Enabled": true
 		},
 		{

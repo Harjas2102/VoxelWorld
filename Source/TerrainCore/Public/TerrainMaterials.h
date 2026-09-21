@@ -37,8 +37,15 @@ namespace ETerrainMaterial
 		Bedrock   = 6,
 		IronOre   = 7,
 
+		/**
+		 * What a player places (P-010 §3). Looks like dirt, is recorded as fill, and never
+		 * yields: without it, digging back a placement would pay for material the player
+		 * never gave up, and place-then-dig would mint resources.
+		 */
+		Fill      = 8,
+
 		/** One past the last id in use. Not a material. */
-		Count     = 8,
+		Count     = 9,
 	};
 }
 

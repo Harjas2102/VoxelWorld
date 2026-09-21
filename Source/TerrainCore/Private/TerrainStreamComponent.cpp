@@ -158,6 +158,12 @@ void UTerrainStreamComponent::ClientChunkSnapshot_Implementation(const FTerrainS
 		return;
 	}
 }
+void UTerrainStreamComponent::ClientInventory_Implementation(const TArray<FTerrainYield>& Balances)
+{
+	LastInventory=Balances;
+	int64 Total=0; for (const FTerrainYield& B:Balances) Total+=B.MicroLitres;
+	UE_LOG(LogTerrainCore,Verbose,TEXT("Terrain inventory: %d materials, %.3f L settled"),Balances.Num(),double(Total)/1.0e6);
+}
 void UTerrainStreamComponent::ServerAckSnapshot_Implementation(FIntVector Key,uint32 Generation,bool bApplied)
 {
 	if (auto* S=GetWorld()->GetSubsystem<UTerrainService>()) S->ReceiveSnapshotAck(*this,FTerrainChunkKey(Key.X,Key.Y,Key.Z),Generation,bApplied);

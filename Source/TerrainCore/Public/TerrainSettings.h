@@ -175,6 +175,13 @@ public:
 	bool bBackgroundRetention = true;
 
 	/**
+	 * The module that provides the settlement ledger (P-010), loaded by name like BackendModule.
+	 * None disables settlement: every edit then records NoEconomy and nothing is paid.
+	 */
+	UPROPERTY(config, EditAnywhere, Category = "Terrain|Persistence")
+	FName SettlementModule = TEXT("EntityStore");
+
+	/**
 	 * Largest retention copy frame, in megabytes. Bounds the worker's buffer and the one
 	 * game-thread append per step -- the only retention step whose cost scales with data.
 	 */

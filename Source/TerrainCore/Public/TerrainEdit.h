@@ -1,6 +1,7 @@
 // Copyright VoxelWorld.
 #pragma once
 #include "CoreMinimal.h"
+#include "TerrainPersistenceRecords.h"
 #include "TerrainEdit.generated.h"
 
 /**
@@ -35,11 +36,23 @@ enum class ETerrainEditKind : uint8
  * rather than being reconstructed later. P-004 §9.3 fixes the widths: `RequestId` is a
  * positive `uint32` and the child identity is a pair of `uint16`.
  */
+/**
+ * What a committed op pays, decided BEFORE it is journaled and written into the record
+ * (P-003 §2 step 2, P-010). Settlement only ever reads it back; it is never recomputed.
+ */
+struct FTerrainCommitEconomy
+{
+	ETerrainEconomyKind          Kind = ETerrainEconomyKind::NoEconomy;
+	uint16                       PolicyVersion = 0;
+	TArray<FTerrainEconomyDelta> Deltas;
+};
+
 struct FTerrainCommitIdentity
 {
 	uint32 RequestId = 0;
 	uint16 ChildOrdinal = 0;
 	uint16 ChildCount = 1;
+	FTerrainCommitEconomy Economy;
 };
 
 /**

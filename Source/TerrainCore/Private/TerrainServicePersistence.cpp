@@ -98,7 +98,9 @@ namespace
 			&& A.ValueConfig == B.ValueConfig
 			&& A.EncodingRulesVersion == B.EncodingRulesVersion
 			&& A.MaterialCatalogVersion == B.MaterialCatalogVersion
-			&& A.MaterialCatalogCount == B.MaterialCatalogCount
+			// Ids are append-only and never reused (TerrainMaterials.h), so a world saved with a
+			// smaller catalog means exactly what it meant; a LARGER saved catalog is a newer build's.
+			&& A.MaterialCatalogCount <= B.MaterialCatalogCount
 			&& A.GeneratorName == B.GeneratorName
 			&& A.BackendName == B.BackendName;
 	}
@@ -284,6 +286,15 @@ void UTerrainService::OpenWorldStore(UWorld& InWorld)
 	WorldJournal->bPhysicalMeasured = Backend->MeasuresPhysicalYield();
 	SetCommitJournal(WorldJournal.Get());
 
+	// 7. The ledger (P-010): open or bootstrap it, settle whatever the journal holds beyond its
+	//    watermark, and only then let anything be admitted.
+	if (!OpenLedger(Directory))
+	{
+		CloseWorldStore();
+		bStorageFaulted = true;
+		return;
+	}
+
 	// The journal continues the sequence the world already reached, so replayed history is
 	// never overwritten by a fresh session starting again at 1.
 	//
@@ -323,6 +334,10 @@ void UTerrainService::CloseWorldStore()
 	// and backend for as long as it is running, and it has an open pack batch to discard.
 	// Nothing it buffered was ever durable, so the world simply still owes a checkpoint.
 	CapturePump.Abandon();
+
+	// The ledger next: a clean stop settles what is queued, so W reaches H; a crash would leave
+	// the rest to the boot pass instead, which is what the journal is for.
+	CloseLedger();
 
 	// Detach FIRST: the commit path must never hold a pointer to a store that is going away,
 	// and teardown can run while the queue still has work to cancel.
@@ -464,6 +479,12 @@ void UTerrainService::MaybeCaptureCheckpoint()
 	// the one that matters: a cut taken while a transaction is part-applied would record a
 	// world that never existed at any single sequence.
 	if (WorldStore == nullptr || !WorldStore->IsOpen() || CommitJournal == nullptr || bStorageFaulted)
+	{
+		return;
+	}
+	// P-003 §2: "Starting a new checkpoint cut is forbidden until every in-flight record is
+	// settled." A cut taken with W < H would let a later W < G boot check misfire.
+	if (Settlement && Settlement->Pending() != 0)
 	{
 		return;
 	}

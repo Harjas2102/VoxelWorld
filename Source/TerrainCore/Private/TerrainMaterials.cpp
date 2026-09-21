@@ -14,6 +14,7 @@ const TCHAR* TerrainMaterialName(FTerrainMatId Id)
 	case ETerrainMaterial::DeepStone: return TEXT("DeepStone");
 	case ETerrainMaterial::Bedrock:   return TEXT("Bedrock");
 	case ETerrainMaterial::IronOre:   return TEXT("IronOre");
+	case ETerrainMaterial::Fill:      return TEXT("Fill");
 	default:                          return TEXT("<unregistered>");
 	}
 }

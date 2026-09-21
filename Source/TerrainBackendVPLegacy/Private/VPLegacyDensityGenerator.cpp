@@ -14,6 +14,9 @@ FLinearColor TerrainMaterialDebugColor(FTerrainMatId Id)
 	case ETerrainMaterial::DeepStone: return FLinearColor(0.26f, 0.27f, 0.31f);   // dark grey
 	case ETerrainMaterial::Bedrock:   return FLinearColor(0.11f, 0.11f, 0.12f);   // near black
 	case ETerrainMaterial::IronOre:   return FLinearColor(0.62f, 0.28f, 0.13f);   // rust
+	// Dirt's colour, one 8-bit step apart in blue: indistinguishable on screen, distinct as an
+	// id (P-009 §3's table must stay one colour per material; its guard checks this at startup).
+	case ETerrainMaterial::Fill:      return FLinearColor(0.36f, 0.24f, 0.1345f);
 	case ETerrainMaterial::Air:       return FLinearColor(0.00f, 0.00f, 0.00f);
 	default:                          return FLinearColor(1.00f, 0.00f, 1.00f);   // magenta: unmapped
 	}

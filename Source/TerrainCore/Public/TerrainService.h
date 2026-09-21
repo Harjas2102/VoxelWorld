@@ -236,6 +236,25 @@ private:
 	 */
 	void OpenWorldStore(UWorld& InWorld);
 
+	/** P-010: opens or bootstraps the ledger and settles the journal beyond W. False closes access. */
+	bool OpenLedger(const FString& Directory);
+	void CloseLedger();
+	/** Collects settled batches, updates the settled-balance mirror, notifies owners. */
+	void TickSettlement();
+	/** Stable owner of a source; TerrainOwnerNone when it has no identity. Captured at registration. */
+	uint64 OwnerForSource(uint32 SourceId) const;
+	/** BLAKE3 of the player's unique net id, as a stable owner; TerrainOwnerNone without one. */
+	static uint64 OwnerFromController(const class APlayerController* PC);
+
+public:
+	/** Settled balances, by owner then item: committed database state only (P-003 §2 step 5). */
+	const TMap<uint64, TMap<uint32, int64>>& GetSettledBalances() const { return SettledBalances; }
+	/** Development: recompute every balance from the journal and compare with the ledger. */
+	void RunLedgerAudit();
+	/** Development: the kill test's continuous digger. */
+	void StartDigStress();
+private:
+
 	/** Detaches the journal and releases the store. Safe to call when nothing was opened. */
 	void CloseWorldStore();
 
@@ -299,6 +318,11 @@ private:
 	TUniquePtr<FTerrainPlatformStorageDevice> StorageDevice;
 	TUniquePtr<FTerrainWorldStore>            WorldStore;
 	TUniquePtr<FTerrainWorldStoreJournal>     WorldJournal;
+	TUniquePtr<FTerrainSettlementWorker>      Settlement;
+	TMap<uint32, uint64>                      SourceOwners;
+	TMap<uint64, TMap<uint32, int64>>         SettledBalances;
+	FTimerHandle                              DigStressHandle;
+	int32                                     DigStressCount = 0;
 
 	/**
 	 * Set when a commit could not be made durable after the backend had already mutated.

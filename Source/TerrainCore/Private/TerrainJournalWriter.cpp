@@ -353,7 +353,7 @@ FTerrainStoreResult FTerrainJournalWriter::Open()
 	return FTerrainStoreResult::Ok();
 }
 
-FTerrainStoreResult FTerrainJournalWriter::AppendCommit(const FTerrainJournalCommitRecord& Record)
+FTerrainStoreResult FTerrainJournalWriter::AppendCommit(const FTerrainJournalCommitRecord& Record, FTerrainDigest* OutDigest)
 {
 	if (!bOpen)
 	{
@@ -402,6 +402,10 @@ FTerrainStoreResult FTerrainJournalWriter::AppendCommit(const FTerrainJournalCom
 	}
 
 	RecordsHash.Update(Frame.GetData(), static_cast<uint64>(Frame.Num()));
+	if (OutDigest != nullptr)
+	{
+		TerrainPersistComputeRecordDigest(Frame, *OutDigest);
+	}
 	State.LastOpSeq = Record.Op.OpSeq;
 	++State.CommitRecordCount;
 	return FTerrainStoreResult::Ok();

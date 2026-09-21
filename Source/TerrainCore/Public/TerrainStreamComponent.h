@@ -65,6 +65,9 @@ public:
 	// before every op committed after it.
 	UFUNCTION(Client,Reliable) void ClientChunkSnapshot(const FTerrainSnapshotFragment& Fragment);
 	UFUNCTION(Server,Reliable) void ServerAckSnapshot(FIntVector Key, uint32 Generation, bool bApplied);
+	/** P-010: the owner's settled balances, sent only after the ledger committed them. */
+	UFUNCTION(Client,Reliable) void ClientInventory(const TArray<FTerrainYield>& Balances);
+	TArray<FTerrainYield> LastInventory;
 
 	// Development harness RPCs are inert unless the server explicitly enables TerrainMPTest.
 	UFUNCTION(Client,Reliable) void ClientBeginTest(int32 Index, float Duration, bool Observer);

@@ -7,6 +7,7 @@
 #include "TerrainSettings.h"
 #include "TerrainChunkSnapshot.h"
 #include "TerrainMaterials.h"
+#include "TerrainSettlement.h"
 #include "Engine/World.h"
 #include "EngineUtils.h"
 #include "GameFramework/PlayerController.h"
@@ -20,6 +21,10 @@ uint32 UTerrainService::RegisterStream(UTerrainStreamComponent* Stream)
 	if (NextSourceId == MAX_uint32) return 0;
 	const uint32 Id=NextSourceId++;
 	Streams.Add(Id,Stream); EditQueue.RegisterSource(Id,FTerrainSourceState()); Stream->SourceId=Id;
+	// Captured now and kept after disconnect: settlement cannot depend on a live requester (P-003 §2).
+	SourceOwners.Add(Id,OwnerFromController(Cast<APlayerController>(Stream->GetOwner())));
+	UE_LOG(LogTerrainCore,Log,TEXT("Terrain source %u registered, owner %s."),Id,
+		SourceOwners[Id]==TerrainOwnerNone ? TEXT("NONE (edits will not pay)") : *FString::Printf(TEXT("%016llx"),SourceOwners[Id]));
 	const auto* S=GetDefault<UTerrainSettings>();
 	FTerrainSessionDescriptor D; D.Seed=S->Seed; D.Generator=S->GeneratorVersion; D.VoxelSize=S->VoxelSizeCm;
 	D.Origin=S->TerrainOriginWorld; D.Backend=S->BackendModule;
@@ -51,7 +56,11 @@ void UTerrainService::TickService()
 		NextSubscriptionUpdate=Now+.5;
 	}
 	PumpSnapshots();
-	EditQueue.Pump(Now,QueueCallbacks());
+	TickSettlement();
+	// P-003 §2: at most 32 committed records may await settlement; beyond that, stop executing
+	// new mutations until the ledger catches up. Admission still queues within its own bounds.
+	if (!Settlement || Settlement->Pending() < FTerrainSettlementWorker::MaxPending)
+		EditQueue.Pump(Now,QueueCallbacks());
 
 	// After the pump, never inside it: a capture taken mid-transaction would not be a cut.
 	MaybeCaptureCheckpoint();
@@ -158,7 +167,7 @@ FTerrainQueueCallbacks UTerrainService::QueueCallbacks()
 		// ore -- never found at the test depth -- and only in round 1, so the ore later rounds'
 		// clients hold can only have arrived by snapshot: the material hashes then test
 		// snapshot materials rather than a repeat of the edit script.
-		S.PlacementMaterial=(IsMultiplayerTest() && MultiplayerRoundsCompleted()==0) ? FTerrainMatId(ETerrainMaterial::IronOre) : FTerrainMatId(0);
+		S.PlacementMaterial=(IsMultiplayerTest() && MultiplayerRoundsCompleted()==0) ? FTerrainMatId(ETerrainMaterial::IronOre) : FTerrainMatId(ETerrainMaterial::Fill);
 	};
 	Cb.Validate=[this](const FTerrainOp& Op,const FTerrainSourceState& S) { return ValidateOp(Op,S); };
 	Cb.Apply=[this](const FTerrainOp& Op,FTerrainEditResult& R)
@@ -217,7 +226,12 @@ bool UTerrainService::CommitOp(const FTerrainOp& Op,const FTerrainEditResult& R,
 		Changed.Reserve(R.AffectedChunks.Num());
 		for (const auto& V:Revisions) if (V.After != V.Before) Changed.Add(V);
 
-		if (!CommitJournal->RecordCommit(Op,R,Identity,Changed))
+		// P-010: what this op pays is decided NOW, from its measured result, and written into its
+		// record. Settlement will read exactly this back -- live below, or at boot after a crash.
+		FTerrainCommitIdentity Paid=Identity;
+		if (Settlement) TerrainComputeEconomy(OwnerForSource(Op.SourceId),Op.ToolId,R.Removed,Paid.Economy);
+
+		if (!CommitJournal->RecordCommit(Op,R,Paid,Changed))
 		{
 			bStorageFaulted = true;
 			UE_LOG(LogTerrainCore,Error,
@@ -226,6 +240,8 @@ bool UTerrainService::CommitOp(const FTerrainOp& Op,const FTerrainEditResult& R,
 				Op.OpSeq);
 			return false;
 		}
+		// Durable: hand it to the ledger. Step 4 never gates the broadcast below.
+		if (Settlement && WorldJournal) Settlement->Submit(WorldJournal->TakeLastSettlement());
 	}
 
     NextOpSeq=Op.OpSeq+1;

@@ -101,6 +101,29 @@ evidence and self-review are in `Docs/proposals/P-009-materials-and-physical-yie
   in favour of the colour-keyed id channel.
 - Writer and reviewer were the same agent.
 
+## T-131 breadcrumb (post-CP-018, not yet checkpointed)
+
+**T-131 is implemented, tested and committed. The next `checkpoint` records it.** The spec,
+evidence and self-review are in `Docs/proposals/P-010-settlement-ledger.md`.
+- **Digging pays.** Credits are exact microlitres per material, per owner (BLAKE3 of the net
+  id). They are decided before the journal write, recorded in the record, and settled into a
+  SQLite ledger (new module `EntityStore`, UE's `SQLiteCore` plugin enabled; D-012). The boot
+  pass settles (W, H] from the journal. A missing ledger is refused if the journal ever paid;
+  so is an old ledger copy (W < G).
+- **Mint closed:** players place `Fill` (new material 8, looks like dirt, never pays).
+  Placement stays free, exactly as before.
+- **Finding:** UE's SQLite has no shared memory, so plain WAL silently falls back to DELETE mode
+  (a journal file per transaction). The fix is `locking_mode=EXCLUSIVE` + WAL + FULL, all read
+  back, plus a directory sync after open.
+- Evidence: **42/42** automation. The ledger rolls back whole under a failure at every one of 11
+  statements, and all 25 crash points recover exactly. `Tools/Test-TerrainSettlement.py` passes
+  8 hard kills with the audit matching the journal every time and 5 records paid at boot. It is
+  **mutation-tested** (it fails with the boot pass disabled). MP passes 3 rounds with the audit
+  after each round. The checkpoint, lease, adapter and `-DropOp` tests pass. Both targets build.
+- `DECISIONS` at the checkpoint needs: the P-010 ruling, the `SQLiteCore` plugin plus the
+  `EntityStore` module (the dependency entry), and Fill.
+- Writer and reviewer were the same agent.
+
 ## What is NOT done, stated plainly
 
 - **E-6 has not been measured:** a heavily dug region with a joiner arriving mid-edit. A client
@@ -117,9 +140,8 @@ evidence and self-review are in `Docs/proposals/P-009-materials-and-physical-yie
 
 ## Next safe action
 
-**T-131: the settlement ledger and first inventory, so digging pays** (the second half of gate
-1C, DEF-1 and DEF-6's economic half). The server credits what an edit physically removed, using
-P-003's idempotent entity ledger (SQLite, build step 6). That makes a crash between the journal
-record and the credit neither lose nor duplicate ore. Tool efficiency and the placement debit are
-data, not code. It is R3 and starts with a spec. The item list and conversion numbers are game
-data, so they get sensible placeholder values the Director can retune without code.
+**`checkpoint` is overdue.** T-128 through T-131 are committed but not yet recorded in
+STATE/DECISIONS/BACKLOG/RISKS. After that, the Phase 1 gate's remaining items are **1F**
+(the stress profile, collision, foliage, nav and streaming, and the backend decision) and
+**E-6** (a heavy region with a joiner arriving mid-edit). Owner identity needs a real login
+(Steam or EOS) before inventories are truly per-player.

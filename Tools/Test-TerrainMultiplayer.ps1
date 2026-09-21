@@ -55,6 +55,16 @@ try {
                 if ($entry.Line -notmatch ("clients="+$count+' ')) { throw 'Not all expected clients were verified.' }
             }
             if ($results.Count -ge $Rounds) {
+                # P-010: the server audits its ledger against the journal after every round.
+                $auditDeadline=(Get-Date).AddSeconds(30)
+                do {
+                    $audits=@(Select-String -LiteralPath $serverLog -Pattern '\*\*\*\* Terrain.LedgerAudit: (PASS|FAIL)')
+                    if ($audits.Count -ge $Rounds) { break }
+                    Start-Sleep -Milliseconds 500
+                } while ((Get-Date) -lt $auditDeadline)
+                if ($audits.Count -lt $Rounds) { throw 'The ledger audit did not run after every round.' }
+                foreach ($audit in $audits) { if ($audit.Line -notmatch 'LedgerAudit: PASS') { throw "Ledger audit failed: $($audit.Line)" } }
+                $audits | ForEach-Object { Write-Output $_.Line }
                 $results | ForEach-Object { Write-Output $_.Line }
                 Write-Output "PASS. Evidence: $taskLogDir"
                 break

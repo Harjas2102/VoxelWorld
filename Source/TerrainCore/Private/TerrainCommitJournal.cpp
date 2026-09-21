@@ -66,10 +66,20 @@ bool FTerrainWorldStoreJournal::RecordCommit(
 	Record.IntentDigest = TerrainPersistComputeIntentDigest(
 		Op, Record.TokenDigest, Record.RequestId, Record.ChildOrdinal, Record.ChildCount);
 
-	// DEF-6 is open and no yield exists. NoEconomy is the only intent this prototype may write
-	// (P-003 §2), and the format refuses deltas or a policy version alongside it.
-	Record.EconomyKind          = ETerrainEconomyKind::NoEconomy;
-	Record.EconomyPolicyVersion = 0;
+	// P-010: the economy was decided by the service before this call. Economy needs a real
+	// measurement under it -- a credit computed from an unmeasured Removed list would be invented
+	// -- so without one the record stays NoEconomy whatever the caller asked for.
+	if (bPhysicalMeasured && Identity.Economy.Kind == ETerrainEconomyKind::ExactDeltas)
+	{
+		Record.EconomyKind          = ETerrainEconomyKind::ExactDeltas;
+		Record.EconomyPolicyVersion = Identity.Economy.PolicyVersion;
+		Record.EconomyDeltas        = Identity.Economy.Deltas;
+	}
+	else
+	{
+		Record.EconomyKind          = ETerrainEconomyKind::NoEconomy;
+		Record.EconomyPolicyVersion = 0;
+	}
 
 	if (bPhysicalMeasured)
 	{
@@ -98,7 +108,7 @@ bool FTerrainWorldStoreJournal::RecordCommit(
 		return TerrainIndexKeyFromChunk(A.Key) < TerrainIndexKeyFromChunk(B.Key);
 	});
 
-	const FTerrainStoreResult Result2 = Journal->AppendCommit(Record);
+	const FTerrainStoreResult Result2 = Journal->AppendCommit(Record, &LastSettlement.Digest);
 	if (!Result2.IsOk())
 	{
 		LastError = Result2;
@@ -108,5 +118,9 @@ bool FTerrainWorldStoreJournal::RecordCommit(
 			Op.OpSeq, *Result2.ToString());
 		return false;
 	}
+	LastSettlement.OpSeq                = Op.OpSeq;
+	LastSettlement.EconomyKind          = Record.EconomyKind;
+	LastSettlement.EconomyPolicyVersion = Record.EconomyPolicyVersion;
+	LastSettlement.Deltas               = MoveTemp(Record.EconomyDeltas);
 	return true;
 }

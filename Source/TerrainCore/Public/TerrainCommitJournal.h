@@ -4,6 +4,7 @@
 
 #include "TerrainWorldStore.h"
 #include "TerrainStreamComponent.h"
+#include "TerrainSettlement.h"
 
 /**
  * TerrainCommitJournal.h -- the seam between the live edit path and the journal (P-003 §2).
@@ -87,10 +88,17 @@ public:
 	 */
 	bool bPhysicalMeasured = false;
 
+	/**
+	 * The settlement input of the record the last successful RecordCommit wrote: its OpSeq, the
+	 * digest of the bytes actually appended, and the economy as recorded (P-010).
+	 */
+	FTerrainSettlementInput TakeLastSettlement() { return MoveTemp(LastSettlement); }
+
 	/** The reason the last RecordCommit failed, for a caller that wants to log it. */
 	const FTerrainStoreResult& GetLastError() const { return LastError; }
 
 private:
 	FTerrainWorldStore& Store;
 	FTerrainStoreResult LastError;
+	FTerrainSettlementInput LastSettlement;
 };

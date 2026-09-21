@@ -101,6 +101,7 @@ void UTerrainService::ReceiveTestHashes(UTerrainStreamComponent* Stream,const TA
             EditQueue.MaxQueueAgeSeconds()*1000.,EditQueue.MaxApplySeconds()*1000.);
 		UE_LOG(LogTerrainCore,Display,TEXT("MP.Snapshots sent=%d bytes=%lld"),SnapshotsSent,SnapshotBytesSent);
 		UE_LOG(LogTerrainCore,Display,TEXT("**** MP.Convergence: %s clients=%d chunks=%d committed=%llu ****"),MPFailures ? TEXT("FAIL") : TEXT("PASS"),MPReports,MPKeys.Num(),EditQueue.NextSequence()-1);
+        RunLedgerAudit();   // P-010: every client's credits must equal what the journal recorded
         int32& CompletedRounds=MultiplayerRoundsCompleted();
         int32 Rounds=1; FParse::Value(FCommandLine::Get(),TEXT("TerrainMPRounds="),Rounds);
         if (!MPFailures && ++CompletedRounds<FMath::Clamp(Rounds,1,3))
