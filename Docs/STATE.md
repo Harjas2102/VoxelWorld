@@ -879,8 +879,39 @@ P-003 §5 specifies an incremental off-thread collector with retention pins and 
 protocol, and none of that is built. Journal trimming is untouched and was correctly
 deprioritised — about 49 KB per checkpoint interval against 33 MB of payloads.
 
-**Next: the crash matrix**, then R-015 namespace durability (which is what would let retention
-off its leash), then journal trimming. DEF-1 and DEF-9 remain open.
+**T-125 — the crash matrix (D-040).** P-003 §8's *"inject at every write"*, taken literally: a
+scripted session of nine edits and two checkpoints, replayed **once per mutating write**,
+failing that write and only that write, in two modes — hard failure and torn write. The fault
+device gained `FailAtMutation`, which treats every mutating operation as one ordered sequence,
+because a crash is a *moment* and the per-op-type faults could only express a *kind*.
+
+The assertion is what matters. "Recovery works" is not worth proving; a world that comes back
+holding a state it was never in is worse than one that refuses, because nobody finds out. So the
+reference run records terrain after **every** committed operation and each recovery must equal
+the reference **at its own OpSeq** by chunk hash.
+
+| Outcome over 40 injections | |
+|---|---|
+| recovered to an exact point in real history | **28** (20 losing the tail) |
+| refused to open | 12 — **all during world creation** |
+| landed on a state that never existed | **0** |
+
+The bounded refusal count is the stronger claim: **once a world exists, no single crash made it
+unopenable.** Recovering twice reaches the same head and terrain (§8's repeat-recovery rule).
+
+Note the session has only **20** mutating writes, because packs (D-036) collapse a capture's
+payloads, pages and descriptor into one. Before packs this session would have had over a hundred
+crash points — which is why walking the matrix exhaustively was affordable at all.
+
+**`Restart.CrashMatrix`'s terrain half is satisfied. DEF-1 stays open**: its other half needs
+settlement and SQLite, which are build step 6. And the matrix runs against a memory device
+behind a fault decorator, which models *lost writes* honestly and is **not** power loss —
+that is **R-015**, and no in-process injection can speak to it.
+
+**Next: R-015 namespace durability.** It is now the single gate holding back two things at once:
+retention running for real, and the crash matrix's claims extending from lost writes to power
+loss. After that: production retention (incremental, off-thread, P-003 §5's pins and epochs) and
+journal trimming. DEF-1 and DEF-9 remain open.
 
 ## Drift checks (VISION.md, run at CP-015)
 

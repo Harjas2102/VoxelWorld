@@ -540,9 +540,32 @@ void FTerrainFaultDevice::ClearFaults()
 	}
 }
 
+void FTerrainFaultDevice::FailAtMutation(int32 Index, int32 TearBytes)
+{
+	MutationFaultIndex = Index;
+	MutationTearBytes  = TearBytes;
+}
+
 bool FTerrainFaultDevice::ShouldFail(ETerrainStorageOp Op, const FString& Path, int32& OutTearBytes)
 {
 	++Counts[static_cast<int32>(Op)];
+
+	// The session's mutating writes form one ordered sequence, and a crash happens at one point
+	// in it. Counted before the per-op faults so the two are independent.
+	const bool bMutating = Op == ETerrainStorageOp::WriteNew
+		|| Op == ETerrainStorageOp::OverwriteInPlace
+		|| Op == ETerrainStorageOp::Append
+		|| Op == ETerrainStorageOp::Delete;
+	if (bMutating)
+	{
+		const int32 ThisMutation = Mutations++;
+		if (MutationFaultIndex >= 0 && ThisMutation == MutationFaultIndex)
+		{
+			OutTearBytes = MutationTearBytes;
+			MutationFaultIndex = -1;   // one-shot, like the per-op faults
+			return true;
+		}
+	}
 
 	FFault& Fault = Faults[static_cast<int32>(Op)];
 	if (Fault.Remaining < 0)

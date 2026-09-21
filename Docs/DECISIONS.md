@@ -1462,3 +1462,78 @@ Two of the six findings were places where my code *looked* like it checked somet
 would have passed review by their author, because their author already believed the thing they
 were supposed to prove. That is precisely the shape R-016 names, and it is the argument for
 alternating implementation between agents (**D-028**) rather than treating it as scheduling.
+
+---
+
+## D-040 — The crash matrix, taken literally (2026-09-21)
+
+**Recorded:** CP-015 · **Class:** technical (per **D-023**) · **Architect ruling, logged
+not asked** · **Scope:** T-125 · **Status:** ACCEPTED
+
+### 1. What "crash matrix" had to mean
+
+P-003 §8 asks for injection *"before/after apply, append/flush, every payload/page/descriptor
+write/flush, root overwrite/flush, segment discovery/rotation and every deletion"*, plus repeat
+recovery. The tests that existed each broke **one case somebody had thought of**:
+`Storage.SlotPair` tears a root slot, `Storage.Pack` tears a pack, `Persistence.Retention`
+interrupts a compaction. A handful of chosen cases cannot be that list, because the write nobody
+thought to break is the one that breaks.
+
+So the matrix runs one scripted session — nine edits, two checkpoints — and then runs it again
+**once per mutating write**, failing that write and only that write, walking the sequence index
+by index, in two modes: a hard refusal, and a torn write that lands half on disk and then
+reports failure. The fault device gained `FailAtMutation`, which counts `WriteNew`,
+`OverwriteInPlace`, `Append` and `Delete` as one ordered sequence, because a crash is a *moment*
+and the per-operation-type faults could only express a *kind*.
+
+### 2. The assertion is the point, not the coverage
+
+"Recovery works" is not worth proving. A world that comes back holding a state it was never in
+is **worse** than one that refuses to come back, because nobody finds out.
+
+So the reference run records the exact terrain after every committed operation, and each
+recovered world must equal the reference **at its own OpSeq** — an exact chunk-hash comparison.
+Recovery may lose the tail (a crash before a record was durable means the edit did not happen,
+which is exactly what the commit ordering promises). It may lose nothing. It may refuse. It may
+**not** land between two operations, ahead of the journal, or on terrain that never existed.
+
+### 3. Result
+
+**40 injections over 20 mutating writes, in both modes.**
+
+| Outcome | Count |
+|---|---|
+| recovered to an exact point in real history | **28** (20 of them losing the tail) |
+| refused to open | 12 — **all of them crashes during world creation** |
+| landed on a state that never existed | **0** |
+
+The refusal count is bounded rather than merely reported, and that is the stronger claim:
+**once a world has been created, no single crash made it unopenable.** A crash partway through
+creation leaves nothing to open, which costs nothing because nothing was there. Every crash
+after that point was survived by the two-slot root, the torn-tail rule, or
+unreferenced-garbage containment. Recovering twice reaches the same head and the same terrain,
+which is P-003 §8's repeat-recovery requirement.
+
+### 4. An observation worth recording about packs
+
+The session has only **20** mutating writes, and that is because of **D-036**: a capture writes
+one pack instead of one file per payload, page and descriptor. Before packs this same session
+would have had well over a hundred crash points.
+
+That cuts both ways and both directions are good. The matrix is far cheaper to walk exhaustively
+— which is why walking it exhaustively was affordable at all. And each surviving write carries
+much more, so the crash-safety argument now rests on fewer, larger, better-understood steps: a
+pack is durable before the root slot that names it, or it is unreferenced garbage. Fewer places
+to be wrong is the same property that made §11's six-operation device surface worth having.
+
+### 5. What this does and does not close
+
+`Restart.CrashMatrix`'s **terrain half is satisfied**. Its other half — *"no duplicated or
+missing payout, no durable ore without durable removal"* — needs settlement and SQLite, which
+are build step 6 and do not exist, so **DEF-1 stays open** and the criterion is not met.
+
+The matrix runs against `FTerrainMemoryStorageDevice` behind the fault decorator. That is an
+honest model of *lost writes*, and it is **not** power loss: whether a file's name survives a
+power cut is **R-015**, unproven, and no amount of in-process injection can speak to it. The
+matrix proves the protocol handles the failures it is given; R-015 is about whether the platform
+gives it the failures we assume.

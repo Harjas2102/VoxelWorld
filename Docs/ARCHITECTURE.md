@@ -1032,12 +1032,21 @@ that single loss defeats both retained generations at once. Every other failure 
 leaves a fallback; this one would not. Content addressing makes a *process* crash harmless here,
 and that is not the same claim.
 
-**What does not exist.** Production retention — the pass is synchronous on the game thread,
-scheduled by hand, and is not P-003 §5's incremental off-thread collector with pins and epochs;
-journal trimming; spread publication (still one step, 0.035 s at the trigger); Empty/SparseDiff
-compaction (P-003 §6 rules it out until a backend can state its own base); settlement; SQLite;
-the exclusive-writer lease P-003 §5 requires; and the crash matrix. Build step 4 is not complete
-and DEF-1/9 remain open — **DEF-9 is not closed by this increment.**
+**The crash matrix exists for terrain (D-040).** Every mutating write of a scripted session is
+failed in turn, hard and torn, and each recovery must equal the reference world **at its own
+OpSeq** by chunk hash — not merely open. 28 of 40 injections recovered to an exact point in real
+history; the other 12 refused, and all of those were crashes *during world creation*. **No
+established world was made unopenable by any single crash.** It models lost writes, not power
+loss: that is R-015 and remains unproven.
+
+**What does not exist.** R-015 namespace durability — now the single gate holding back both
+real retention and any power-loss claim; production retention (the pass is synchronous on the
+game thread, scheduled by hand, and is not P-003 §5's incremental off-thread collector with pins
+and epochs); journal trimming; spread publication (still one step, 0.035 s at the trigger);
+Empty/SparseDiff compaction (P-003 §6 rules it out until a backend can state its own base);
+settlement; SQLite; and the exclusive-writer lease P-003 §5 requires. Build step 4 is not
+complete: **DEF-1 and DEF-9 remain open**, and `Restart.CrashMatrix`'s payout half needs
+settlement at build step 6.
 
 - **Commit:** journal append + durable flush precedes terrain broadcast and
   TerrainCommitted; SQLite settlement follows, with idempotent `(WorldId, OpSeq)`
@@ -1574,6 +1583,7 @@ Run against `FMemoryTerrainBackend`. Seconds, on every build.
 | `Persistence.Checkpoint.Equivalence` | **Implemented, passing — the cut that bounds replay.** Six edits, a capture at G=6, then a restart that restores the cut and replays **none** of them; three more edits and a second restart that replays **exactly three**. Every case ends in chunk-hash equality, because a checkpoint that bounded replay while losing terrain would be worse than none. Also covers a second capture after a replay-restart (the case where a chunk edited before the restart must still reach the next cut), and P-003 §4's sentinel trap: a dirty chunk that is not resident fails the capture rather than being published as unchanged |
 | `Persistence.Capture.Pump` | **Implemented, passing.** A checkpoint taken while the world keeps changing: a part-finished capture is interleaved with edits that hit chunks it still owes, and the restored checkpoint is the world **at G**, not as it is now. The interleaving is asserted rather than assumed — copy-before-write must actually have fired, and the live world must actually have moved on, so the match cannot pass vacuously. Also: a zero budget still makes progress, and an abandoned capture publishes nothing and leaves no open batch |
 | `Persistence.Retention` | **Implemented, passing.** Mark-and-sweep with the safety cases that matter: a damaged root slot after Open cannot authorise deletion from a stale healthy cache; a missing payload reference and a wrong root-page length each refuse with **every device byte unchanged**; a failed replacement write, a torn replacement and a failed original deletion are each injected, after which **both** retained generations still restore through the ordinary path and reclamation retries successfully in the same open store. The older generation's terrain is compared by hash, not merely computed |
+| `Persistence.CrashMatrix` | **Implemented, passing.** P-003 §8's *"inject at every write"*, taken literally: a scripted session of nine edits and two checkpoints is replayed once per mutating write, failing that write and only that write — **hard failure and torn write at every index**. The reference run records terrain after every committed operation, and each recovery must equal the reference at **its own OpSeq**, not merely open. 28 of 40 injections recovered to an exact point in real history (20 losing the tail, which is what the commit ordering promises); the other 12 refused to open and **all of those were crashes during world creation**, before a world existed. **No established world was made unopenable by any single crash.** Recovering twice reaches the same head and the same terrain |
 | `Persistence.Commit.Journal` | **Implemented, passing.** What a committed operation becomes as a record: `NoEconomy`; `PhysicalAvailability = Unavailable` with an **empty** list even when the backend reported volumes, because the production adapter's materials are zero and P-003 §2 forbids encoding unknown as a measured zero; changed keys sorted into index-key order rather than footprint order; every changed revision advancing by exactly one; a zero token digest, because protocol 2 does not exist. Also that the queue treats the sequence as **provisional** and does not consume it when a commit is refused, and that a storage-faulted service closes admission with `ShuttingDown`. **Does not cover `CommitOp`'s internal ordering** — see the note below the table |
 | `Persistence.Journal.Writer` | **Implemented, passing.** Create, append, seal and rotate, with every claim about the written bytes checked by the **scanner** rather than by the writer's own state. Covers: state recovered across a reopen; a sequence gap, a repeat and a foreign `WorldTag` all refused; rotation sealing its predecessor and carrying continuity evidence at both ends; a **torn append** closing the writer and still refusing to append after a reopen; an interrupted rotation leaving an ignorable **orphan** with no acknowledged record lost; a newer unanchored **non-empty** segment refusing boot; a named-but-**missing** segment refusing boot rather than reporting an empty journal |
 | `Persistence.WorldStore.Lifecycle` | **Implemented, passing.** Create → open → append → publish checkpoint → reopen, on one directory. A fresh world is **7 files**. Covers: the base descriptor's self-referential digest; root generation advancing; a **torn root publication** leaving the previous checkpoint current with redundancy reported broken, then repaired by republishing; a checkpoint beyond the journal head refusing to open; a cross-wired world (this world's base in front of another world's roots) refused with `WorldMismatch` |
@@ -1624,7 +1634,7 @@ nothing on the command line. The table names the assertion; the prefix names the
 | `Yield.Volume` | Remove r = 2 m in homogeneous stone; `Σ Δocc × V` within tolerance of `4/3 π r³` | R-004 |
 | `Yield.MixedGeology` | Partial, overlapping and strata-boundary digs account correctly | R-004 |
 | `Restart.Identity` | Dig, shut down, boot, compare every chunk hash. **Satisfied for the journal and checkpoint paths.** `Tools/Test-TerrainCheckpoint.py` launches the real game four times against the production backend and compares **all eight affected chunk hashes** across every launch: identical, with capture off and on, and run 4 restores the G=6 cut and replays zero edits. A wrong-base boot closes terrain access and leaves every save file byte-identical. Still outstanding: the same comparison after a *crash* rather than a clean exit, which is `Restart.CrashMatrix` | R-003 |
-| `Restart.CrashMatrix` | Crash injected before and after every durable boundary; no duplicated or missing payout, no durable ore without durable removal | R-003, DEF-1 |
+| `Restart.CrashMatrix` | Crash injected before and after every durable boundary; no duplicated or missing payout, no durable ore without durable removal | R-003, DEF-1 — **terrain half satisfied** by `Persistence.CrashMatrix`: every mutating write of a scripted session failed in turn, hard and torn, and every recovery matched the reference world at its own OpSeq exactly. The payout/ore half needs settlement, which is build step 6 |
 | `Save.Growth` | 1,000 scripted edits; bytes/edit, snapshot size after compaction, compaction wall time | R-003 |
 
 ### 6.3 Multiplayer PIE / standalone — the T-101B gate proper

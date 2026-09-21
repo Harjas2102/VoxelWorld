@@ -260,6 +260,24 @@ public:
 	void TearAfter(ETerrainStorageOp Op, int32 CountBefore, int32 TearBytes, const FString& PathFilter = FString());
 	void ClearFaults();
 
+	/**
+	 * Fails the Nth **mutating** operation of the session, counting WriteNew, OverwriteInPlace,
+	 * Append and Delete together as one sequence (P-003 §8).
+	 *
+	 * The per-op-type faults above can crash a chosen kind of write. This crashes a chosen
+	 * *moment*, which is what a crash actually is: a session does its writes in one order, and
+	 * the matrix walks that order one index at a time. Without it, "inject at every write and
+	 * flush point" has to be approximated by a handful of hand-picked cases, and the points
+	 * nobody thought of are exactly the ones that break.
+	 *
+	 * `TearBytes >= 0` truncates that write instead of skipping it, which is the failure the
+	 * two-slot and torn-tail protocols exist to survive. Negative index disables.
+	 */
+	void FailAtMutation(int32 Index, int32 TearBytes = -1);
+
+	/** Mutating operations attempted so far, over all four kinds. */
+	int32 MutationCount() const { return Mutations; }
+
 	int32 OpCount(ETerrainStorageOp Op) const { return Counts[static_cast<int32>(Op)]; }
 
 	virtual ETerrainStorageResult EnsureDirectory(const FString& RelativePath) override;
@@ -286,6 +304,10 @@ private:
 	ITerrainStorageDevice& Inner;
 	FFault Faults[static_cast<int32>(ETerrainStorageOp::Count)];
 	mutable int32 Counts[static_cast<int32>(ETerrainStorageOp::Count)] = {};
+
+	int32 Mutations = 0;             // WriteNew + OverwriteInPlace + Append + Delete, in order
+	int32 MutationFaultIndex = -1;   // which one to fail; -1 disables
+	int32 MutationTearBytes = -1;
 };
 
 // ---- the content-addressed object store ---------------------------------
