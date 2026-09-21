@@ -280,6 +280,11 @@ void UTerrainService::CloseWorldStore()
 {
 	check(IsInGameThread());
 
+	// Abandon any capture BEFORE the store goes away: the pump holds raw pointers to the store
+	// and backend for as long as it is running, and it has an open pack batch to discard.
+	// Nothing it buffered was ever durable, so the world simply still owes a checkpoint.
+	CapturePump.Abandon();
+
 	// Detach FIRST: the commit path must never hold a pointer to a store that is going away,
 	// and teardown can run while the queue still has work to cancel.
 	SetCommitJournal(nullptr);
@@ -295,8 +300,27 @@ void UTerrainService::MaybeCaptureCheckpoint()
 {
 	check(IsInGameThread());
 
+	const UTerrainSettings* Settings = GetDefault<UTerrainSettings>();
+
+	// --- 1. a capture already in flight gets its slice of this frame ------------------------
+	//
+	// This runs BEFORE the start gate and regardless of the queue, because the whole point of
+	// the pump is that a capture makes progress while edits keep flowing. It does not need a
+	// quiescent moment: every chunk it still owes is protected by copy-before-write.
+	if (CapturePump.IsActive())
+	{
+		const double BudgetSeconds =
+			FMath::Clamp(Settings->CheckpointPumpMillisPerFrame, 0.05, 50.0) / 1000.0;
+		if (CapturePump.Advance(BudgetSeconds))
+		{
+			FinishCapture();
+		}
+		return;
+	}
+
+	// --- 2. otherwise, decide whether to take a new cut --------------------------------------
 	// Nothing to capture into, nothing to capture, or something still executing. The last is
-	// the one that matters: a capture taken while a transaction is part-applied would record a
+	// the one that matters: a cut taken while a transaction is part-applied would record a
 	// world that never existed at any single sequence.
 	if (WorldStore == nullptr || !WorldStore->IsOpen() || CommitJournal == nullptr || bStorageFaulted)
 	{
@@ -306,17 +330,10 @@ void UTerrainService::MaybeCaptureCheckpoint()
 	{
 		return;
 	}
-
-	const UTerrainSettings* Settings = GetDefault<UTerrainSettings>();
-	if (!Settings->bCheckpointCapture)
+	if (!Settings->bCheckpointCapture || bCheckpointDisabled)
 	{
-		// On by default since the cost was measured at the trigger this fires at: 0.162 s for
-		// 256 chunks (D-036). See the setting for the trade and for the tail it does not fix.
-		return;
-	}
-
-	if (bCheckpointDisabled)
-	{
+		// On by default since the cost was measured at the trigger this fires at (D-037). See
+		// the setting for the trade.
 		return;
 	}
 
@@ -332,29 +349,42 @@ void UTerrainService::MaybeCaptureCheckpoint()
 	// not recorded would make replay start after edits nobody wrote down.
 	const FTerrainOpSeq G = WorldStore->GetJournal()->GetHead();
 
-	FTerrainCheckpointStats Stats;
-	const FTerrainStoreResult Captured = TerrainCaptureCheckpoint(
-		*WorldStore, *Backend, *RevisionIndex, DirtyChunks, G,
-		FDateTime::UtcNow().ToUnixTimestamp() * 1000, Stats);
+	// The dirty set is handed over wholesale and ours is cleared: from this instant, edits
+	// accumulate for the NEXT checkpoint. A chunk edited during the capture belongs to both --
+	// this one records its state at G, the next records what the edit made of it.
+	TMap<FTerrainChunkKey, FTerrainOpSeq> Cut = MoveTemp(DirtyChunks);
+	DirtyChunks.Reset();
 
-	if (!Captured.IsOk())
+	const FTerrainStoreResult Started = CapturePump.Begin(
+		*WorldStore, *Backend, *RevisionIndex, MoveTemp(Cut), G,
+		FDateTime::UtcNow().ToUnixTimestamp() * 1000);
+
+	if (!Started.IsOk() || !CapturePump.IsActive())
 	{
-		// Deliberately NOT a storage fault. The previous root slot is untouched -- publication
-		// writes the inactive one -- and the journal is intact, so the world is still fully
-		// recoverable and simply has more to replay. Closing terrain access would cost the
-		// player their session over the cheapest failure in the system.
-		//
-		// Retrying is not an option either: the trigger is still satisfied, so a synchronous
-		// capture would run every tick. Try once, say so once, keep playing.
-		bCheckpointDisabled = true;
-		UE_LOG(LogTerrainCore, Error,
-			TEXT("Terrain checkpoint at G=%llu failed (%s). The previous checkpoint and the ")
-			TEXT("journal are both intact, so nothing is lost and the world stays playable -- ")
-			TEXT("but this session will take no further checkpoints, and the next startup will ")
-			TEXT("have more to replay."),
-			G, *Captured.ToString());
+		// Either it refused to start, or the dirty set was empty and it published immediately.
+		FinishCapture();
+	}
+}
+
+void UTerrainService::FinishCapture()
+{
+	if (CapturePump.Result().IsOk())
+	{
 		return;
 	}
 
-	DirtyChunks.Reset();
+	// Deliberately NOT a storage fault. The previous root slot is untouched -- publication
+	// writes the inactive one -- and the journal is intact, so the world is still fully
+	// recoverable and simply has more to replay. Closing terrain access would cost the player
+	// their session over the cheapest failure in the system.
+	//
+	// Retrying is not an option either: the trigger is still satisfied, so a capture would
+	// start again every tick. Try once, say so once, keep playing.
+	bCheckpointDisabled = true;
+	UE_LOG(LogTerrainCore, Error,
+		TEXT("Terrain checkpoint at G=%llu failed (%s). The previous checkpoint and the journal ")
+		TEXT("are both intact, so nothing is lost and the world stays playable -- but this ")
+		TEXT("session will take no further checkpoints, and the next startup will have more to ")
+		TEXT("replay."),
+		CapturePump.Stats().G, *CapturePump.Result().ToString());
 }

@@ -135,6 +135,21 @@ public:
 	bool bCheckpointCapture = true;
 
 	/**
+	 * Game-thread milliseconds a checkpoint may spend per frame reading and encoding chunks.
+	 *
+	 * The pump spreads capture across frames (P-003 section 4, DEF-2), so this is the knob that
+	 * decides how visible it is. At the measured ~0.35 ms per chunk, 2 ms buys roughly five or
+	 * six chunks a frame and clears a full 256-chunk trigger in about fifty frames -- under a
+	 * second of wall time, none of it a hitch.
+	 *
+	 * Raising it finishes captures sooner at the cost of a bigger per-frame bite; lowering it
+	 * makes captures gentler and longer. It does **not** bound publication, which is one
+	 * unbroken step at the end and measured 0.041 s at the 256-chunk trigger.
+	 */
+	UPROPERTY(config, EditAnywhere, Category = "Terrain|Persistence", meta = (ClampMin = "0.05", ClampMax = "50.0"))
+	double CheckpointPumpMillisPerFrame = 2.0;
+
+	/**
 	 * Dirty chunks that trigger a checkpoint, when `bCheckpointCapture` is on.
 	 *
 	 * P-003 section 4's soft trigger is 256. A larger value means rarer, longer stalls and a

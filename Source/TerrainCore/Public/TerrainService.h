@@ -216,6 +216,9 @@ private:
 	 */
 	void MaybeCaptureCheckpoint();
 
+	/** Handles a capture that has just ended, successfully or not. */
+	void FinishCapture();
+
 	/**
 	 * Chunks changed since the last checkpoint.
 	 *
@@ -240,6 +243,15 @@ private:
 	 * So: try once, say so once, and keep playing without checkpoints.
 	 */
 	bool bCheckpointDisabled = false;
+
+	/**
+	 * The in-progress checkpoint, if any (P-003 §4, DEF-2).
+	 *
+	 * Capture is no longer one synchronous call. The cut is taken once, the chunks are read and
+	 * encoded a few per frame, and edits keep flowing throughout -- with any chunk an edit is
+	 * about to change captured first, from its pre-edit state, by `NoticeWrite`.
+	 */
+	FTerrainCapturePump CapturePump;
 
 	TUniquePtr<FTerrainPlatformStorageDevice> StorageDevice;
 	TUniquePtr<FTerrainWorldStore>            WorldStore;

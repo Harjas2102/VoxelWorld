@@ -41,31 +41,35 @@ void FTerrainResidencyPins::Pin(
 	Backend.SetStreamingInterest(Interest);
 }
 
-FTerrainStoreResult TerrainCaptureCheckpoint(
-	FTerrainWorldStore& Store,
-	ITerrainBackend& Backend,
-	const FTerrainRevisionIndex& Revisions,
-	const TMap<FTerrainChunkKey, FTerrainOpSeq>& DirtyKeys,
-	FTerrainOpSeq G,
-	int64 UtcMillis,
-	FTerrainCheckpointStats& OutStats)
-{
-	OutStats = FTerrainCheckpointStats();
-	OutStats.G = G;
-	OutStats.DirtyKeys = DirtyKeys.Num();
-	const double Started = FPlatformTime::Seconds();
+// ---- the incremental capture pump (P-003 §4, DEF-2) ---------------------
 
-	if (!Store.IsOpen())
+FTerrainStoreResult FTerrainCapturePump::Begin(
+	FTerrainWorldStore& InStore,
+	ITerrainBackend& InBackend,
+	const FTerrainRevisionIndex& InRevisions,
+	TMap<FTerrainChunkKey, FTerrainOpSeq>&& DirtyKeys,
+	FTerrainOpSeq InG,
+	int64 InUtcMillis)
+{
+	checkf(!bActive, TEXT("A capture is already in progress on this pump."));
+
+	CaptureStats = FTerrainCheckpointStats();
+	CaptureStats.G = InG;
+	CaptureStats.DirtyKeys = DirtyKeys.Num();
+	FinalResult = FTerrainStoreResult::Ok();
+	bFinished = false;
+	Updates.Reset();
+
+	if (!InStore.IsOpen())
 	{
 		return FTerrainStoreResult::Io(ETerrainStorageResult::NotFound);
 	}
 
-	const FTerrainPersistIdentity& Identity = Store.GetState().Identity;
-	const FTerrainBaseDescriptor&  Base     = Store.GetState().Base;
-
 	// A cut may repeat when nothing changed, but it may never go backwards -- a checkpoint
 	// older than the current one would make replay redo work it has already durably passed.
-	if (G < Store.GetState().Checkpoint.G || !Store.GetJournal() || G != Store.GetJournal()->GetHead())
+	if (InG < InStore.GetState().Checkpoint.G
+		|| !InStore.GetJournal()
+		|| InG != InStore.GetJournal()->GetHead())
 	{
 		return FTerrainStoreResult::Bad(ETerrainPersistError::OrderViolation);
 	}
@@ -74,133 +78,219 @@ FTerrainStoreResult TerrainCaptureCheckpoint(
 		return FTerrainStoreResult::Bad(ETerrainPersistError::FieldOutOfRange);
 	}
 
-	/**
-	 * Everything below is written into ONE pack with ONE flush, committed by PublishCheckpoint
-	 * immediately before the root slot (P-004 §13). Measured: an fsync costs ~3 ms whatever its
-	 * size, a capture over 8 chunks produced 59 objects, and 49 of those were index pages
-	 * holding 7 KB between them -- 0.168 s to write 7 KB. Deferring the flushes does not help
-	 * (155.8 ms held open vs 151.6 ms eager, measured); writing one file does (2.3 ms).
-	 *
-	 * The guard makes the batch strictly scoped: every early return below abandons it, and
-	 * nothing buffered was ever durable, so an abandoned capture leaves the store exactly as it
-	 * found it rather than leaving loose objects behind.
-	 */
-	struct FBatchGuard
+	Store     = &InStore;
+	Backend   = &InBackend;
+	Revisions = &InRevisions;
+	G         = InG;
+	PrevG     = InStore.GetState().Checkpoint.G;
+	UtcMillis = InUtcMillis;
+	Pending   = MoveTemp(DirtyKeys);
+
+	StartedAt = FPlatformTime::Seconds();
+
+	// Everything this capture writes goes into ONE pack with ONE flush, committed by
+	// PublishCheckpoint immediately before the root slot (P-004 §13). The batch stays open
+	// across frames for as long as the capture runs.
+	Store->GetObjects().BeginBatch();
+
+	bActive = true;
+
+	// An empty dirty set is a legitimate capture: it republishes the same logical checkpoint
+	// at a newer G, which is what lets a quiet world stop replaying the tail it has already
+	// checkpointed.
+	if (Pending.Num() == 0)
 	{
-		FTerrainFileObjectStore& Store;
-		explicit FBatchGuard(FTerrainFileObjectStore& InStore) : Store(InStore) { Store.BeginBatch(); }
-		~FBatchGuard() { Store.AbandonBatch(); }
-	} BatchGuard(Store.GetObjects());
+		Finish();
+	}
+	return FinalResult;
+}
 
-	// --- 1. every dirty chunk becomes an immutable payload object ---------------------------
-	TArray<FTerrainIndexUpdate> Updates;
-	Updates.Reserve(DirtyKeys.Num());
-
-	for (const auto& Dirty : DirtyKeys)
+void FTerrainCapturePump::NoticeWrite(TConstArrayView<FTerrainChunkKey> Keys)
+{
+	if (!bActive || Pending.Num() == 0)
 	{
-		const FTerrainChunkKey& Key = Dirty.Key;
-
-		// P-003 §4's sentinel trap, guarded in the only place it can be: a nonresident chunk
-		// reads as a successful default Empty on one backend and as a failure on another, and
-		// NEITHER means "this chunk still matches the base".
-		if (!Backend.IsRegionResident(Key))
-		{
-			UE_LOG(LogTerrainCore, Error,
-				TEXT("Checkpoint: chunk (%d,%d,%d) is dirty but not resident. It cannot be read, ")
-				TEXT("and publishing it as unchanged would lose the edits that dirtied it."),
-				Key.X, Key.Y, Key.Z);
-			return FTerrainStoreResult::Bad(ETerrainPersistError::EncodingNotPermitted);
-		}
-
-		FTerrainRegionData Region;
-		const double ReadStarted = FPlatformTime::Seconds();
-		const bool bRead = Backend.ReadRegion(Key, Region);
-		OutStats.ReadSeconds += FPlatformTime::Seconds() - ReadStarted;
-		if (!bRead
-			|| Region.Encoding != ETerrainRegionEncoding::Dense
-			|| Region.Payload.Num() != TerrainPersistDenseBytes)
-		{
-			UE_LOG(LogTerrainCore, Error,
-				TEXT("Checkpoint: chunk (%d,%d,%d) did not read back as a complete Dense region."),
-				Key.X, Key.Y, Key.Z);
-			return FTerrainStoreResult::Bad(ETerrainPersistError::EncodingNotPermitted);
-		}
-
-		FTerrainChunkPayloadRecord Record;
-		Record.Key              = Key;
-		Record.Rev              = Revisions.GetRevision(Key);
-		Record.LastOpSeq        = Dirty.Value;
-		Record.Encoding         = ETerrainRegionEncoding::Dense;
-		Record.GeneratorVersion = Base.GeneratorVersion;
-		Record.ValueConfig      = Base.ValueConfig;
-		Record.Dense            = MoveTemp(Region.Payload);
-		if (Record.Rev == 0 || Dirty.Value <= Store.GetState().Checkpoint.G || Dirty.Value > G)
-		{
-			return FTerrainStoreResult::Bad(ETerrainPersistError::OrderViolation);
-		}
-
-		const double EncodeStarted = FPlatformTime::Seconds();
-		TArray<uint8> Body;
-		const ETerrainPersistError BodyError = TerrainPersistEncodeChunkPayloadBody(Record, Body);
-		if (BodyError != ETerrainPersistError::None)
-		{
-			return FTerrainStoreResult::Bad(BodyError);
-		}
-
-		TArray<uint8> Object;
-		const ETerrainPersistError ObjectError = TerrainPersistEncodeObject(
-			ETerrainPersistObjectType::ChunkPayload, Identity, Body, Object);
-		if (ObjectError != ETerrainPersistError::None)
-		{
-			return FTerrainStoreResult::Bad(ObjectError);
-		}
-
-		const FTerrainDigest Digest = TerrainPersistDigest(Object);
-		OutStats.EncodeSeconds += FPlatformTime::Seconds() - EncodeStarted;
-
-		const double StoreStarted = FPlatformTime::Seconds();
-		const bool bStored = Store.GetObjects().StoreObject(Digest, Object);
-		OutStats.StoreSeconds += FPlatformTime::Seconds() - StoreStarted;
-		if (!bStored)
-		{
-			return FTerrainStoreResult::Io(ETerrainStorageResult::IoError);
-		}
-
-		FTerrainIndexUpdate Update;
-		Update.Key                 = Key;
-		Update.Value.Encoding      = ETerrainRegionEncoding::Dense;
-		Update.Value.Rev           = Record.Rev;
-		Update.Value.LastOpSeq     = Record.LastOpSeq;
-		Update.Value.PayloadLength = static_cast<uint32>(Object.Num());
-		Update.Value.PayloadDigest = Digest;
-		Updates.Add(Update);
-
-		++OutStats.ChunksWritten;
-		OutStats.PayloadBytes += Object.Num();
+		return;
 	}
 
-	// --- 2. the index, path-copied from the checkpoint currently published --------------------
+	for (const FTerrainChunkKey& Key : Keys)
+	{
+		if (const FTerrainOpSeq* LastOpSeq = Pending.Find(Key))
+		{
+			// Encoded from its PRE-EDIT state, because the caller has not applied the edit yet.
+			// This is copy-before-write: the chunk leaves the pending set having been recorded
+			// as it was at G, and the edit is then free to change it.
+			const FTerrainOpSeq Seq = *LastOpSeq;
+			if (!CaptureOne(Key, Seq))
+			{
+				return;   // Fail() has already ended the capture
+			}
+			++CaptureStats.CopiedBeforeWrite;
+		}
+	}
+}
+
+bool FTerrainCapturePump::Advance(double BudgetSeconds)
+{
+	if (!bActive)
+	{
+		return bFinished;
+	}
+
+	const double Deadline = FPlatformTime::Seconds() + FMath::Max(0.0, BudgetSeconds);
+	bool bDidOne = false;
+	while (Pending.Num() > 0)
+	{
+		// **At least one chunk per call, always.** The budget is checked between chunks -- a
+		// chunk is never half encoded, so one chunk may overrun it -- but a pump that can make
+		// zero progress is a pump that can never finish, and a budget smaller than one chunk's
+		// cost would starve the capture forever. Forward progress is not negotiable; the budget
+		// only decides how much MORE than one chunk a frame does.
+		if (bDidOne && FPlatformTime::Seconds() >= Deadline)
+		{
+			return false;
+		}
+		bDidOne = true;
+
+		const auto It = Pending.CreateConstIterator();
+		const FTerrainChunkKey Key = It.Key();
+		const FTerrainOpSeq    Seq = It.Value();
+		if (!CaptureOne(Key, Seq))
+		{
+			return true;   // failed and finished
+		}
+	}
+
+	Finish();
+	return true;
+}
+
+bool FTerrainCapturePump::CaptureOne(const FTerrainChunkKey& Key, FTerrainOpSeq LastOpSeq)
+{
+	check(bActive);
+
+	const FTerrainPersistIdentity& Identity = Store->GetState().Identity;
+	const FTerrainBaseDescriptor&  Base     = Store->GetState().Base;
+
+	// P-003 §4's sentinel trap, guarded in the only place it can be: a nonresident chunk reads
+	// as a successful default Empty on one backend and as a failure on another, and NEITHER
+	// means "this chunk still matches the base".
+	if (!Backend->IsRegionResident(Key))
+	{
+		UE_LOG(LogTerrainCore, Error,
+			TEXT("Checkpoint: chunk (%d,%d,%d) is dirty but not resident. It cannot be read, ")
+			TEXT("and publishing it as unchanged would lose the edits that dirtied it."),
+			Key.X, Key.Y, Key.Z);
+		Fail(FTerrainStoreResult::Bad(ETerrainPersistError::EncodingNotPermitted));
+		return false;
+	}
+
+	FTerrainRegionData Region;
+	const double ReadStarted = FPlatformTime::Seconds();
+	const bool bRead = Backend->ReadRegion(Key, Region);
+	CaptureStats.ReadSeconds += FPlatformTime::Seconds() - ReadStarted;
+
+	if (!bRead
+		|| Region.Encoding != ETerrainRegionEncoding::Dense
+		|| Region.Payload.Num() != TerrainPersistDenseBytes)
+	{
+		UE_LOG(LogTerrainCore, Error,
+			TEXT("Checkpoint: chunk (%d,%d,%d) did not read back as a complete Dense region."),
+			Key.X, Key.Y, Key.Z);
+		Fail(FTerrainStoreResult::Bad(ETerrainPersistError::EncodingNotPermitted));
+		return false;
+	}
+
+	const double EncodeStarted = FPlatformTime::Seconds();
+
+	FTerrainChunkPayloadRecord Record;
+	Record.Key              = Key;
+	Record.Rev              = Revisions->GetRevision(Key);
+	Record.LastOpSeq        = LastOpSeq;
+	Record.Encoding         = ETerrainRegionEncoding::Dense;
+	Record.GeneratorVersion = Base.GeneratorVersion;
+	Record.ValueConfig      = Base.ValueConfig;
+	Record.Dense            = MoveTemp(Region.Payload);
+
+	if (Record.Rev == 0 || LastOpSeq <= PrevG || LastOpSeq > G)
+	{
+		Fail(FTerrainStoreResult::Bad(ETerrainPersistError::OrderViolation));
+		return false;
+	}
+
+	TArray<uint8> Body;
+	const ETerrainPersistError BodyError = TerrainPersistEncodeChunkPayloadBody(Record, Body);
+	if (BodyError != ETerrainPersistError::None)
+	{
+		Fail(FTerrainStoreResult::Bad(BodyError));
+		return false;
+	}
+
+	TArray<uint8> Object;
+	const ETerrainPersistError ObjectError = TerrainPersistEncodeObject(
+		ETerrainPersistObjectType::ChunkPayload, Identity, Body, Object);
+	if (ObjectError != ETerrainPersistError::None)
+	{
+		Fail(FTerrainStoreResult::Bad(ObjectError));
+		return false;
+	}
+
+	const FTerrainDigest Digest = TerrainPersistDigest(Object);
+	CaptureStats.EncodeSeconds += FPlatformTime::Seconds() - EncodeStarted;
+
+	const double StoreStarted = FPlatformTime::Seconds();
+	const bool bStored = Store->GetObjects().StoreObject(Digest, Object);
+	CaptureStats.StoreSeconds += FPlatformTime::Seconds() - StoreStarted;
+	if (!bStored)
+	{
+		Fail(FTerrainStoreResult::Io(ETerrainStorageResult::IoError));
+		return false;
+	}
+
+	FTerrainIndexUpdate Update;
+	Update.Key                 = Key;
+	Update.Value.Encoding      = ETerrainRegionEncoding::Dense;
+	Update.Value.Rev           = Record.Rev;
+	Update.Value.LastOpSeq     = Record.LastOpSeq;
+	Update.Value.PayloadLength = static_cast<uint32>(Object.Num());
+	Update.Value.PayloadDigest = Digest;
+	Updates.Add(Update);
+
+	++CaptureStats.ChunksWritten;
+	CaptureStats.PayloadBytes += Object.Num();
+
+	Pending.Remove(Key);
+	return true;
+}
+
+void FTerrainCapturePump::Finish()
+{
+	check(bActive);
+
+	const FTerrainPersistIdentity& Identity = Store->GetState().Identity;
+
+	// --- the index, path-copied from the checkpoint currently published ---------------------
 	FTerrainIndexRoot OldRoot;
-	OldRoot.bHasRootPage   = Store.GetState().Checkpoint.bHasRootPage;
-	OldRoot.RootPageDigest = Store.GetState().Checkpoint.RootPageDigest;
-	OldRoot.RootPageLength = Store.GetState().Checkpoint.RootPageLength;
+	OldRoot.bHasRootPage   = Store->GetState().Checkpoint.bHasRootPage;
+	OldRoot.RootPageDigest = Store->GetState().Checkpoint.RootPageDigest;
+	OldRoot.RootPageLength = Store->GetState().Checkpoint.RootPageLength;
 
 	FTerrainIndexRoot NewRoot;
 	const double IndexStarted = FPlatformTime::Seconds();
 	const ETerrainPersistError IndexError = TerrainIndexApply(
-		Identity, Store.GetObjects(), Store.GetObjects(), OldRoot, Updates,
-		NewRoot, OutStats.IndexPagesWritten);
-	OutStats.IndexSeconds = FPlatformTime::Seconds() - IndexStarted;
+		Identity, Store->GetObjects(), Store->GetObjects(), OldRoot, Updates,
+		NewRoot, CaptureStats.IndexPagesWritten);
+	CaptureStats.IndexSeconds = FPlatformTime::Seconds() - IndexStarted;
 	if (IndexError != ETerrainPersistError::None)
 	{
-		return FTerrainStoreResult::Bad(IndexError);
+		Fail(FTerrainStoreResult::Bad(IndexError));
+		return;
 	}
 
-	// --- 3. the descriptor, and only then the root slot ----------------------------------------
+	// --- the descriptor, and only then the root slot ------------------------------------------
 	int64 LeafCount = 0;
 	int64 TotalPayloadBytes = 0;
 	const ETerrainPersistError WalkError = TerrainIndexEnumerate(
-		Identity, Store.GetObjects(), NewRoot,
+		Identity, Store->GetObjects(), NewRoot,
 		[&LeafCount, &TotalPayloadBytes](const FTerrainChunkKey&, const FTerrainIndexLeafValue& Value)
 		{
 			++LeafCount;
@@ -209,7 +299,8 @@ FTerrainStoreResult TerrainCaptureCheckpoint(
 		});
 	if (WalkError != ETerrainPersistError::None)
 	{
-		return FTerrainStoreResult::Bad(WalkError);
+		Fail(FTerrainStoreResult::Bad(WalkError));
+		return;
 	}
 
 	FTerrainCheckpointDescriptor Descriptor;
@@ -221,54 +312,109 @@ FTerrainStoreResult TerrainCaptureCheckpoint(
 	Descriptor.TotalPayloadBytes = static_cast<uint64>(TotalPayloadBytes);
 
 	const double PublishStarted = FPlatformTime::Seconds();
-	const FTerrainStoreResult Published = Store.PublishCheckpoint(Descriptor, UtcMillis);
-	OutStats.PublishSeconds = FPlatformTime::Seconds() - PublishStarted;
+	const FTerrainStoreResult Published = Store->PublishCheckpoint(Descriptor, UtcMillis);
+	CaptureStats.PublishSeconds = FPlatformTime::Seconds() - PublishStarted;
 	if (!Published.IsOk())
 	{
 		// Everything written above is unreferenced by any root: garbage to be collected, not a
 		// broken world. That is P-004 §12's containment argument, and this is where it applies.
-		return Published;
+		Fail(Published);
+		return;
 	}
 
-	OutStats.Generation = Store.GetState().Root.Generation;
-	OutStats.Seconds    = FPlatformTime::Seconds() - Started;
+	CaptureStats.Generation = Store->GetState().Root.Generation;
+	CaptureStats.Seconds    = FPlatformTime::Seconds() - StartedAt;
 
 	UE_LOG(LogTerrainCore, Log,
 		TEXT("Checkpoint published at G=%llu generation=%llu: %d chunks (%lld bytes), %d index pages, ")
-		TEXT("%lld keys total, in %.3f s ")
-		TEXT("(read %.3f, encode %.3f, store %.3f, index %.3f, publish %.3f)."),
-		G, OutStats.Generation, OutStats.ChunksWritten, OutStats.PayloadBytes,
-		OutStats.IndexPagesWritten, LeafCount, OutStats.Seconds,
-		OutStats.ReadSeconds, OutStats.EncodeSeconds, OutStats.StoreSeconds,
-		OutStats.IndexSeconds, OutStats.PublishSeconds);
+		TEXT("%lld keys total, in %.3f s of work over %.3f s wall (read %.3f, encode %.3f, ")
+		TEXT("store %.3f, index %.3f, publish %.3f), %d taken by copy-before-write."),
+		G, CaptureStats.Generation, CaptureStats.ChunksWritten, CaptureStats.PayloadBytes,
+		CaptureStats.IndexPagesWritten, LeafCount, CaptureStats.WorkSeconds(), CaptureStats.Seconds,
+		CaptureStats.ReadSeconds, CaptureStats.EncodeSeconds, CaptureStats.StoreSeconds,
+		CaptureStats.IndexSeconds, CaptureStats.PublishSeconds, CaptureStats.CopiedBeforeWrite);
 
-	// Half a second: well above the 0.162 s a full 256-chunk capture measures at (D-036), and
-	// well below the multi-second stall P-003 §4 actually fails. The old threshold was 0.1 s,
-	// which now fires on every healthy capture at the trigger -- a warning that cries wolf on
-	// the normal case trains people to ignore it, and it claimed a gate failure that was not
-	// one.
-	if (OutStats.Seconds > 0.5 && OutStats.ChunksWritten > 0)
+	if (CaptureStats.UnspreadSeconds() > 0.5)
 	{
-		// P-003 §4: a visible multi-second stall under the supported workload FAILS. Capture is
-		// synchronous, so this is the number that decides whether the incremental
-		// copy-before-write pump can keep being deferred -- and the per-chunk rate is what
-		// makes the projection to a full trigger obvious rather than something to work out.
-		// The dominant phase is named rather than assumed, because it has now been a DIFFERENT
-		// phase twice. It was per-voxel reading; the bulk adapter read fixed that and the index
-		// path-copy turned out to be 85%; packs fixed that (0.197 s -> 0.010 s) and reading is
-		// dominant again, at roughly three quarters of a capture under multiplayer load. The
-		// phase times are printed on every capture so the next person does not have to guess.
-		const double MillisPerChunk = OutStats.Seconds * 1000.0 / double(OutStats.ChunksWritten);
+		// The pump spreads reading, encoding and buffering across frames; the index path-copy
+		// and publication are still one unbroken step, so they are the only part that can be
+		// felt. At the 256-chunk trigger that measured 0.041 s. Warning above half a second
+		// leaves room for a much larger dirty set before crying wolf, and stays well under the
+		// multi-second stall P-003 §4 actually fails.
 		UE_LOG(LogTerrainCore, Warning,
-			TEXT("Checkpoint stalled the game thread for %.2f s over %d chunks (%.1f ms/chunk), ")
-			TEXT("well above the 0.16 s a full-trigger capture measures at. P-003 §4 fails a ")
-			TEXT("visible multi-second stall, so this is heading for it. Phases: read %.3f, ")
-			TEXT("encode %.3f, store %.3f, index %.3f, publish %.3f -- spread the largest one."),
-			OutStats.Seconds, OutStats.ChunksWritten, MillisPerChunk,
-			OutStats.ReadSeconds, OutStats.EncodeSeconds, OutStats.StoreSeconds,
-			OutStats.IndexSeconds, OutStats.PublishSeconds);
+			TEXT("Checkpoint publication held the game thread for %.2f s (index %.3f, publish ")
+			TEXT("%.3f) over %d chunks. Reading and encoding were spread across frames, so this ")
+			TEXT("is the part that is still one step. P-003 §4 fails a visible multi-second ")
+			TEXT("stall, so this is heading for it."),
+			CaptureStats.UnspreadSeconds(), CaptureStats.IndexSeconds,
+			CaptureStats.PublishSeconds, CaptureStats.ChunksWritten);
 	}
-	return FTerrainStoreResult::Ok();
+
+	bActive = false;
+	bFinished = true;
+	FinalResult = FTerrainStoreResult::Ok();
+}
+
+void FTerrainCapturePump::Fail(const FTerrainStoreResult& Why)
+{
+	FinalResult = Why;
+	CaptureStats.Seconds = FPlatformTime::Seconds() - StartedAt;
+	bActive = false;
+	bFinished = true;
+	Pending.Reset();
+	Updates.Reset();
+	if (Store != nullptr)
+	{
+		Store->GetObjects().AbandonBatch();
+	}
+}
+
+void FTerrainCapturePump::Abandon()
+{
+	if (!bActive)
+	{
+		return;
+	}
+	bActive = false;
+	bFinished = false;
+	Pending.Reset();
+	Updates.Reset();
+	if (Store != nullptr)
+	{
+		Store->GetObjects().AbandonBatch();
+	}
+}
+
+// ---- the synchronous entry point, which is the pump run to completion ---
+
+FTerrainStoreResult TerrainCaptureCheckpoint(
+	FTerrainWorldStore& Store,
+	ITerrainBackend& Backend,
+	const FTerrainRevisionIndex& Revisions,
+	const TMap<FTerrainChunkKey, FTerrainOpSeq>& DirtyKeys,
+	FTerrainOpSeq G,
+	int64 UtcMillis,
+	FTerrainCheckpointStats& OutStats)
+{
+	// Deliberately the same code path as the incremental pump, with an unlimited budget, so the
+	// two cannot drift apart. Everything that tested synchronous capture now tests the pump.
+	FTerrainCapturePump Pump;
+	TMap<FTerrainChunkKey, FTerrainOpSeq> Keys = DirtyKeys;
+
+	const FTerrainStoreResult Started =
+		Pump.Begin(Store, Backend, Revisions, MoveTemp(Keys), G, UtcMillis);
+	if (!Started.IsOk())
+	{
+		OutStats = Pump.Stats();
+		return Started;
+	}
+
+	while (!Pump.Advance(TNumericLimits<double>::Max()))
+	{
+	}
+
+	OutStats = Pump.Stats();
+	return Pump.Result();
 }
 
 FTerrainStoreResult TerrainRestoreCheckpoint(

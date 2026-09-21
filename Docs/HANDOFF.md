@@ -1,86 +1,88 @@
 # HANDOFF
 
-**Last session:** CP-015 · T-122 · 2026-09-20 · Claude (Opus 5)
-**Branch:** `main` · **Tests:** 34/34 TerrainCore automation, `Test-TerrainCheckpoint.py` PASS,
-`MP.Convergence` PASS (3 clients, 243 commits), `Terrain.StressCapture` at the real trigger
-twice.
+**Last session:** CP-015 · T-123 · 2026-09-20 · Claude (Opus 5)
+**Branch:** `main` · **Tests:** 35/35 TerrainCore automation, `Test-TerrainCheckpoint.py` PASS,
+`MP.Convergence` PASS (3 clients, 244 commits, 15 captures, 0 stalls), `Terrain.StressCapture`
+at the real trigger.
 
 ---
 
-## What shipped: the measurement, and the default flips
+## What shipped: the incremental capture pump (DEF-2 closed)
 
-D-036 left `bCheckpointCapture` false for a stated reason — *"the measurement has not been
-taken."* The trigger is 256 dirty chunks; every harness dirtied four or eight. So the harness
-now exists.
+Capture was one synchronous call — every dirty chunk read, encoded and buffered while the game
+thread waited, 0.162 s at the real trigger. The pump takes the cut once at G, then reads and
+encodes a few chunks per frame under a budget (`CheckpointPumpMillisPerFrame`, default 2 ms).
+Edits keep being admitted, committed and broadcast throughout.
 
-`Terrain.StressCapture` dirties exactly `CheckpointDirtyChunkTrigger` chunks through the real
-`RequestEdit` path and lets the ordinary pump fire the capture. **Two things it taught by
-failing first**, both worth knowing before touching it:
+| | synchronous | pumped |
+|---|---|---|
+| 256-chunk capture, game thread | **0.162 s in one frame** | 0.135 s over 0.444 s wall |
+| longest unbroken step | 0.162 s | **0.035 s** (index 0.014 + publish 0.021) |
+| stall warnings | fired | none |
 
-- **It runs over ~80 seconds, not one frame.** The queue rate limits each source to three
-  intents a second; a first attempt to issue 256 edits in a frame was refused 253 times with
-  `RateLimited`. That limit is anti-griefing and correct. Spreading them is also the truthful
-  shape — 256 dirty chunks accumulate from many players over minutes on a real server.
-- **It adds rather than removes.** The first working run dirtied nothing: a `Remove` in empty
-  air modifies no voxels, so no chunk is affected, so nothing is dirty and no capture fires. It
-  looked like a silent failure and was really a test placing edits in the sky.
+### Copy-before-write, without the copy
 
-### The number
+P-003 §4 specifies stashing a copy of a chunk before an edit touches it — dirty banks, a fence,
+a reconciliation step. **None of it is needed.** When an edit is about to modify a chunk the
+capture still owes, the pump captures *that chunk immediately, out of order*, and drops it from
+the pending set. The pre-edit state is encoded before the backend can change it — the same
+property the banks existed to provide, with no second copy of a 131 KB payload and nothing to
+reconcile. The cost is one chunk read inside that edit, bounded by its own validated footprint.
 
-**256 chunks, 33,587,200 bytes, 1,155 index pages, in 0.162 s** — 0.6 ms/chunk.
+The hook is in `Cb.Apply`, immediately before `Backend->ApplyOp`.
 
-| Phase | Time |
-|---|---|
-| read 256 chunks | 0.089 s (55%) |
-| encode + BLAKE3 | 0.005 s |
-| store payloads | 0.026 s |
-| **1,155 index pages** | **0.016 s** |
-| pack write + root slot | 0.025 s |
+**Why the cut is still consistent:** a chunk the pump reaches on its own cannot have been edited
+since G (any edit would have taken it first); a chunk an edit touches is encoded before
+`ApplyOp`; and revisions agree, because the hook runs before the revision index advances. Edits
+after G go into a fresh dirty set, so a chunk edited mid-capture is in both — this checkpoint
+records its state at G, the next records what the edit made of it.
 
-Reproduced at 0.165 s on a second run with no settings overrides, which also confirms the new
-default takes effect. The index line is the packs result in miniature: 1,155 durable pages in
-0.016 s, where before D-036 that alone would have been ~3.5 s of `fsync`.
+### Two things worth knowing before touching it
 
-**D-036 extrapolated 1.5 s. The truth is nine times better** — the third wrong projection in
-this checkpoint, after P-003 §4 (reading was the cost: it was 1.5%) and D-035 (a deferred fsync
-barrier was the fix: it was 4 ms slower).
+- **The synchronous entry point is now the pump with an unlimited budget.** One code path, so
+  they cannot drift, and every existing capture test exercises the pump. That refactor landed
+  green at 34/34 *before* any new behaviour was added, which is what made it safe.
+- **`Advance` always captures at least one chunk, whatever the budget.** A pump that can make
+  zero progress can never finish — a budget below one chunk's cost would starve the capture
+  forever. Found by the test asserting a zero budget still progresses; the first implementation
+  checked the deadline before doing any work.
 
-### The ruling
+### Evidence
 
-**`bCheckpointCapture` defaults to true** (D-037). 0.162 s is an order of magnitude inside
-P-003 §4's multi-second gate, and the trade inverted: off means startup replay grows without
-bound forever; on costs an occasional sixth of a second.
+`Persistence.Capture.Pump` interleaves edits with a part-finished capture and asserts the
+restored checkpoint is the world **at G**, not as it is now — *and* the converse, that the live
+world really has moved on, so the match cannot pass vacuously. It also asserts copy-before-write
+actually fired, because a test that meant to interleave and did not would pass while proving
+nothing.
 
-Also: the stall warning moved from 0.1 s to 0.5 s — at 0.1 s it fired on every healthy capture
-while announcing a gate failure that had not happened. And `RejectionName` gained the six enum
-values it was missing (`OutOfReach`, `ToolUnavailable`, `PermissionDenied`, `NotResident`,
-`RateLimited`, `UnsafePlacement`), all of which printed as `Unknown` — which is what hid the
-rate limiter for two runs.
+In production: a 30-second three-client round with captures every 16 ops took 15 checkpoints and
+**2 chunks by copy-before-write**, with no stalls.
 
-## The tail this does not fix
+## What is still synchronous
 
-Capture runs only when the queue is empty, and admission closes at 4,096 dirty chunks. A server
-busy enough that the queue never drains would accumulate toward that bound and then take a
-capture roughly sixteen times this one — about **2.6 s**, back inside what P-003 §4 fails —
-while refusing edits until it drained.
+Publication — index path-copy, descriptor, the single pack write, root slot — is one step at the
+end, 0.035 s at the trigger. Spreading it means interleaving a path-copy with edits changing the
+very set being indexed: a much harder problem, not worth it until the number says so. The stall
+warning now measures exactly that unspread part, at a 0.5 s threshold.
 
-Nothing observed goes near it: a 30-second three-client round reaches 243 ops and 4 dirty
-chunks and takes **no checkpoint at all**. But it is a real shape, and it is exactly what the
-pump exists to prevent.
+The 4,096-chunk tail is **reduced, not gone**. Chunk work is spread, so what remains at that
+size is publication — roughly sixteen times 0.035 s. Admission now also counts the capture's
+outstanding set toward the hard bound, which it previously did not; without that a world could
+hold up to twice the bound it advertises.
 
 ## Remaining queue
 
-1. ~~Bulk adapter `ReadRegion`~~ — done (T-120, D-035).
-2. ~~Index write amplification~~ — done (T-121, D-036); it was a file-count problem.
-3. ~~Measure capture at the real trigger~~ — done (T-122, D-037); default now on.
-4. **Incremental copy-before-write pump (DEF-2)** — next. For the first time it is aimed at the
-   phase that actually dominates (reading, 55%), and it closes the 4,096-chunk tail above.
-5. Retention / GC — **the store still only grows, and a pack cannot be reclaimed object by
-   object** (P-004 §13.6).
-6. Crash matrix.
+1. ~~Bulk adapter `ReadRegion`~~ (T-120, D-035) · ~~index write amplification / packs~~ (T-121,
+   D-036) · ~~measure at the real trigger, default on~~ (T-122, D-037) · ~~incremental pump~~
+   (T-123, D-038).
+2. **Retention / GC (DEF-9)** — next. The store only grows, and packs make it harder in a
+   specific way: reclamation can delete a loose object individually but **cannot delete one
+   object out of a pack** (P-004 §13.6). A pack is reclaimable only when nothing live refers to
+   anything in it; reclaiming partially dead packs needs a compaction pass that does not exist.
+3. Crash matrix.
 
 ## Standing note
 
-Three projections this checkpoint, all reasonable, all wrong, each cheaper to measure than to
-argue about. The phase times are logged on every capture and `Terrain.StressCapture` reproduces
-the trigger run in 80 seconds. Measure before building, and measure again after.
+Four increments, four measurements, three projections proved wrong before they could be acted
+on. The phase times are logged on every capture and `Terrain.StressCapture` reproduces the
+trigger run in ~80 seconds. Measure before building, and measure again after.

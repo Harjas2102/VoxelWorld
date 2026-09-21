@@ -1262,3 +1262,93 @@ chunks, and takes no checkpoint at all. But it is a real shape and it is exactly
 incremental copy-before-write pump exists to prevent (DEF-2). **The pump is now the next
 increment**, and for the first time it is aimed at the phase that actually dominates: reading,
 at 55% of capture.
+
+---
+
+## D-038 — The incremental capture pump, and copy-before-write without the copy (2026-09-20)
+
+**Recorded:** CP-015 · **Class:** technical (per **D-023**) · **Architect ruling, logged
+not asked** · **Scope:** T-123, DEF-2 · **Status:** ACCEPTED
+
+### 1. What changed
+
+Capture was one synchronous call: every dirty chunk read, encoded and buffered while the game
+thread waited. Measured at the real trigger that is 0.162 s (**D-037**), and it scales with the
+dirty set — admission closes at 4,096 chunks, so the worst case a server can reach is sixteen
+times that, back inside the multi-second stall P-003 §4 fails.
+
+The pump takes the cut once, at G, then reads and encodes a few chunks per frame under a time
+budget (`CheckpointPumpMillisPerFrame`, default 2 ms), and publishes when the last one is done.
+Edits keep being admitted, committed and broadcast throughout.
+
+### 2. Copy-before-write, without the copy
+
+P-003 §4 specifies stashing a copy of a chunk before an edit touches it, so the capture can
+encode the copy later — dirty banks, a fence, and a reconciliation step.
+
+**None of that is needed.** When an edit is about to modify a chunk the capture still owes, the
+pump captures *that chunk immediately, out of order*, and drops it from the pending set. The
+pre-edit state is encoded before the backend is allowed to change it, which is the property the
+banks existed to provide, with no second copy of a 131 KB payload and nothing to reconcile. The
+cost is one chunk read inside that edit, bounded by the edit's own validated footprint.
+
+The hook is `UTerrainService::Cb.Apply`, which already computed the footprint and pinned it; the
+pump is told immediately before `Backend->ApplyOp`.
+
+### 3. Why the cut is still consistent
+
+Every chunk in the checkpoint is its state at G, and nothing else can be:
+
+- a chunk the pump reaches on its own has not been edited since G, because any edit would have
+  gone through `NoticeWrite` first and taken it;
+- a chunk an edit touches is encoded by `NoticeWrite` before `ApplyOp`, so what is encoded is
+  its pre-edit state;
+- revisions agree, because `NoticeWrite` runs before the revision index advances, so the
+  revision encoded is the one the chunk had at G.
+
+Edits after G accumulate into a **fresh** dirty set. A chunk edited during a capture is in both:
+this checkpoint records its state at G, the next records what the edit made of it.
+
+### 4. Two rulings inside the implementation
+
+**The synchronous entry point is now the pump run with an unlimited budget.** One code path, so
+the two cannot drift; everything that tested synchronous capture now tests the pump. That
+refactor landed green at 34/34 before any new behaviour was added, which is what made it safe.
+
+**`Advance` always captures at least one chunk, whatever the budget.** A pump that can make zero
+progress is a pump that can never finish: a budget smaller than one chunk's cost would starve
+the capture forever. Forward progress is not negotiable; the budget only decides how much *more*
+than one chunk a frame does. This was found by the test asserting that a zero budget still
+progresses — the first implementation checked the deadline before doing any work.
+
+### 5. Measured
+
+| | before the pump | with the pump |
+|---|---|---|
+| 256-chunk capture, game thread | **0.162 s in one frame** | 0.135 s spread over 0.444 s wall |
+| longest unbroken step | 0.162 s | **0.035 s** (index 0.014 + publish 0.021) |
+| stall warnings | fired | none |
+
+The visible hitch at the trigger therefore drops from **0.162 s to 0.035 s**, and the part that
+scales with the dirty set — reading, encoding, buffering — no longer lands in one frame at all.
+
+Copy-before-write is exercised in production, not only in tests: a 30-second three-client round
+with captures every 16 ops took 15 checkpoints and **2 chunks by copy-before-write**, with no
+stalls. The unit test `Persistence.Capture.Pump` drives it deliberately, interleaves edits with
+a part-finished capture, and asserts that the restored checkpoint matches the world **at G**
+rather than as it is now — plus the converse, that the live world really has moved on, so the
+match cannot pass vacuously.
+
+### 6. What is still synchronous, and the tail
+
+Publication — the index path-copy, the descriptor, the single pack write and the root slot — is
+one step at the end and is not spread. At the trigger that is 0.035 s. Spreading it would mean
+interleaving a path-copy with edits changing the very set being indexed, which is a much harder
+problem than the one this solves, and it is not worth it until the number says otherwise. The
+stall warning now measures exactly that unspread part, against a 0.5 s threshold.
+
+The 4,096-chunk tail is **reduced but not gone**: chunk work is spread, so what remains is
+publication at that size, which is roughly sixteen times 0.035 s. That is still worth watching
+and is now the only part that scales badly. Admission also now counts the capture's outstanding
+set toward the hard bound — previously only today's dirty set was counted, which would have let
+a world hold up to twice the bound it advertises.

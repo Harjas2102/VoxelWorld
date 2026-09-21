@@ -99,7 +99,10 @@ ETerrainEditRejection UTerrainService::ValidateOp(const FTerrainOp& Op,const FTe
 	// Capture disabled has no dirty-budget gate: otherwise it would eventually deadlock.
 	if (CommitJournal && GetDefault<UTerrainSettings>()->bCheckpointCapture && !bCheckpointDisabled)
 	{
-		int32 Prospective = DirtyChunks.Num();
+		// The capture in flight still owes chunks that are NOT in DirtyChunks any more, and
+		// they cost memory in the open pack just as dirty ones do. Counting only today's set
+		// would let a world hold up to twice the bound it advertises.
+		int32 Prospective = DirtyChunks.Num() + CapturePump.Remaining();
 		for (const auto& K : Keys) if (!DirtyChunks.Contains(K)) ++Prospective;
 		if (Prospective > TerrainCheckpointDirtyHardBound) return ETerrainEditRejection::QueueFull;
 	}
@@ -157,6 +160,12 @@ FTerrainQueueCallbacks UTerrainService::QueueCallbacks()
 			TArray<FTerrainChunkKey> Keys;
 			if (!TerrainOpBounds(Op, Bounds) || !TerrainChunkKeysForBox(Bounds, Keys)) return false;
 			for (const auto& K : Keys) LivePersistencePins.Pin(*Backend, K, WorldStore->GetState().Base);
+
+			// Copy-before-write (P-003 §4). Any of these chunks an in-progress capture still
+			// owes is encoded HERE, from its pre-edit state, before the backend is allowed to
+			// change it. Without this the capture would later read a chunk that had moved past
+			// its own cut, and the checkpoint would record a world that never existed at G.
+			CapturePump.NoticeWrite(Keys);
 		}
 		return Backend->ApplyOp(Op,R);
 	};

@@ -823,16 +823,39 @@ forever, on costs an occasional sixth of a second. The stall warning's threshold
 0.1 s to 0.5 s, since at 0.1 s it fired on every healthy capture while announcing a gate failure
 that had not happened.
 
-**Next: the incremental copy-before-write pump (DEF-2).** For the first time it is aimed at the
-phase that actually dominates — reading, at 55% of capture — and it is what closes the one tail
-that remains: capture runs only when the queue is empty and admission closes at 4,096 dirty
-chunks, so a server busy enough never to drain would accumulate toward that bound and then take
-a ~2.6 s capture while refusing edits. Nothing observed goes near it (a 30-second three-client
-round reaches 243 ops and 4 dirty chunks, and takes no checkpoint at all), but it is a real
-shape.
+**T-123 — the incremental capture pump (DEF-2 closed).** The cut is taken once at G; chunks
+are then read and encoded a few per frame under a budget (`CheckpointPumpMillisPerFrame`,
+default 2 ms), while edits keep being admitted, committed and broadcast.
 
-After that: retention and GC (**the store still only grows, and a pack cannot be reclaimed
-object by object**, P-004 §13.6), then the crash matrix. DEF-1/2/9 remain open.
+**Copy-before-write turned out not to need a copy.** P-003 §4 specifies stashing a chunk before
+an edit touches it, with dirty banks and a reconciliation step. Instead, when an edit is about
+to modify a chunk the capture still owes, the pump captures *that chunk immediately, out of
+order*, from its pre-edit state — the same property, with no second copy of a 131 KB payload and
+nothing to reconcile. The hook is in `Cb.Apply`, immediately before `Backend->ApplyOp`.
+
+Two rulings inside it (**D-038**). The synchronous entry point is now the pump run with an
+unlimited budget, so the two cannot drift and every existing capture test exercises the pump;
+that refactor landed green at 34/34 before any new behaviour was added. And `Advance` always
+captures at least one chunk whatever the budget, because a pump that can make zero progress can
+never finish — found by the test asserting a zero budget still progresses.
+
+| | synchronous | pumped |
+|---|---|---|
+| 256-chunk capture, game thread | **0.162 s in one frame** | 0.135 s over 0.444 s wall |
+| longest unbroken step | 0.162 s | **0.035 s** |
+
+Copy-before-write is exercised in production, not just in tests: a 30-second three-client round
+with captures every 16 ops took 15 checkpoints, 2 chunks by copy-before-write, and no stalls.
+
+**Next: retention and GC (DEF-9).** The store still only grows, and packs make it harder in a
+specific way — reclamation can delete a loose object individually but **cannot delete one object
+out of a pack** (P-004 §13.6). A pack is reclaimable only when nothing live refers to anything
+in it; reclaiming partially dead packs needs a compaction pass that does not exist. After that,
+the crash matrix.
+
+Still unspread: publication, one step at 0.035 s at the trigger. The 4,096-chunk tail is
+**reduced, not gone** — chunk work is spread, so what remains at that size is publication, about
+sixteen times 0.035 s. DEF-1 and DEF-9 remain open.
 
 ## Drift checks (VISION.md, run at CP-015)
 
