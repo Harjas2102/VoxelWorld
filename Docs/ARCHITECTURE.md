@@ -955,24 +955,36 @@ carrying an octree traversal, and fills the payload in place. `Adapter.DensityCo
 20/20 with unchanged fixture hashes, so it reads exactly what the per-voxel path read.
 
 **It was not the cause of the stall.** Capture went from ~42 to ~25 ms/chunk, and the phases
-say where the rest is. A warm 8-chunk capture costs 0.197 s: reading is **0.003 s**, encoding
-and BLAKE3 round to zero, storing 1 MB of payload objects is 0.015 s, publishing is 0.005 s,
-and the **index path-copy is 0.168 s — 85%**, writing 49 durable pages for 8 changed keys.
-Under three-client load, 4 chunks cost the same wall-clock as 8 chunks solo, which is the same
-finding from the other direction: the chunks are not the cost. Per-capture phase times are now
-logged on every capture, so this stays checkable.
+said where the rest was: of a warm 0.197 s capture, reading was **0.003 s** and the **index
+path-copy was 0.168 s — 85%**, writing 49 durable pages holding about 7 KB between them.
 
-Capture therefore remains off: the projection to a 256-chunk trigger is still multi-second, so
-P-003 §4's gate is still failed. But the next fix is the index write path — batching pages and
-moving to one fsync barrier before the descriptor, which P-004 §12's publication order already
-makes crash-safe — **not** the incremental pump, which would spread the ~10% that payload work
-accounts for and leave the rest synchronous (**D-035**).
+**Objects are written in packs (P-004 §13).** A durable write is one `fsync`, and an `fsync`
+costs ~3 ms *regardless of size* — a 160-byte index page costs what a megabyte costs. The fix
+is therefore not *when* the store syncs but *how many files* it syncs, and the measurements say
+so unambiguously: 49 small files cost 151.6 ms written eagerly, **155.8 ms** with the handles
+held and flushed at the end (a deferred barrier buys nothing), 55.6 ms reopened and flushed,
+and **2.3 ms in one file with one flush**. A capture now buffers its payloads, index pages and
+descriptor into one pack, flushed once, strictly before the root slot — the same ordering
+P-004 §12 always required, with two `fsync`s instead of 59. Content addressing is untouched:
+objects are still named by and verified against their BLAKE3 digest, loose or packed.
 
-**What does not exist.** Index write batching, the incremental copy-before-write capture pump,
+**Measured result: 0.197 s → 0.010 s solo, and 0.026–0.035 s under three-client load with zero
+stall warnings** (previously 15 stalls of ~0.34 s in a 30 s round). A torn pack is ignored
+rather than fatal, because it belongs to a capture that never published; that case is tested.
+
+Capture is **still off by default**, and the reason is now a measurement that has not been
+taken rather than one that failed: at the 256-chunk trigger reading dominates (~75% of capture
+under load) and the projection is roughly 1.5 s, which is not multi-second but is not proven
+either. **Flipping `bCheckpointCapture` requires measuring a capture at its real trigger**, not
+extrapolating from four chunks — which is the mistake this checkpoint made twice already
+(**D-035**, **D-036**).
+
+**What does not exist.** A capture measurement at the real trigger, the incremental
+copy-before-write pump (now genuinely the right lever, since reading is again dominant),
 Empty/SparseDiff compaction (P-003 §6 rules it out until a backend can state its own base),
-settlement, SQLite, retention or GC — **the store only grows** — the exclusive-writer lease
-P-003 §5 requires, and the crash matrix. Build step 4 is not complete and DEF-1/2/9 remain
-open.
+settlement, SQLite, retention or GC — **the store only grows, and packs cannot be reclaimed
+object by object** — the exclusive-writer lease P-003 §5 requires, and the crash matrix. Build
+step 4 is not complete and DEF-1/2/9 remain open.
 
 - **Commit:** journal append + durable flush precedes terrain broadcast and
   TerrainCommitted; SQLite settlement follows, with idempotent `(WorldId, OpSeq)`
@@ -1504,6 +1516,7 @@ Run against `FMemoryTerrainBackend`. Seconds, on every build.
 | `Persistence.Storage.Paths` | **Implemented, passing.** The P-004 §11.1 naming rule, and the path backstop: absolute paths, drive letters, backslashes, `.`/`..` components, doubled separators and characters outside `[A-Za-z0-9._-]` are all refused before a name reaches a device |
 | `Persistence.Storage.ObjectStore` | **Implemented, passing.** Content addressing verified on the way **in and out**: a digest the bytes do not hash to is refused on store, a damaged file fails to load rather than returning bad bytes, a repeated store writes nothing, and a **torn** write leaves a file that does not load and can be deleted and rewritten |
 | `Persistence.Storage.SlotPair` | **Implemented, passing.** Publication alternates; a torn publication is rejected with `BodyChecksumMismatch` while the **other** slot keeps the last acknowledged generation; the retry repairs the damaged slot rather than touching the good one; another world's identity validates neither; publishing before reading is refused rather than guessing |
+| `Persistence.Storage.Pack` | **Implemented, passing.** Many objects become one file with one flush; a buffered object reads back **before** the pack is durable, because the index path-copy re-reads pages it wrote moments earlier; an abandoned batch writes nothing at all; a **torn** pack and a pack with one flipped body bit are both ignored wholesale rather than failing the open, and the next pack does not reuse the torn one's id; loose and packed objects coexist and resolve identically |
 | `Persistence.Storage.PlatformDevice` | **Implemented, passing.** Against the real file system: an in-place overwrite **does not truncate**, a wrong-length overwrite is refused with the file intact, an append lands at the end, and an escaping path is refused before it reaches the disk |
 | `Persistence.Checkpoint.Equivalence` | **Implemented, passing — the cut that bounds replay.** Six edits, a capture at G=6, then a restart that restores the cut and replays **none** of them; three more edits and a second restart that replays **exactly three**. Every case ends in chunk-hash equality, because a checkpoint that bounded replay while losing terrain would be worse than none. Also covers a second capture after a replay-restart (the case where a chunk edited before the restart must still reach the next cut), and P-003 §4's sentinel trap: a dirty chunk that is not resident fails the capture rather than being published as unchanged |
 | `Persistence.Commit.Journal` | **Implemented, passing.** What a committed operation becomes as a record: `NoEconomy`; `PhysicalAvailability = Unavailable` with an **empty** list even when the backend reported volumes, because the production adapter's materials are zero and P-003 §2 forbids encoding unknown as a measured zero; changed keys sorted into index-key order rather than footprint order; every changed revision advancing by exactly one; a zero token digest, because protocol 2 does not exist. Also that the queue treats the sequence as **provisional** and does not consume it when a commit is refused, and that a storage-faulted service closes admission with `ShuttingDown`. **Does not cover `CommitOp`'s internal ordering** — see the note below the table |

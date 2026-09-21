@@ -173,6 +173,15 @@ FTerrainStoreResult FTerrainWorldStore::Open()
 		return FTerrainStoreResult::Bad(BaseError);
 	}
 
+	// --- packs, before anything can try to resolve an object ---------------------------------
+	// The descriptor and every index page a previous capture wrote may live inside a pack, so
+	// the location map has to exist before the first LoadObject, not after.
+	const ETerrainStorageResult PackResult = Objects.LoadPacks();
+	if (PackResult != ETerrainStorageResult::Ok)
+	{
+		return FTerrainStoreResult::Io(PackResult);
+	}
+
 	// --- the root slots ----------------------------------------------------------------------
 	int32 BestIndex = INDEX_NONE;
 	const ETerrainStorageResult RootRead =
@@ -309,6 +318,17 @@ FTerrainStoreResult FTerrainWorldStore::PublishCheckpoint(
 	if (!ObjectResult.IsOk())
 	{
 		return ObjectResult;
+	}
+
+	// Everything this capture wrote -- payload objects, index pages and the descriptor above --
+	// becomes durable HERE, in one flush, and strictly before the root slot that names it. The
+	// ordering is the same as it always was; only the number of files changed. A crash before
+	// this leaves nothing; a crash after it leaves a pack no root names, which is the
+	// unreferenced garbage P-004 §12 already accounts for.
+	const ETerrainStorageResult BatchResult = Objects.CommitBatch();
+	if (BatchResult != ETerrainStorageResult::Ok)
+	{
+		return FTerrainStoreResult::Io(BatchResult);
 	}
 
 	FTerrainRootSlot Root;

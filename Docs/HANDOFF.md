@@ -1,83 +1,75 @@
 # HANDOFF
 
-**Last session:** CP-015 · T-120 · 2026-09-20 · Claude (Opus 5)
-**Branch:** `main` · **Tests:** 33/33 TerrainCore automation, `Terrain.SelfTest` PASS,
+**Last session:** CP-015 · T-121 · 2026-09-20 · Claude (Opus 5)
+**Branch:** `main` · **Tests:** 34/34 TerrainCore automation, `Terrain.SelfTest` PASS,
 `Adapter.DensityContract` 20/20, `Test-TerrainCheckpoint.py` PASS, `MP.Convergence` PASS
-(3 clients, 243 commits).
+(3 clients, 243 commits, **zero stall warnings**).
 
 ---
 
-## What shipped: the bulk adapter `ReadRegion`
+## What shipped: objects are written in packs
 
-`FVPLegacyBackend::ReadRegion` previously called `UVoxelDataTools::GetValue` once per voxel:
-**32,768 calls per chunk**, each taking its own read lock and walking the octree from the root,
-each result appended with `TArray::Add`.
+The checkpoint stall was 85% index path-copy: 49 durably written pages holding about **7 KB
+between them**, costing 0.168 s. A durable write is one `fsync`, and an `fsync` costs **~3 ms
+regardless of size** — a 160-byte index page costs what a megabyte costs.
 
-It now takes **one `FVoxelReadScopeLock` and one `FVoxelConstDataAccelerator` for the whole
-chunk** — the plugin's own node-caching bulk path, used directly rather than through
-`UVoxelDataTools`, which would have churned a `TArray<FIntVector>` of positions and a
-`TArray<FVoxelValueMaterial>` of results for no benefit. The payload is sized once with
-`SetNumUninitialized` and written by index; the material half is zeroed once with `Memzero`.
+**I measured the three candidates before building any of them**, which mattered, because the
+one D-035 ruled for first does not work:
 
-**It reads exactly what the old path read.** `Adapter.DensityContract` passes 20/20 with all
-four fixture hashes unchanged.
+| Strategy over 49 small files | Time |
+|---|---|
+| write each and flush it (what existed) | 151.6 ms |
+| **hold the handles, flush them all at the end** | **155.8 ms** |
+| write and close each, then reopen and flush | 55.6 ms |
+| **one file, one flush** | **2.3 ms** |
 
-## What it revealed: the stall was never the read
+A deferred barrier buys nothing — `FlushFileBuffers` is per file whenever you call it. The cost
+was never *when* the store syncs; it is **how many files it syncs**, and a capture synced 59.
 
-P-003 §4 predicted this fix and the reason for it: *"the current 32,768-per-voxel-call adapter
-path must gain a measured bulk-read implementation before production integration."* The fix was
-worth making. The reason was wrong.
+So a capture now buffers its payloads, index pages and descriptor into **one pack** (P-004 §13),
+written and flushed once, strictly before the root slot. Two `fsync`s per capture instead of 59.
+Content addressing is untouched — objects are still named by and verified against their BLAKE3
+digest, loose or packed — so no other section's byte tables moved.
 
-Capture only moved from ~42 to ~25 ms/chunk, so the phases were instrumented permanently in
-`FTerrainCheckpointStats` and are now logged on every capture. Warm solo, 8 chunks, 1,049,600
-bytes, total 0.197 s:
-
-| Phase | Time | Share |
+| | before | after |
 |---|---|---|
-| `ReadRegion` × 8 | 0.003 s | 1.5% |
-| encode + BLAKE3 | 0.000 s | ~0% |
-| store 8 payload objects | 0.015 s | 8% |
-| **index path-copy, 49 pages** | **0.168 s** | **85%** |
-| descriptor + root slot | 0.005 s | 2.5% |
+| warm solo capture, 8 chunks | 0.197 s | **0.010 s** |
+| three-client load, 4 chunks | 0.14–0.25 s | **0.026–0.035 s** |
+| stall warnings per 30 s MP round | 15, ~0.34 s each | **0** |
 
-The load run says the same thing independently: under three clients, **4 chunks cost 0.14–0.25 s
-— the same wall-clock as 8 chunks solo.** Doubling the chunks did not change the time.
+Restore works across process restarts: the four-launch harness restores 8 chunks from a pack
+written by an earlier process, replays zero edits, and all eight chunk hashes are identical.
 
-**The stall is index write amplification.** 8 changed keys produce 49 durably written pages,
-each an object write ending in `Flush(true)` per D-034.
+**Crash containment is the same argument §12 always made.** The pack is flushed before the root
+slot that names anything in it, so a pack failing its trailer checks belongs to a capture that
+never published: ignored in full, explicitly not an error, because refusing to open over it
+would turn collectable garbage into a dead world. Tested — torn trailer, flipped body bit, id
+reuse, abandoned batch, loose/packed coexistence.
 
-## What this changes for whoever is next
+## Next: measure a capture at its real trigger
 
-**Do the index write path before the incremental pump.** This reverses the order the Director
-gave and the reason is in the table: the pump spreads chunk payload work, which is 9.5% of
-capture. Building it next would spread a tenth of the stall, leave 85% synchronous on the game
-thread, and let us claim a fix a player would still feel. Ruled in **D-035**.
+`bCheckpointCapture` is still **false**, but the reason changed from *"the measurement failed
+the gate"* to **"the measurement has not been taken."**
 
-The candidates, in the order I'd try them:
+Reading is the dominant phase again (~75% of a capture under load). Extrapolating 4 chunks to
+the 256-chunk trigger gives roughly 1.5 s — not multi-second, and not evidence. **This
+checkpoint has now twice acted on a plausible projection and been wrong**: P-003 §4 predicted
+reading was the cost (it was 1.5%), and D-035 predicted the fsync barrier was the fix (it was
+4 ms slower). So build a harness that actually dirties 256 chunks, measure, and *then* decide
+the default.
 
-1. **One fsync barrier per capture instead of one per page.** P-004 §12's publication order
-   already makes every page unreferenced garbage until the root slot lands, so a crash
-   mid-batch is already safe — the durability barrier only has to precede the descriptor. This
-   is the cheapest change and should take most of the 0.168 s.
-2. **Batch the pages of one capture into fewer object writes.**
-3. **Reduce the page count** — 6:1 amplification is a property of path-copying a 12-level trie
-   for scattered keys.
+## Remaining queue
 
-Then re-measure, and only then size the pump against what is left. It may be nothing.
-
-`bCheckpointCapture` stays **false**: the projection to the 256-chunk trigger is still
-multi-second, so P-003 §4's gate is still failed.
-
-## Remaining queue (Director's order, amended by D-035)
-
-1. ~~Bulk adapter `ReadRegion`~~ — done, this session.
-2. **Index write amplification** — inserted ahead of the pump on the evidence above.
-3. Incremental capture pump — scope to be re-sized after (2).
-4. Retention / GC — the store still only grows.
-5. Crash matrix.
+1. ~~Bulk adapter `ReadRegion`~~ — done (T-120, D-035).
+2. ~~Index write amplification~~ — done (T-121, D-036), and it was a file-count problem.
+3. **Measure capture at the 256-chunk trigger** — the gate on `bCheckpointCapture`.
+4. Incremental capture pump — now genuinely the right lever, since reading is dominant again.
+5. Retention / GC — **the store still only grows, and a pack cannot be reclaimed object by
+   object** (P-004 §13.6). Retention now has to reason about packs, not just loose objects.
+6. Crash matrix.
 
 ## Standing note
 
-A prediction in an adopted proposal is not evidence. P-003 §4 named a real inefficiency and was
-still wrong about the cost by a factor of nine. The phase breakdown is permanent so the next
-claim about where capture time goes can be checked instead of inherited.
+Both increments this session were cheap to price and expensive to guess at. The fsync
+comparison took three minutes and saved building the wrong fix. Measure the obvious thing
+before you build it.

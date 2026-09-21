@@ -99,12 +99,15 @@ struct FTerrainCheckpointStats
 	 *
 	 * They sum to slightly less than Seconds; the remainder is the descriptor walk and the
 	 * bookkeeping between phases.
+	 *
+	 * Since packs (P-004 §13), `StoreSeconds` and `IndexSeconds` only measure *buffering* --
+	 * the single durable write for everything they produced is inside `PublishSeconds`.
 	 */
 	double ReadSeconds = 0.0;      // ITerrainBackend::ReadRegion for every dirty chunk
 	double EncodeSeconds = 0.0;    // body/object encoding and the BLAKE3 content digest
-	double StoreSeconds = 0.0;     // durably writing the payload objects
-	double IndexSeconds = 0.0;     // path-copying the radix index, including its own writes
-	double PublishSeconds = 0.0;   // the descriptor object and the root slot pair
+	double StoreSeconds = 0.0;     // buffering the payload objects into the capture's pack
+	double IndexSeconds = 0.0;     // path-copying the radix index, including its own objects
+	double PublishSeconds = 0.0;   // ONE pack write and flush, then the root slot pair
 };
 
 /**

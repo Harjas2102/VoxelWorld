@@ -108,13 +108,18 @@ public:
 	 * game**, and P-003 section 4 is explicit that a visible multi-second stall under the
 	 * supported workload FAILS.
 	 *
-	 * P-003 section 4 named a cause before it was measured: *"the current 32,768-per-voxel-call
-	 * adapter path must gain a measured bulk-read implementation before production
-	 * integration."* That bulk read is now built, and it was not the cause. Capture went from
-	 * ~42 to ~25 ms/chunk, and the phase breakdown says why: of a 0.197 s capture over 8
-	 * chunks, reading is 0.003 s and the index path-copy is 0.168 s. The stall is index write
-	 * amplification — 49 durably written pages for 8 changed keys — not reading terrain
-	 * (D-035). Every capture logs its own phase times, so this is checkable, not inherited.
+	 * Capture is **much** cheaper than it was. The adapter's bulk `ReadRegion` landed (D-035) and
+	 * objects are now written in packs — one file, one flush per capture, instead of 59
+	 * (D-036, P-004 §13). Measured: **0.197 s → 0.010 s** solo over 8 chunks, and
+	 * **0.026–0.035 s under three-client load with zero stall warnings**, where a 30-second
+	 * round previously produced 15 stalls of about a third of a second each.
+	 *
+	 * **It is still off because the measurement that would turn it on has not been taken.**
+	 * The trigger is 256 dirty chunks; the harnesses dirty 4 and 8. Reading is now the dominant
+	 * phase again (~75% of a capture under load) and extrapolating gives roughly 1.5 s, which
+	 * is not multi-second but is not evidence either. Twice this checkpoint a plausible
+	 * projection turned out to be wrong, so this one does not get acted on. Every capture logs
+	 * its own phase times; measure at the real trigger, then decide.
 	 *
 	 * Turning it on is a real trade and it is yours to make: an occasional multi-second freeze
 	 * during play, in exchange for a startup that does not slow down forever. Journalling is

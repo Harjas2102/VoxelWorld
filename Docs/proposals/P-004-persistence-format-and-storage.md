@@ -708,7 +708,134 @@ worst case is falling back one checkpoint generation — not a durability proof.
 
 ---
 
-## 13. Validation and test plan
+## 13. Packs — many objects, one durable write
+
+### 13.1 Why this exists
+
+Every object in §§4–7 is immutable and named by its BLAKE3 digest, and the obvious way to store
+one is as a file. That was how it was built, and it is the reason a checkpoint was slow.
+
+The cost of a durable write is not the cost of its bytes. §12 requires every write to end in
+`Flush(true)`, and on the development machine that call costs about **3 ms regardless of size**:
+the same for a 160-byte index page as for a megabyte. A checkpoint over 8 changed chunks writes
+59 objects, of which 49 are index pages holding about **7 KB between them** — and writing that
+7 KB took **0.168 s**, 85% of the whole capture.
+
+Three alternatives were measured over 49 small files on that machine:
+
+| Strategy | Time |
+|---|---|
+| write each file and flush it (what was built) | 151.6 ms |
+| write all files, hold the handles, flush them all at the end | 155.8 ms |
+| write and close each, then reopen each and flush | 55.6 ms |
+| **all of it in one file, one flush** | **2.3 ms** |
+
+The second row is the important one, because it is the fix that looks obvious and does not
+work: a flush barrier is per *file* whenever it is called, so deferring the flushes buys
+nothing. **The number of files that must be synced is the cost.** Packs reduce that number to
+one per capture.
+
+### 13.2 What a pack is, and what does not change
+
+A pack is one file holding many object images back to back, followed by a manifest naming
+each one, followed by a fixed trailer.
+
+**Content addressing is unchanged.** An object is still named by, and verified against, its
+BLAKE3 digest, on the way in and on the way out. The index still path-copies, the descriptor
+still names a root page by digest, and a reference does not record whether its target is loose
+or packed. Only *where the bytes live* changes, which is why this section adds a file shape and
+amends no other section's byte tables.
+
+An object may be stored loose or in a pack. A reader resolves a digest by looking in the open
+batch, then the pack map, then `objects/`.
+
+### 13.3 File shape
+
+`packs/pack-%016llx.tpk`, the id in lowercase hex, allocated strictly upward.
+
+| Region | Bytes | Contents |
+|---|---|---|
+| Body | variable | object images concatenated, in store order, no padding |
+| Manifest | 44 × *count* | one entry per object |
+| Trailer | 32 | fixed, at the very end of the file |
+
+Manifest entry, 44 bytes:
+
+| Offset | Size | Field |
+|---|---|---|
+| 0 | 32 | object digest (BLAKE3-256) |
+| 32 | 8 | offset of the image from the start of the file, u64 LE |
+| 40 | 4 | image length, u32 LE |
+
+Trailer, 32 bytes:
+
+| Offset | Size | Field |
+|---|---|---|
+| 0 | 8 | magic `0x314B4341504E5254` — `"TRNPACK1"` little-endian |
+| 8 | 4 | version, u32 LE, currently 1 |
+| 12 | 4 | object count, u32 LE, at most 2²⁰ |
+| 16 | 8 | manifest offset, u64 LE |
+| 24 | 8 | XXH3-64 of bytes `[0, file length − 32)` |
+
+The trailer is last because it is written last. A pack torn by a crash has no valid trailer, so
+"is this pack complete" and "is this pack usable" are the same question, and one read at a known
+offset from the end answers it.
+
+### 13.4 Validity rules a conforming reader enforces
+
+Per §1 rule 11, these are stated here because they are enforced here.
+
+1. The file is at least 32 bytes.
+2. The magic and version match exactly.
+3. The count is at most 2²⁰.
+4. `manifest offset + 44 × count + 32` equals the file length exactly.
+5. The XXH3-64 over `[0, file length − 32)` equals the stored checksum.
+6. Every manifest entry's `offset + length` is within `[0, manifest offset]`.
+
+A pack failing **any** of these is **ignored in full — it is not an error, and it must not
+prevent the world from opening.** A pack is flushed strictly before the root slot that names
+anything inside it (§12), so a pack that fails these checks belongs to a capture that never
+published, and nothing reachable from a published root refers to it. Refusing to open the world
+over it would turn collectable garbage into a dead world.
+
+An entry failing rule 6 is skipped individually; rules 1–5 condemn the whole file.
+
+Pack ids are allocated past the highest id **present on disk**, whether or not that pack was
+readable. A torn pack keeps its id until retention removes it, and reusing the id would mean
+writing over a file that is still there.
+
+Where the same digest appears in more than one pack, the earlier pack wins. A digest names one
+byte string, so the later copy is the same bytes and the choice is arbitrary; fixing it makes
+the map deterministic.
+
+### 13.5 Ordering and crash containment
+
+Capture buffers every object it writes — chunk payloads, index pages and the checkpoint
+descriptor — and the pack is written and flushed **once**, immediately before the root slot is
+published. This is the same ordering §12 already requires, with a smaller number of files:
+
+1. buffer payloads, index pages, descriptor — nothing is durable
+2. write the pack, one `Flush(true)` — everything is durable, nothing is referenced
+3. publish the root slot — everything becomes reachable at once
+
+A crash before (2) leaves nothing at all. A crash between (2) and (3) leaves a complete pack
+that no root names: unreferenced garbage, exactly as §12 describes for loose objects. A crash
+during (2) leaves a pack failing §13.4, which is the same thing. **No crash point leaves a root
+naming an object that is not durable**, which is the property the whole ordering exists for.
+
+An abandoned capture discards its buffer and writes nothing, so a failed capture no longer
+leaves loose objects behind — an improvement on the loose-object path, where partial work
+survived.
+
+### 13.6 What this leaves for retention
+
+Reclamation (§8) can delete a loose object individually. **It cannot delete one object out of a
+pack.** A pack is reclaimable only when nothing reachable from a live root refers to *any*
+object in it, and reclaiming partially used packs requires rewriting a pack without its dead
+objects and republishing — a compaction pass that does not exist. Retention is not built yet
+(DEF-9), and this is now part of what it has to handle.
+
+## 14. Validation and test plan
 
 New headless cases, `TerrainCore` automation, no engine world and no plugin (§6.1):
 
@@ -729,7 +856,7 @@ increments and **remain unwritten**. Nothing in this packet closes DEF-1, DEF-2 
 
 ---
 
-## 14. Status
+## 15. Status
 
 DEF-1, DEF-2 and DEF-9 remain **open**. This packet is a specification and its codecs; it
 adds no commit path, no checkpoint pump, no recovery driver, no settlement, no SQLite, no

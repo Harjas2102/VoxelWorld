@@ -488,4 +488,225 @@ bool FTerrainStoragePlatformDeviceTest::RunTest(const FString& Parameters)
 	return true;
 }
 
+
+// ---- packs: many objects, one durable write (P-004 §13) -----------------
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+	FTerrainStoragePackTest,
+	"TerrainCore.Persistence.Storage.Pack",
+	EAutomationTestFlags::EditorContext
+	| EAutomationTestFlags::ClientContext
+	| EAutomationTestFlags::ServerContext
+	| EAutomationTestFlags::CommandletContext
+	| EAutomationTestFlags::ProductFilter)
+
+bool FTerrainStoragePackTest::RunTest(const FString& Parameters)
+{
+	using namespace TerrainStorageTest;
+
+	// --- a batch is one file, and nothing in it is durable until it is committed -------------
+	{
+		FTerrainMemoryStorageDevice Device;
+		FTerrainFileObjectStore Store(Device);
+		TestEqual(TEXT("Layout is created"), Store.EnsureLayout(), ETerrainStorageResult::Ok);
+
+		TArray<TArray<uint8>> Objects;
+		TArray<FTerrainDigest> Digests;
+		for (int32 Index = 0; Index < 12; ++Index)
+		{
+			Objects.Add(Pattern(150 + Index, static_cast<uint8>(0x20 + Index)));
+			Digests.Add(TerrainPersistDigest(Objects.Last()));
+		}
+
+		Store.BeginBatch();
+		TestTrue(TEXT("The batch is open"), Store.IsBatchOpen());
+		for (int32 Index = 0; Index < Objects.Num(); ++Index)
+		{
+			TestTrue(TEXT("Storing into a batch succeeds"),
+				Store.StoreObject(Digests[Index], Objects[Index]));
+		}
+		TestEqual(TEXT("Everything is buffered"), Store.BatchNum(), 12);
+
+		// The reason the batch must be readable: the index path-copy re-reads pages it wrote
+		// moments earlier, within the same capture, before anything is durable.
+		TArray<uint8> Readback;
+		TestTrue(TEXT("A buffered object reads back before commit"),
+			Store.LoadObject(Digests[5], Readback));
+		TestTrue(TEXT("and reads back exactly"), Readback == Objects[5]);
+
+		TArray<FString> PackNames;
+		Device.ListFiles(TerrainStoragePaths::PacksDirectory, PackNames);
+		TestEqual(TEXT("Nothing is on disk before commit"), PackNames.Num(), 0);
+
+		TestEqual(TEXT("Commit writes the pack"), Store.CommitBatch(), ETerrainStorageResult::Ok);
+		TestFalse(TEXT("and closes the batch"), Store.IsBatchOpen());
+
+		Device.ListFiles(TerrainStoragePaths::PacksDirectory, PackNames);
+		TestEqual(TEXT("Twelve objects became ONE file"), PackNames.Num(), 1);
+
+		// A fresh store over the same device must find them all, which is the property that
+		// makes a pack a store and not a cache.
+		FTerrainFileObjectStore Reopened(Device);
+		TestEqual(TEXT("Packs load"), Reopened.LoadPacks(), ETerrainStorageResult::Ok);
+		TestEqual(TEXT("All twelve are mapped"), Reopened.NumPackedObjects(), 12);
+		for (int32 Index = 0; Index < Objects.Num(); ++Index)
+		{
+			TArray<uint8> Loaded;
+			TestTrue(TEXT("A packed object loads after reopen"),
+				Reopened.LoadObject(Digests[Index], Loaded));
+			TestTrue(TEXT("with the exact bytes"), Loaded == Objects[Index]);
+			TestTrue(TEXT("and Contains agrees"), Reopened.Contains(Digests[Index]));
+		}
+	}
+
+	// --- an abandoned batch leaves the store exactly as it found it --------------------------
+	{
+		FTerrainMemoryStorageDevice Device;
+		FTerrainFileObjectStore Store(Device);
+		Store.EnsureLayout();
+
+		const TArray<uint8> Object = Pattern(300, 0x77);
+		const FTerrainDigest Digest = TerrainPersistDigest(Object);
+
+		Store.BeginBatch();
+		TestTrue(TEXT("Stored into the batch"), Store.StoreObject(Digest, Object));
+		Store.AbandonBatch();
+
+		TestFalse(TEXT("An abandoned batch stored nothing"), Store.Contains(Digest));
+		TArray<FString> PackNames;
+		Device.ListFiles(TerrainStoragePaths::PacksDirectory, PackNames);
+		TestEqual(TEXT("and wrote no file"), PackNames.Num(), 0);
+	}
+
+	// --- a torn pack is ignored, not an error ------------------------------------------------
+	// This is the crash case the design turns on. A pack is flushed before the root slot that
+	// names it, so a pack that was torn belongs to a capture that never published. Refusing to
+	// open the world over it would turn collectable garbage into a dead world.
+	{
+		FTerrainMemoryStorageDevice Device;
+		FTerrainFileObjectStore Store(Device);
+		Store.EnsureLayout();
+
+		const TArray<uint8> Good = Pattern(200, 0x01);
+		const FTerrainDigest GoodDigest = TerrainPersistDigest(Good);
+		Store.BeginBatch();
+		Store.StoreObject(GoodDigest, Good);
+		TestEqual(TEXT("First pack commits"), Store.CommitBatch(), ETerrainStorageResult::Ok);
+
+		const TArray<uint8> Lost = Pattern(200, 0x02);
+		const FTerrainDigest LostDigest = TerrainPersistDigest(Lost);
+		Store.BeginBatch();
+		Store.StoreObject(LostDigest, Lost);
+		TestEqual(TEXT("Second pack commits"), Store.CommitBatch(), ETerrainStorageResult::Ok);
+
+		// Tear the second pack by truncating its trailer -- exactly what a crash mid-write
+		// leaves behind.
+		const FString SecondPack = TerrainStoragePaths::Pack(1);
+		TArray<uint8> Image;
+		TestEqual(TEXT("The second pack is readable"),
+			Device.Read(SecondPack, Image), ETerrainStorageResult::Ok);
+		TestEqual(TEXT("Removing it to rewrite torn"),
+			Device.Delete(SecondPack), ETerrainStorageResult::Ok);
+		Image.SetNum(Image.Num() - 8);   // the checksum half of the trailer is gone
+		TestEqual(TEXT("The torn image is written back"),
+			Device.WriteNew(SecondPack, Image), ETerrainStorageResult::Ok);
+
+		FTerrainFileObjectStore Reopened(Device);
+		TestEqual(TEXT("Opening over a torn pack succeeds"),
+			Reopened.LoadPacks(), ETerrainStorageResult::Ok);
+		TestEqual(TEXT("The intact pack still resolves"), Reopened.NumPackedObjects(), 1);
+		TestTrue(TEXT("and its object loads"), Reopened.Contains(GoodDigest));
+		TestFalse(TEXT("The torn pack's object does not"), Reopened.Contains(LostDigest));
+
+		// The next pack must not reuse the torn pack's id, or it would collide with a file
+		// that is still sitting there.
+		const TArray<uint8> Next = Pattern(200, 0x03);
+		const FTerrainDigest NextDigest = TerrainPersistDigest(Next);
+		Reopened.BeginBatch();
+		Reopened.StoreObject(NextDigest, Next);
+		TestEqual(TEXT("A new pack commits past the torn id"),
+			Reopened.CommitBatch(), ETerrainStorageResult::Ok);
+		TestTrue(TEXT("and its object resolves"), Reopened.Contains(NextDigest));
+	}
+
+	// --- a corrupt pack body fails the checksum, and is ignored wholesale ---------------------
+	{
+		FTerrainMemoryStorageDevice Device;
+		FTerrainFileObjectStore Store(Device);
+		Store.EnsureLayout();
+
+		const TArray<uint8> Object = Pattern(400, 0x5A);
+		const FTerrainDigest Digest = TerrainPersistDigest(Object);
+		Store.BeginBatch();
+		Store.StoreObject(Digest, Object);
+		TestEqual(TEXT("Pack commits"), Store.CommitBatch(), ETerrainStorageResult::Ok);
+
+		const FString PackPath = TerrainStoragePaths::Pack(0);
+		TArray<uint8> Image;
+		Device.Read(PackPath, Image);
+		Device.Delete(PackPath);
+		Image[10] ^= 0xFF;   // one flipped bit in the body
+		Device.WriteNew(PackPath, Image);
+
+		FTerrainFileObjectStore Reopened(Device);
+		TestEqual(TEXT("Opening over a corrupt pack succeeds"),
+			Reopened.LoadPacks(), ETerrainStorageResult::Ok);
+		TestEqual(TEXT("but nothing in it is trusted"), Reopened.NumPackedObjects(), 0);
+	}
+
+	// --- loose objects and packed objects coexist --------------------------------------------
+	{
+		FTerrainMemoryStorageDevice Device;
+		FTerrainFileObjectStore Store(Device);
+		Store.EnsureLayout();
+
+		const TArray<uint8> Loose = Pattern(100, 0xA1);
+		const FTerrainDigest LooseDigest = TerrainPersistDigest(Loose);
+		TestTrue(TEXT("An unbatched store writes loose"), Store.StoreObject(LooseDigest, Loose));
+
+		const TArray<uint8> Packed = Pattern(100, 0xA2);
+		const FTerrainDigest PackedDigest = TerrainPersistDigest(Packed);
+		Store.BeginBatch();
+		Store.StoreObject(PackedDigest, Packed);
+		TestEqual(TEXT("Pack commits"), Store.CommitBatch(), ETerrainStorageResult::Ok);
+
+		FTerrainFileObjectStore Reopened(Device);
+		Reopened.LoadPacks();
+		TArray<uint8> A, B;
+		TestTrue(TEXT("The loose object still loads"), Reopened.LoadObject(LooseDigest, A));
+		TestTrue(TEXT("The packed object loads"), Reopened.LoadObject(PackedDigest, B));
+		TestTrue(TEXT("Loose bytes are exact"), A == Loose);
+		TestTrue(TEXT("Packed bytes are exact"), B == Packed);
+
+		// Re-storing something already held is a success that writes nothing, whether it is
+		// held loose or in a pack.
+		Reopened.BeginBatch();
+		TestTrue(TEXT("Re-storing a packed object succeeds"),
+			Reopened.StoreObject(PackedDigest, Packed));
+		TestTrue(TEXT("Re-storing a loose object succeeds"),
+			Reopened.StoreObject(LooseDigest, Loose));
+		TestEqual(TEXT("and buffers nothing"), Reopened.BatchNum(), 0);
+		Reopened.AbandonBatch();
+	}
+
+	// --- a digest that does not match its bytes is refused, batched or not -------------------
+	{
+		FTerrainMemoryStorageDevice Device;
+		FTerrainFileObjectStore Store(Device);
+		Store.EnsureLayout();
+
+		const TArray<uint8> Object = Pattern(64, 0x0B);
+		FTerrainDigest Wrong = TerrainPersistDigest(Object);
+		Wrong.Bytes[0] ^= 0x01;
+
+		Store.BeginBatch();
+		TestFalse(TEXT("A mismatched digest is refused in a batch"),
+			Store.StoreObject(Wrong, Object));
+		TestEqual(TEXT("and buffers nothing"), Store.BatchNum(), 0);
+		Store.AbandonBatch();
+	}
+
+	return true;
+}
+
 #endif // WITH_DEV_AUTOMATION_TESTS

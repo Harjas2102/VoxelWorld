@@ -106,13 +106,22 @@ namespace TerrainStoragePaths
 		return FString::Printf(TEXT("%s/seg-%016llx.tjs"), JournalDirectory, SegmentId);
 	}
 
-	bool ParseJournalSegment(const FString& FileName, uint64& OutSegmentId)
+	/**
+	 * `<Prefix><16 lowercase hex><Suffix>` and nothing else.
+	 *
+	 * Shared by the segment and pack parsers because they are the same shape, and two copies
+	 * of a name parser are two things that must agree with their writers and with each other,
+	 * with no mechanism to.
+	 */
+	static bool ParseIdFileName(
+		const FString& FileName, const TCHAR* Prefix, const TCHAR* Suffix, uint64& OutId)
 	{
-		static const FString SegmentPrefix = TEXT("seg-");
-		static const FString SegmentSuffix = TEXT(".tjs");
+		const int32 PrefixLen = FCString::Strlen(Prefix);
+		const int32 SuffixLen = FCString::Strlen(Suffix);
 
-		if (!FileName.StartsWith(SegmentPrefix) || !FileName.EndsWith(SegmentSuffix)
-			|| FileName.Len() - SegmentPrefix.Len() - SegmentSuffix.Len() != 16)
+		if (!FileName.StartsWith(Prefix, ESearchCase::CaseSensitive)
+			|| !FileName.EndsWith(Suffix, ESearchCase::CaseSensitive)
+			|| FileName.Len() - PrefixLen - SuffixLen != 16)
 		{
 			return false;
 		}
@@ -120,15 +129,30 @@ namespace TerrainStoragePaths
 		uint64 Value = 0;
 		for (int32 Index = 0; Index < 16; ++Index)
 		{
-			const TCHAR Char = FileName[SegmentPrefix.Len() + Index];
+			const TCHAR Char = FileName[PrefixLen + Index];
 			uint64 Nibble;
 			if      (Char >= TEXT('0') && Char <= TEXT('9')) { Nibble = static_cast<uint64>(Char - TEXT('0')); }
 			else if (Char >= TEXT('a') && Char <= TEXT('f')) { Nibble = static_cast<uint64>(Char - TEXT('a') + 10); }
-			else { return false; }   // lowercase only, matching what JournalSegment writes
+			else { return false; }   // lowercase only, matching what the writers emit
 			Value = (Value << 4) | Nibble;
 		}
-		OutSegmentId = Value;
+		OutId = Value;
 		return true;
+	}
+
+	bool ParseJournalSegment(const FString& FileName, uint64& OutSegmentId)
+	{
+		return ParseIdFileName(FileName, TEXT("seg-"), TEXT(".tjs"), OutSegmentId);
+	}
+
+	FString Pack(uint64 PackId)
+	{
+		return FString::Printf(TEXT("%s/pack-%016llx.tpk"), PacksDirectory, PackId);
+	}
+
+	bool ParsePack(const FString& FileName, uint64& OutPackId)
+	{
+		return ParseIdFileName(FileName, TEXT("pack-"), TEXT(".tpk"), OutPackId);
 	}
 
 	FString ObjectDirectory(const FTerrainDigest& Digest)
@@ -643,18 +667,41 @@ ETerrainStorageResult FTerrainFaultDevice::Delete(const FString& RelativePath)
 
 ETerrainStorageResult FTerrainFileObjectStore::EnsureLayout()
 {
-	return Device.EnsureDirectory(TerrainStoragePaths::ObjectsDirectory);
+	const ETerrainStorageResult ObjectsResult =
+		Device.EnsureDirectory(TerrainStoragePaths::ObjectsDirectory);
+	if (ObjectsResult != ETerrainStorageResult::Ok)
+	{
+		return ObjectsResult;
+	}
+	return Device.EnsureDirectory(TerrainStoragePaths::PacksDirectory);
 }
 
 bool FTerrainFileObjectStore::Contains(const FTerrainDigest& Digest) const
 {
-	return Device.Exists(TerrainStoragePaths::Object(Digest));
+	return BatchEntries.Contains(Digest)
+		|| PackMap.Contains(Digest)
+		|| Device.Exists(TerrainStoragePaths::Object(Digest));
 }
 
 bool FTerrainFileObjectStore::LoadObject(const FTerrainDigest& Digest, TArray<uint8>& OutBytes) const
 {
 	TArray<uint8> Bytes;
-	if (Device.Read(TerrainStoragePaths::Object(Digest), Bytes) != ETerrainStorageResult::Ok)
+
+	// An object written earlier in this batch must read back NOW, before the pack is durable.
+	// The index path-copy reads pages it wrote moments ago in the same capture, so a batch that
+	// could not be read from would break the very caller it exists for.
+	if (const FPackLocation* Buffered = BatchEntries.Find(Digest))
+	{
+		Bytes.Append(BatchBuffer.GetData() + Buffered->Offset, Buffered->Length);
+	}
+	else if (const FPackLocation* Packed = PackMap.Find(Digest))
+	{
+		if (!LoadFromPack(*Packed, Bytes))
+		{
+			return false;
+		}
+	}
+	else if (Device.Read(TerrainStoragePaths::Object(Digest), Bytes) != ETerrainStorageResult::Ok)
 	{
 		return false;
 	}
@@ -678,11 +725,27 @@ bool FTerrainFileObjectStore::StoreObject(const FTerrainDigest& Digest, TArrayVi
 		return false;
 	}
 
+	if (BatchEntries.Contains(Digest) || PackMap.Contains(Digest))
+	{
+		// Immutable and content-addressed: already held, in this batch or an earlier pack.
+		return true;
+	}
+
 	const FString Path = TerrainStoragePaths::Object(Digest);
 	if (Device.Exists(Path))
 	{
 		// Immutable and content-addressed: the same digest is the same bytes, so this is a
 		// success that writes nothing rather than a conflict.
+		return true;
+	}
+
+	if (bBatchOpen)
+	{
+		FPackLocation Where;
+		Where.Offset = BatchBuffer.Num();
+		Where.Length = Bytes.Num();
+		BatchBuffer.Append(Bytes.GetData(), Bytes.Num());
+		BatchEntries.Add(Digest, Where);
 		return true;
 	}
 
@@ -699,6 +762,220 @@ bool FTerrainFileObjectStore::StoreObject(const FTerrainDigest& Digest, TArrayVi
 ETerrainStorageResult FTerrainFileObjectStore::DeleteObject(const FTerrainDigest& Digest)
 {
 	return Device.Delete(TerrainStoragePaths::Object(Digest));
+}
+
+// ---- packs: many objects, one durable write (P-004 §13) -----------------
+
+void FTerrainFileObjectStore::BeginBatch()
+{
+	checkf(!bBatchOpen, TEXT("A pack batch is already open on this store."));
+	bBatchOpen = true;
+	BatchBuffer.Reset();
+	BatchEntries.Reset();
+}
+
+void FTerrainFileObjectStore::AbandonBatch()
+{
+	bBatchOpen = false;
+	BatchBuffer.Reset();
+	BatchEntries.Reset();
+}
+
+ETerrainStorageResult FTerrainFileObjectStore::CommitBatch()
+{
+	if (!bBatchOpen)
+	{
+		return ETerrainStorageResult::Ok;
+	}
+	if (BatchEntries.Num() == 0)
+	{
+		AbandonBatch();
+		return ETerrainStorageResult::Ok;
+	}
+	if (BatchEntries.Num() > TerrainPackMaxEntries)
+	{
+		AbandonBatch();
+		return ETerrainStorageResult::IoError;
+	}
+
+	// Created on demand, exactly as StoreObject does for the object fan-out directories: the
+	// store is not guaranteed to have had EnsureLayout run against it.
+	if (Device.EnsureDirectory(TerrainStoragePaths::PacksDirectory) != ETerrainStorageResult::Ok)
+	{
+		AbandonBatch();
+		return ETerrainStorageResult::IoError;
+	}
+
+	const uint64 PackId   = NextPackId;
+	const FString PackPath = TerrainStoragePaths::Pack(PackId);
+
+	// Body is already assembled in BatchBuffer; append the manifest, then the trailer.
+	const int64 ManifestOffset = BatchBuffer.Num();
+	TArray<uint8> Image = MoveTemp(BatchBuffer);
+	Image.Reserve(ManifestOffset + BatchEntries.Num() * TerrainPackEntrySize + TerrainPackTrailerSize);
+
+	for (const TPair<FTerrainDigest, FPackLocation>& Entry : BatchEntries)
+	{
+		Image.Append(Entry.Key.Bytes, TerrainPersistDigestSize);
+		const uint64 Offset = static_cast<uint64>(Entry.Value.Offset);
+		const uint32 Length = static_cast<uint32>(Entry.Value.Length);
+		for (int32 i = 0; i < 8; ++i) { Image.Add(static_cast<uint8>((Offset >> (i * 8)) & 0xFFu)); }
+		for (int32 i = 0; i < 4; ++i) { Image.Add(static_cast<uint8>((Length >> (i * 8)) & 0xFFu)); }
+	}
+
+	// The checksum covers everything before the trailer -- body and manifest both -- so a
+	// torn or partially written pack fails here rather than being half believed.
+	const uint64 Checksum = TerrainPersistChecksum(Image);
+
+	const uint32 Count = static_cast<uint32>(BatchEntries.Num());
+	for (int32 i = 0; i < 8; ++i) { Image.Add(static_cast<uint8>((TerrainPackMagic >> (i * 8)) & 0xFFu)); }
+	for (int32 i = 0; i < 4; ++i) { Image.Add(static_cast<uint8>((TerrainPackVersion >> (i * 8)) & 0xFFu)); }
+	for (int32 i = 0; i < 4; ++i) { Image.Add(static_cast<uint8>((Count >> (i * 8)) & 0xFFu)); }
+	const uint64 ManifestOffsetU = static_cast<uint64>(ManifestOffset);
+	for (int32 i = 0; i < 8; ++i) { Image.Add(static_cast<uint8>((ManifestOffsetU >> (i * 8)) & 0xFFu)); }
+	for (int32 i = 0; i < 8; ++i) { Image.Add(static_cast<uint8>((Checksum >> (i * 8)) & 0xFFu)); }
+
+	// One file, one flush. This is the whole point of the batch.
+	const ETerrainStorageResult Result = Device.WriteNew(PackPath, Image);
+	if (Result != ETerrainStorageResult::Ok)
+	{
+		AbandonBatch();
+		return Result;
+	}
+
+	// Only once it is durable do the buffered objects become resolvable from the pack.
+	for (const TPair<FTerrainDigest, FPackLocation>& Entry : BatchEntries)
+	{
+		FPackLocation Where = Entry.Value;
+		Where.PackId = PackId;
+		PackMap.Add(Entry.Key, Where);
+	}
+
+	++NextPackId;
+	AbandonBatch();
+	return ETerrainStorageResult::Ok;
+}
+
+bool FTerrainFileObjectStore::LoadFromPack(const FPackLocation& Where, TArray<uint8>& OutBytes) const
+{
+	TArray<uint8> Image;
+	if (Device.Read(TerrainStoragePaths::Pack(Where.PackId), Image) != ETerrainStorageResult::Ok)
+	{
+		return false;
+	}
+	if (Where.Offset < 0 || Where.Length < 0 || Where.Offset + Where.Length > Image.Num())
+	{
+		return false;
+	}
+	OutBytes.Reset();
+	OutBytes.Append(Image.GetData() + Where.Offset, Where.Length);
+	return true;
+}
+
+ETerrainStorageResult FTerrainFileObjectStore::LoadPacks()
+{
+	PackMap.Reset();
+	NextPackId = 0;
+
+	TArray<FString> Names;
+	const ETerrainStorageResult ListResult =
+		Device.ListFiles(TerrainStoragePaths::PacksDirectory, Names);
+	if (ListResult == ETerrainStorageResult::NotFound)
+	{
+		return ETerrainStorageResult::Ok;   // no packs directory yet: no packs
+	}
+	if (ListResult != ETerrainStorageResult::Ok)
+	{
+		return ListResult;
+	}
+
+	TArray<uint64> PackIds;
+	for (const FString& Name : Names)
+	{
+		uint64 PackId = 0;
+		if (TerrainStoragePaths::ParsePack(Name, PackId))
+		{
+			PackIds.Add(PackId);
+		}
+	}
+	PackIds.Sort();
+
+	for (const uint64 PackId : PackIds)
+	{
+		// Ids are allocated in order, so the next one is past the highest that exists --
+		// whether or not that pack turned out to be readable. Reusing the id of a torn pack
+		// would make a new pack overwrite it, and WriteNew refuses to overwrite anyway.
+		NextPackId = FMath::Max(NextPackId, PackId + 1);
+
+		TArray<uint8> Image;
+		if (Device.Read(TerrainStoragePaths::Pack(PackId), Image) != ETerrainStorageResult::Ok)
+		{
+			continue;
+		}
+		if (Image.Num() < TerrainPackTrailerSize)
+		{
+			continue;   // torn before the trailer: unreferenced garbage, not an error
+		}
+
+		const uint8* const Trailer = Image.GetData() + Image.Num() - TerrainPackTrailerSize;
+		auto ReadU64 = [](const uint8* P) -> uint64
+		{
+			uint64 V = 0;
+			for (int32 i = 0; i < 8; ++i) { V |= static_cast<uint64>(P[i]) << (i * 8); }
+			return V;
+		};
+		auto ReadU32 = [](const uint8* P) -> uint32
+		{
+			uint32 V = 0;
+			for (int32 i = 0; i < 4; ++i) { V |= static_cast<uint32>(P[i]) << (i * 8); }
+			return V;
+		};
+
+		if (ReadU64(Trailer) != TerrainPackMagic || ReadU32(Trailer + 8) != TerrainPackVersion)
+		{
+			continue;
+		}
+		const uint32 Count          = ReadU32(Trailer + 12);
+		const uint64 ManifestOffset = ReadU64(Trailer + 16);
+		const uint64 Checksum       = ReadU64(Trailer + 24);
+
+		if (Count > static_cast<uint32>(TerrainPackMaxEntries))
+		{
+			continue;
+		}
+		const int64 ManifestBytes = static_cast<int64>(Count) * TerrainPackEntrySize;
+		if (static_cast<int64>(ManifestOffset) + ManifestBytes + TerrainPackTrailerSize != Image.Num())
+		{
+			continue;   // the trailer does not describe this file
+		}
+		if (TerrainPersistChecksum(TArrayView<const uint8>(
+				Image.GetData(), Image.Num() - TerrainPackTrailerSize)) != Checksum)
+		{
+			continue;   // torn or corrupt: ignored, for the reason in the header
+		}
+
+		const uint8* Entry = Image.GetData() + ManifestOffset;
+		for (uint32 i = 0; i < Count; ++i, Entry += TerrainPackEntrySize)
+		{
+			FTerrainDigest Digest;
+			FMemory::Memcpy(Digest.Bytes, Entry, TerrainPersistDigestSize);
+
+			FPackLocation Where;
+			Where.PackId = PackId;
+			Where.Offset = static_cast<int64>(ReadU64(Entry + TerrainPersistDigestSize));
+			Where.Length = static_cast<int32>(ReadU32(Entry + TerrainPersistDigestSize + 8));
+
+			if (Where.Offset < 0 || Where.Length < 0
+				|| Where.Offset + Where.Length > static_cast<int64>(ManifestOffset))
+			{
+				continue;   // a manifest entry that points outside the body is not trusted
+			}
+			// Earlier packs win: a digest names one byte string, so a later duplicate is the
+			// same bytes and re-mapping it would only churn.
+			PackMap.FindOrAdd(Digest, Where);
+		}
+	}
+	return ETerrainStorageResult::Ok;
 }
 
 // ---- the slot pair ------------------------------------------------------

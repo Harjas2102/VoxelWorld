@@ -1096,3 +1096,86 @@ P-003 §4 named a real inefficiency, the fix was worth building on its own merit
 document's account of why capture was slow was still wrong by a factor of nine. The phase
 breakdown is now permanent in `FTerrainCheckpointStats` and is logged on every capture, so the
 next claim about where the time goes is checkable rather than inherited.
+
+---
+
+## D-036 — Objects are written in packs; the cost was the number of files (2026-09-20)
+
+**Recorded:** CP-015 · **Class:** technical (per **D-023**) · **Architect ruling, logged
+not asked** · **Scope:** T-121 · **Status:** ACCEPTED
+
+### 1. The candidate I ruled for in D-035 was wrong, and measuring said so first
+
+D-035 named three candidates for the index write path and put this one first: *"deferring the
+fsync to one barrier before the descriptor."* Before building it, the three strategies were
+measured over 49 small files on the development disk:
+
+| Strategy | Time |
+|---|---|
+| write each file and flush it (what existed) | 151.6 ms |
+| **write all files, hold the handles, flush at the end** | **155.8 ms** |
+| write and close each, then reopen each and flush | 55.6 ms |
+| **all of it in one file, one flush** | **2.3 ms** |
+
+The deferred barrier is *no cheaper*, because `FlushFileBuffers` costs the same whenever it is
+called — it is per file, and there is no cheap cross-file barrier to defer to. One `fsync` costs
+~3 ms **regardless of size**: a 160-byte index page costs what a megabyte costs.
+
+So the cost was never *when* the store syncs. It is **how many files it syncs**, and a
+checkpoint synced 59.
+
+### 2. Ruling
+
+**Objects are written in packs — P-004 §13.** A capture buffers every object it writes (chunk
+payloads, index pages, the checkpoint descriptor) and the pack is written and flushed **once**,
+immediately before the root slot. Two `fsync`s per capture instead of 59.
+
+Content addressing does not change, which is what makes this a storage-layer change rather than
+a format rewrite. Objects are still named by, and verified against, their BLAKE3 digest on the
+way in and on the way out; the index still path-copies; no other section's byte tables move.
+Only where the bytes live changes, and a reference does not record whether its target is loose
+or packed.
+
+The crash argument is the one §12 already made. A pack is flushed strictly before the root slot
+that names anything inside it, so a pack failing its trailer checks belongs to a capture that
+never published — **ignored in full, and explicitly not an error**, because refusing to open the
+world over it would turn collectable garbage into a dead world. An abandoned capture now writes
+nothing at all, which is better than the loose-object path, where partial work survived.
+
+### 3. Measured result
+
+| | before | after |
+|---|---|---|
+| warm solo capture, 8 chunks | 0.197 s | **0.010 s** |
+| under three-client load, 4 chunks | 0.14–0.25 s | **0.026–0.035 s** |
+| stall warnings in a 30 s MP round | 15, ~0.34 s each | **0** |
+
+Restore still works across process restarts: the four-launch harness restores 8 chunks from a
+pack written by a previous process, replays zero edits, and all eight chunk hashes are
+identical. 34/34 automation tests pass, including a new `Persistence.Storage.Pack` covering
+torn packs, corrupt bodies, id reuse, abandoned batches and loose/packed coexistence.
+
+### 4. `bCheckpointCapture` stays false, for a better reason
+
+It stays off, but the reason has changed from *"the measurement failed the gate"* to **"the
+measurement has not been taken."** Reading is now dominant again — about three quarters of a
+capture under load — and extrapolating 4 chunks to 256 gives roughly 1.5 s, which is not
+multi-second but is not evidence.
+
+**Flipping the default requires measuring a capture at its real trigger.** This checkpoint has
+now twice acted on a plausible projection and been wrong: P-003 §4 predicted the read was the
+cost, and D-035 predicted the fsync barrier was the fix. The harnesses dirty 4 and 8 chunks; the
+trigger is 256. Building that measurement is the gate, and it comes before the pump.
+
+### 5. Consequences
+
+Retention (DEF-9) inherits a new problem: reclamation can delete a loose object individually but
+**cannot delete one object out of a pack**. A pack is reclaimable only when nothing live refers
+to anything in it; reclaiming partially dead packs needs a compaction pass that does not exist.
+Recorded in P-004 §13.6.
+
+The general lesson is the same one as D-035, and it is now cheap to restate because it has
+happened twice in one checkpoint: **the fix that looks obvious deserves a measurement before it
+is built, not after.** Holding the handles open and flushing at the end is an entirely
+reasonable idea that would have cost a day and bought 4 ms in the wrong direction. It took three
+minutes to price it.

@@ -784,28 +784,38 @@ the running game, and checkpoint capture and restore all shipped and are proven 
 game: a four-launch production harness with all eight chunk hashes identical, and a run that
 restored the G=6 cut and replayed **zero** edits. **The world is saved to disk and reloads.**
 
-The most recent increment (T-120) built the adapter's bulk `ReadRegion` — one read lock and one
-`FVoxelConstDataAccelerator` per chunk in place of 32,768 locked octree traversals — and then
-measured what it actually bought. It reads identically (`Adapter.DensityContract` 20/20,
-fixture hashes unchanged) and capture only moved from ~42 to ~25 ms/chunk, because **reading
-was never the cost**. Per-phase timing, now permanent in `FTerrainCheckpointStats` and logged on
-every capture, puts **85% of a 0.197 s capture in the index path-copy** — 49 durable page
-writes for 8 changed keys — against 0.003 s of reading. See **D-035**.
+The two most recent increments went after the checkpoint stall, and between them took it
+from 0.197 s to 0.010 s.
 
-**Next: the index write path**, ahead of the incremental capture pump. The pump spreads chunk
-payload work, which the table above prices at under 10% of capture; doing it first would leave
-85% of the stall synchronous. In order:
+**T-120 — the bulk adapter `ReadRegion`.** One read lock and one `FVoxelConstDataAccelerator`
+per chunk in place of 32,768 locked octree traversals. It reads identically
+(`Adapter.DensityContract` 20/20, fixture hashes unchanged) and capture only moved from ~42 to
+~25 ms/chunk, because **reading was never the cost**. Per-phase timing, now permanent in
+`FTerrainCheckpointStats`, put **85% of capture in the index path-copy** (**D-035**).
 
-1. **One fsync barrier per capture rather than one per page.** P-004 §12's publication order
-   already leaves every page unreferenced until the root slot lands, so the barrier only has to
-   precede the descriptor and a crash mid-batch is already safe.
-2. **Batch a capture's pages into fewer object writes.**
-3. **Reduce the page count** — 6:1 amplification is what path-copying a 12-level trie over
-   scattered keys costs.
+**T-121 — packs.** 49 index pages holding 7 KB between them cost 0.168 s, because a durable
+write is one `fsync` and an `fsync` costs ~3 ms *regardless of size*. The obvious fix — defer
+the flushes to one barrier — was measured first and is **no cheaper** (155.8 ms vs 151.6 ms:
+the flush is per file whenever you call it). One file with one flush is **2.3 ms**. So a capture
+now buffers its payloads, index pages and descriptor into a single pack, flushed once, strictly
+before the root slot: two `fsync`s instead of 59, with content addressing and the publication
+ordering both unchanged (**D-036**, P-004 §13).
 
-Then re-measure and size the pump against whatever is left. After that: retention and GC (**the
-store still only grows**), and the crash matrix. `bCheckpointCapture` stays **false** until the
-projection to its own 256-chunk trigger stops being multi-second. DEF-1/2/9 remain open.
+Measured: **0.010 s solo, 0.026–0.035 s under three-client load, zero stall warnings** where a
+30-second round previously produced 15 of about a third of a second each. Restore still works
+across process restarts — the four-launch harness restores 8 chunks from a pack written by an
+earlier process and replays zero edits, with all eight hashes identical.
+
+**Next: measure a capture at its real trigger.** `bCheckpointCapture` is still false, but the
+reason has changed from "the measurement failed the gate" to **"the measurement has not been
+taken"**. The trigger is 256 dirty chunks and the harnesses dirty 4 and 8. Reading is dominant
+again (~75% under load) and extrapolation gives roughly 1.5 s — not multi-second, not evidence.
+Twice this checkpoint a plausible projection was wrong, so it does not get acted on.
+
+After that, in order: the incremental copy-before-write pump — now genuinely the right lever,
+since reading is again the dominant phase — then retention and GC (**the store still only
+grows, and a pack cannot be reclaimed object by object**, P-004 §13.6), then the crash matrix.
+DEF-1/2/9 remain open.
 
 ## Drift checks (VISION.md, run at CP-015)
 

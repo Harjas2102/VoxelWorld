@@ -74,6 +74,24 @@ FTerrainStoreResult TerrainCaptureCheckpoint(
 		return FTerrainStoreResult::Bad(ETerrainPersistError::FieldOutOfRange);
 	}
 
+	/**
+	 * Everything below is written into ONE pack with ONE flush, committed by PublishCheckpoint
+	 * immediately before the root slot (P-004 §13). Measured: an fsync costs ~3 ms whatever its
+	 * size, a capture over 8 chunks produced 59 objects, and 49 of those were index pages
+	 * holding 7 KB between them -- 0.168 s to write 7 KB. Deferring the flushes does not help
+	 * (155.8 ms held open vs 151.6 ms eager, measured); writing one file does (2.3 ms).
+	 *
+	 * The guard makes the batch strictly scoped: every early return below abandons it, and
+	 * nothing buffered was ever durable, so an abandoned capture leaves the store exactly as it
+	 * found it rather than leaving loose objects behind.
+	 */
+	struct FBatchGuard
+	{
+		FTerrainFileObjectStore& Store;
+		explicit FBatchGuard(FTerrainFileObjectStore& InStore) : Store(InStore) { Store.BeginBatch(); }
+		~FBatchGuard() { Store.AbandonBatch(); }
+	} BatchGuard(Store.GetObjects());
+
 	// --- 1. every dirty chunk becomes an immutable payload object ---------------------------
 	TArray<FTerrainIndexUpdate> Updates;
 	Updates.Reserve(DirtyKeys.Num());
@@ -230,20 +248,19 @@ FTerrainStoreResult TerrainCaptureCheckpoint(
 		// synchronous, so this is the number that decides whether the incremental
 		// copy-before-write pump can keep being deferred -- and the per-chunk rate is what
 		// makes the projection to a full trigger obvious rather than something to work out.
-		// The dominant phase is named explicitly because the obvious culprit was the wrong one.
-		// The bulk adapter ReadRegion landed and capture time barely moved: measured warm, read
-		// is 0.003 s of a 0.197 s capture while the index path-copy is 0.168 s. An incremental
-		// pump that spreads chunk reads and payload writes -- which is what P-003 §4 describes
-		// -- would therefore spread about a fifth of this and leave the rest a synchronous
-		// stall. Whatever fixes capture has to fix the index write amplification: 49 durably
-		// written pages for 8 changed keys.
+		// The dominant phase is named rather than assumed, because it has now been a DIFFERENT
+		// phase twice. It was per-voxel reading; the bulk adapter read fixed that and the index
+		// path-copy turned out to be 85%; packs fixed that (0.197 s -> 0.010 s) and reading is
+		// dominant again, at roughly three quarters of a capture under multiplayer load. The
+		// phase times are printed on every capture so the next person does not have to guess.
 		const double MillisPerChunk = OutStats.Seconds * 1000.0 / double(OutStats.ChunksWritten);
 		UE_LOG(LogTerrainCore, Warning,
-			TEXT("Checkpoint stalled the game thread for %.2f s over %d chunks (%.1f ms/chunk); ")
-			TEXT("%d index pages cost %.3f s of it. P-003 §4 fails a visible multi-second stall. ")
-			TEXT("The bulk adapter read is done and was not the cost; the index write path is."),
+			TEXT("Checkpoint stalled the game thread for %.2f s over %d chunks (%.1f ms/chunk). ")
+			TEXT("P-003 §4 fails a visible multi-second stall. Phases: read %.3f, encode %.3f, ")
+			TEXT("store %.3f, index %.3f, publish %.3f -- spread the largest one."),
 			OutStats.Seconds, OutStats.ChunksWritten, MillisPerChunk,
-			OutStats.IndexPagesWritten, OutStats.IndexSeconds);
+			OutStats.ReadSeconds, OutStats.EncodeSeconds, OutStats.StoreSeconds,
+			OutStats.IndexSeconds, OutStats.PublishSeconds);
 	}
 	return FTerrainStoreResult::Ok();
 }
