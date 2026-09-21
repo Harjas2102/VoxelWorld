@@ -95,7 +95,10 @@ FTerrainStoreResult TerrainCaptureCheckpoint(
 		}
 
 		FTerrainRegionData Region;
-		if (!Backend.ReadRegion(Key, Region)
+		const double ReadStarted = FPlatformTime::Seconds();
+		const bool bRead = Backend.ReadRegion(Key, Region);
+		OutStats.ReadSeconds += FPlatformTime::Seconds() - ReadStarted;
+		if (!bRead
 			|| Region.Encoding != ETerrainRegionEncoding::Dense
 			|| Region.Payload.Num() != TerrainPersistDenseBytes)
 		{
@@ -118,6 +121,7 @@ FTerrainStoreResult TerrainCaptureCheckpoint(
 			return FTerrainStoreResult::Bad(ETerrainPersistError::OrderViolation);
 		}
 
+		const double EncodeStarted = FPlatformTime::Seconds();
 		TArray<uint8> Body;
 		const ETerrainPersistError BodyError = TerrainPersistEncodeChunkPayloadBody(Record, Body);
 		if (BodyError != ETerrainPersistError::None)
@@ -134,7 +138,12 @@ FTerrainStoreResult TerrainCaptureCheckpoint(
 		}
 
 		const FTerrainDigest Digest = TerrainPersistDigest(Object);
-		if (!Store.GetObjects().StoreObject(Digest, Object))
+		OutStats.EncodeSeconds += FPlatformTime::Seconds() - EncodeStarted;
+
+		const double StoreStarted = FPlatformTime::Seconds();
+		const bool bStored = Store.GetObjects().StoreObject(Digest, Object);
+		OutStats.StoreSeconds += FPlatformTime::Seconds() - StoreStarted;
+		if (!bStored)
 		{
 			return FTerrainStoreResult::Io(ETerrainStorageResult::IoError);
 		}
@@ -159,9 +168,11 @@ FTerrainStoreResult TerrainCaptureCheckpoint(
 	OldRoot.RootPageLength = Store.GetState().Checkpoint.RootPageLength;
 
 	FTerrainIndexRoot NewRoot;
+	const double IndexStarted = FPlatformTime::Seconds();
 	const ETerrainPersistError IndexError = TerrainIndexApply(
 		Identity, Store.GetObjects(), Store.GetObjects(), OldRoot, Updates,
 		NewRoot, OutStats.IndexPagesWritten);
+	OutStats.IndexSeconds = FPlatformTime::Seconds() - IndexStarted;
 	if (IndexError != ETerrainPersistError::None)
 	{
 		return FTerrainStoreResult::Bad(IndexError);
@@ -191,7 +202,9 @@ FTerrainStoreResult TerrainCaptureCheckpoint(
 	Descriptor.LeafKeyCount      = static_cast<uint64>(LeafCount);
 	Descriptor.TotalPayloadBytes = static_cast<uint64>(TotalPayloadBytes);
 
+	const double PublishStarted = FPlatformTime::Seconds();
 	const FTerrainStoreResult Published = Store.PublishCheckpoint(Descriptor, UtcMillis);
+	OutStats.PublishSeconds = FPlatformTime::Seconds() - PublishStarted;
 	if (!Published.IsOk())
 	{
 		// Everything written above is unreferenced by any root: garbage to be collected, not a
@@ -204,9 +217,12 @@ FTerrainStoreResult TerrainCaptureCheckpoint(
 
 	UE_LOG(LogTerrainCore, Log,
 		TEXT("Checkpoint published at G=%llu generation=%llu: %d chunks (%lld bytes), %d index pages, ")
-		TEXT("%lld keys total, in %.3f s."),
+		TEXT("%lld keys total, in %.3f s ")
+		TEXT("(read %.3f, encode %.3f, store %.3f, index %.3f, publish %.3f)."),
 		G, OutStats.Generation, OutStats.ChunksWritten, OutStats.PayloadBytes,
-		OutStats.IndexPagesWritten, LeafCount, OutStats.Seconds);
+		OutStats.IndexPagesWritten, LeafCount, OutStats.Seconds,
+		OutStats.ReadSeconds, OutStats.EncodeSeconds, OutStats.StoreSeconds,
+		OutStats.IndexSeconds, OutStats.PublishSeconds);
 
 	if (OutStats.Seconds > 0.1 && OutStats.ChunksWritten > 0)
 	{
@@ -214,13 +230,20 @@ FTerrainStoreResult TerrainCaptureCheckpoint(
 		// synchronous, so this is the number that decides whether the incremental
 		// copy-before-write pump can keep being deferred -- and the per-chunk rate is what
 		// makes the projection to a full trigger obvious rather than something to work out.
+		// The dominant phase is named explicitly because the obvious culprit was the wrong one.
+		// The bulk adapter ReadRegion landed and capture time barely moved: measured warm, read
+		// is 0.003 s of a 0.197 s capture while the index path-copy is 0.168 s. An incremental
+		// pump that spreads chunk reads and payload writes -- which is what P-003 §4 describes
+		// -- would therefore spread about a fifth of this and leave the rest a synchronous
+		// stall. Whatever fixes capture has to fix the index write amplification: 49 durably
+		// written pages for 8 changed keys.
 		const double MillisPerChunk = OutStats.Seconds * 1000.0 / double(OutStats.ChunksWritten);
 		UE_LOG(LogTerrainCore, Warning,
-			TEXT("Checkpoint stalled the game thread for %.2f s over %d chunks (%.1f ms/chunk). ")
-			TEXT("At a 256-chunk trigger that projects to %.1f s. P-003 §4 fails a visible ")
-			TEXT("multi-second stall; the fixes it names are a bulk adapter ReadRegion and the ")
-			TEXT("incremental capture pump (DEF-2)."),
-			OutStats.Seconds, OutStats.ChunksWritten, MillisPerChunk, MillisPerChunk * 0.256);
+			TEXT("Checkpoint stalled the game thread for %.2f s over %d chunks (%.1f ms/chunk); ")
+			TEXT("%d index pages cost %.3f s of it. P-003 §4 fails a visible multi-second stall. ")
+			TEXT("The bulk adapter read is done and was not the cost; the index write path is."),
+			OutStats.Seconds, OutStats.ChunksWritten, MillisPerChunk,
+			OutStats.IndexPagesWritten, OutStats.IndexSeconds);
 	}
 	return FTerrainStoreResult::Ok();
 }

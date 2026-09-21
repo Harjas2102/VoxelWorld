@@ -89,6 +89,22 @@ struct FTerrainCheckpointStats
 
 	/** The stall. P-003 §4 makes this an acceptance gate, not a curiosity. */
 	double Seconds = 0.0;
+
+	/**
+	 * Where the stall actually goes. These exist because the first optimisation aimed at the
+	 * wrong half: the bulk adapter ReadRegion cut per-voxel reads by orders of magnitude and
+	 * capture time barely moved, because reading was never the expensive part. Splitting the
+	 * phases is what turns "capture costs 0.2 s" into a statement the incremental pump can be
+	 * designed against, since a pump can only spread work it can identify.
+	 *
+	 * They sum to slightly less than Seconds; the remainder is the descriptor walk and the
+	 * bookkeeping between phases.
+	 */
+	double ReadSeconds = 0.0;      // ITerrainBackend::ReadRegion for every dirty chunk
+	double EncodeSeconds = 0.0;    // body/object encoding and the BLAKE3 content digest
+	double StoreSeconds = 0.0;     // durably writing the payload objects
+	double IndexSeconds = 0.0;     // path-copying the radix index, including its own writes
+	double PublishSeconds = 0.0;   // the descriptor object and the root slot pair
 };
 
 /**

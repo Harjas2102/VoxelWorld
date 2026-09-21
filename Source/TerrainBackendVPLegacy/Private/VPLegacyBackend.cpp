@@ -13,6 +13,8 @@
 #include "VoxelComponents/VoxelInvokerComponent.h"
 #include "VoxelTools/Gen/VoxelSphereTools.h"
 #include "VoxelTools/VoxelDataTools.h"
+#include "VoxelData/VoxelDataAccelerator.h"
+#include "VoxelData/VoxelDataLock.h"
 #include "VoxelTools/VoxelBlueprintLibrary.h"
 
 #include "Engine/World.h"
@@ -498,22 +500,51 @@ bool FVPLegacyBackend::ReadRegion(const FTerrainChunkKey& Key, FTerrainRegionDat
 		return false;
 	}
 
-	const FTerrainBox Bounds = TerrainChunkBounds(Key);
+	const FTerrainBox ChunkBox = TerrainChunkBounds(Key);
 	Out.Encoding = ETerrainRegionEncoding::Dense;
-	Out.Payload.Reserve(TerrainChunkSampleCount * 4);
 
-	// Density, then materials, both little-endian, local index x + 32y + 1024z (§4.7).
-	for (int32 Z = 0; Z < TerrainChunkSizeVox; ++Z)
-	for (int32 Y = 0; Y < TerrainChunkSizeVox; ++Y)
-	for (int32 X = 0; X < TerrainChunkSizeVox; ++X)
+	// Written in place rather than appended. Two Add() calls per sample is 65,536 of them per
+	// chunk, and the bounds check and capacity test on each are pure overhead when the exact
+	// size is known before the first byte.
+	Out.Payload.SetNumUninitialized(TerrainChunkSampleCount * 4);
+	uint8* const Density  = Out.Payload.GetData();
+	uint8* const Material = Density + TerrainChunkSampleCount * 2;
+
+	// Materials are K9 / build step 6 and are not read back yet, so the upper half is zero. It
+	// is zeroed once here instead of through 32,768 append calls.
+	FMemory::Memzero(Material, TerrainChunkSampleCount * 2);
+
 	{
-		float Value = 0.f;
-		UVoxelDataTools::GetValue(Value, Actor, FIntVector(Bounds.Min.X + X, Bounds.Min.Y + Y, Bounds.Min.Z + Z));
-		Append16(Out.Payload, static_cast<uint16>(QuantiseDensity(Value)));
-	}
-	for (int32 Index = 0; Index < TerrainChunkSampleCount; ++Index)
-	{
-		Append16(Out.Payload, 0);   // materials: K9, build step 6
+		// ONE lock and ONE accelerator for the whole chunk.
+		//
+		// This used to call UVoxelDataTools::GetValue per voxel: 32,768 separate lock
+		// acquisitions, each followed by a full octree traversal from the root. P-003 §4 named
+		// that path as an acceptance gate before it was ever measured -- "the current
+		// 32,768-per-voxel-call adapter path must gain a measured bulk-read implementation
+		// before production integration" -- and measuring it is what made checkpoint capture
+		// unaffordable: 42 ms per chunk solo and 86 ms under three-client load.
+		//
+		// FVoxelConstDataAccelerator is what the plugin's own bulk reader uses. Built over the
+		// chunk's bounds, it caches the octree node between lookups, so walking a chunk in
+		// index order costs one traversal and then near-constant-time neighbours.
+		auto& WorldData = Actor->GetData();
+		const FVoxelIntBox Bounds(ChunkBox.Min, ChunkBox.Max);
+		FVoxelReadScopeLock Lock(WorldData, Bounds, FUNCTION_FNAME);
+		const FVoxelConstDataAccelerator Accelerator(WorldData, Bounds);
+
+		// Local index x + 32y + 1024z (§4.2), so X is the innermost loop and consecutive
+		// samples are adjacent in voxel space -- which is what the accelerator's cache rewards.
+		int32 Index = 0;
+		for (int32 Z = 0; Z < TerrainChunkSizeVox; ++Z)
+		for (int32 Y = 0; Y < TerrainChunkSizeVox; ++Y)
+		for (int32 X = 0; X < TerrainChunkSizeVox; ++X, ++Index)
+		{
+			const float Value = Accelerator.GetValue(
+				ChunkBox.Min.X + X, ChunkBox.Min.Y + Y, ChunkBox.Min.Z + Z, 0).ToFloat();
+			const uint16 Quantised = static_cast<uint16>(QuantiseDensity(Value));
+			Density[Index * 2]     = static_cast<uint8>( Quantised       & 0xFFu);
+			Density[Index * 2 + 1] = static_cast<uint8>((Quantised >> 8) & 0xFFu);
+		}
 	}
 
 	return true;

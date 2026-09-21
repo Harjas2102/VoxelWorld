@@ -947,16 +947,32 @@ is closed** rather than serving a pristine world as though it were the saved one
 
 **Checkpoint capture exists and is correct, and defaults to OFF.** A synchronous cut taken
 when the queue is empty; restore then replaces operation replay. It is opt-in because it was
-measured: **~42 ms per chunk solo and ~86 ms under three-client load**, which at P-003 §4's
-own 256-chunk soft trigger projects to **22 seconds** of frozen game. P-003 §4 fails a visible
-multi-second stall and named the cause in advance — the adapter's 32,768-per-voxel `ReadRegion`
-needs a bulk implementation. `bCheckpointCapture` is the Director's trade to make.
+measured, and the measurement has since been taken apart by phase (**D-035**).
 
-**What does not exist.** The incremental copy-before-write capture pump, a bulk adapter
-`ReadRegion`, Empty/SparseDiff compaction (P-003 §6 rules it out until a backend can state its
-own base), settlement, SQLite, retention or GC — **the store only grows** — the
-exclusive-writer lease P-003 §5 requires, and the crash matrix. Build step 4 is not complete
-and DEF-1/2/9 remain open.
+**The adapter's bulk `ReadRegion` is built.** `FVPLegacyBackend` takes one `FVoxelReadScopeLock`
+and one `FVoxelConstDataAccelerator` per chunk, rather than 32,768 lock acquisitions each
+carrying an octree traversal, and fills the payload in place. `Adapter.DensityContract` passes
+20/20 with unchanged fixture hashes, so it reads exactly what the per-voxel path read.
+
+**It was not the cause of the stall.** Capture went from ~42 to ~25 ms/chunk, and the phases
+say where the rest is. A warm 8-chunk capture costs 0.197 s: reading is **0.003 s**, encoding
+and BLAKE3 round to zero, storing 1 MB of payload objects is 0.015 s, publishing is 0.005 s,
+and the **index path-copy is 0.168 s — 85%**, writing 49 durable pages for 8 changed keys.
+Under three-client load, 4 chunks cost the same wall-clock as 8 chunks solo, which is the same
+finding from the other direction: the chunks are not the cost. Per-capture phase times are now
+logged on every capture, so this stays checkable.
+
+Capture therefore remains off: the projection to a 256-chunk trigger is still multi-second, so
+P-003 §4's gate is still failed. But the next fix is the index write path — batching pages and
+moving to one fsync barrier before the descriptor, which P-004 §12's publication order already
+makes crash-safe — **not** the incremental pump, which would spread the ~10% that payload work
+accounts for and leave the rest synchronous (**D-035**).
+
+**What does not exist.** Index write batching, the incremental copy-before-write capture pump,
+Empty/SparseDiff compaction (P-003 §6 rules it out until a backend can state its own base),
+settlement, SQLite, retention or GC — **the store only grows** — the exclusive-writer lease
+P-003 §5 requires, and the crash matrix. Build step 4 is not complete and DEF-1/2/9 remain
+open.
 
 - **Commit:** journal append + durable flush precedes terrain broadcast and
   TerrainCommitted; SQLite settlement follows, with idempotent `(WorldId, OpSeq)`

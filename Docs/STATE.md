@@ -778,35 +778,34 @@ yield, and server authority is not proven until build step 3.
 
 ## Current task
 
-**Nothing is outstanding from CP-015.** Build steps 0, 1, 2, 3 and 8 are complete. Build
-step 4 now has its architecture (P-003), its byte format (P-004, independently verified), its
-codecs, and the storage device they write through. **Nothing is saved to disk yet**, because
-nothing above the device knows how to compose a world.
+**Build step 4 is most of the way in.** Since the CP-015 increments recorded above, the journal
+writer and segment rotation, the world store, the durable commit path, replay, bootstrap into
+the running game, and checkpoint capture and restore all shipped and are proven in the real
+game: a four-launch production harness with all eight chunk hashes identical, and a run that
+restored the G=6 cut and replayed **zero** edits. **The world is saved to disk and reloads.**
 
-**Next: the journal writer and segment rotation**, on top of `ITerrainStorageDevice`. In order:
+The most recent increment (T-120) built the adapter's bulk `ReadRegion` — one read lock and one
+`FVoxelConstDataAccelerator` per chunk in place of 32,768 locked octree traversals — and then
+measured what it actually bought. It reads identically (`Adapter.DensityContract` 20/20,
+fixture hashes unchanged) and capture only moved from ~42 to ~25 ms/chunk, because **reading
+was never the cost**. Per-phase timing, now permanent in `FTerrainCheckpointStats` and logged on
+every capture, puts **85% of a 0.197 s capture in the index path-copy** — 49 durable page
+writes for 8 changed keys — against 0.003 s of reading. See **D-035**.
 
-1. **The journal writer** — create a segment (header object written and flushed before any
-   record is appended), append framed commit records, seal, and rotate in P-004 §9.5's exact
-   order: new segment header and namespace → publish and flush the **inactive** anchor →
-   append. The scanner that reads all of this already exists and is tested; this is its writer.
-2. **The world store** — create (base descriptor, both root slots, both anchor slots, the
-   empty G=0 checkpoint, the first segment) and open (validate, select the highest valid
-   generation, refuse on identity mismatch).
-3. **Then, and only then, the commit path** with a `NoEconomy` consumer, and the crash matrix
-   built on `FTerrainFaultDevice`. Do not start settlement or SQLite before the storage owner
-   has its own fault-injection coverage across every write, flush and rotation.
+**Next: the index write path**, ahead of the incremental capture pump. The pump spreads chunk
+payload work, which the table above prices at under 10% of capture; doing it first would leave
+85% of the stall synchronous. In order:
 
-**Incoming Implementer: either** Claude or Codex by availability (D-028). Read `HANDOFF.md`
-first.
+1. **One fsync barrier per capture rather than one per page.** P-004 §12's publication order
+   already leaves every page unreferenced until the root slot lands, so the barrier only has to
+   precede the descriptor and a crash mid-batch is already safe.
+2. **Batch a capture's pages into fewer object writes.**
+3. **Reduce the page count** — 6:1 amplification is what path-copying a 12-level trie over
+   scattered keys costs.
 
-**Also open, and unassigned:** **R-013** — the production adapter still has not passed
-`Backend.Conformance`, and the §6.2 in-engine harness that would run it does not exist.
-**R-010's KillZ** remains a prerequisite for anyone actually playing. **R-014** is
-cross-platform kernel determinism. **R-015** is the unproved Windows durable-publication
-question and gates step-4 integration. **R-007 is now broader than it was** and is the one
-worth reading before the next increment: the Flush finding proves that correct-here,
-wrong-there behaviour is real, undetectable from this machine, and was caught by reading
-rather than by any test. **R-016** is reduced to a design read.
+Then re-measure and size the pump against whatever is left. After that: retention and GC (**the
+store still only grows**), and the crash matrix. `bCheckpointCapture` stays **false** until the
+projection to its own 256-chunk trigger stops being multi-second. DEF-1/2/9 remain open.
 
 ## Drift checks (VISION.md, run at CP-015)
 

@@ -1031,3 +1031,68 @@ storage device exist; the journal writer, segment rotation, anchor and checkpoin
 world create/open, recovery and retention do not, and **nothing is written to disk**. DEF-1,
 DEF-2 and DEF-9 remain open. Evidence for both increments is in `HANDOFF.md` and in the commit
 messages for `af67b6f` and `30105b5`.
+
+---
+
+## D-035 — The checkpoint stall is index write amplification, not reading (2026-09-20)
+
+**Recorded:** CP-015 · **Class:** technical (per **D-023**) · **Architect ruling, logged
+not asked** · **Scope:** T-120 and the increment after it · **Status:** ACCEPTED
+
+### 1. Context
+
+P-003 §4 named the cause of the capture stall before anyone measured it: *"the current
+32,768-per-voxel-call adapter path must gain a measured bulk-read implementation before
+production integration."* That prediction was reasonable and it was wrong.
+
+The bulk `ReadRegion` is now built. `FVPLegacyBackend::ReadRegion` takes one
+`FVoxelReadScopeLock` and one `FVoxelConstDataAccelerator` per chunk instead of 32,768 lock
+acquisitions each carrying a full octree traversal, and writes the payload in place instead of
+65,536 `TArray::Add` calls. `Adapter.DensityContract` passes 20/20 with **unchanged fixture
+hashes**, so the fast path reads exactly what the slow path read.
+
+Capture time barely moved: ~42 ms/chunk before, ~25 ms/chunk after. So the phases were
+instrumented, and the answer is not ambiguous. Warm solo capture, 8 chunks, 1,049,600 bytes:
+
+| Phase | Time | Share |
+|---|---|---|
+| `ReadRegion` × 8 | 0.003 s | 1.5% |
+| encode + BLAKE3 digest | 0.000 s | ~0% |
+| store 8 payload objects (1 MB) | 0.015 s | 8% |
+| **index path-copy, 49 pages** | **0.168 s** | **85%** |
+| descriptor + root slot | 0.005 s | 2.5% |
+
+Under three-client load the shape holds: 4 chunks cost 0.14–0.25 s, which is *the same
+wall-clock as 8 chunks solo*. Doubling the chunk count did not change the time, because the
+chunks were never the cost.
+
+### 2. Ruling
+
+**The incremental capture pump is not the next increment, and P-003 §4's description of it is
+no longer sufficient.** The pump as specified spreads chunk payload work — copy-before-write
+fences, dirty banks, background chunk reads. That is the 9.5% of capture that reading and
+storing payloads account for. Building it as written would spread a tenth of the stall, leave
+85% of it synchronous on the game thread, and let us report a fix that a player would still
+feel.
+
+The index write path is what has to change. Nine changed keys cost 49 durably written pages —
+a 6:1 write amplification, and each page is an object write ending in `Flush(true)` per
+**D-034**, which is where the time goes. The candidates are batching the pages of one capture
+into a single durable write, deferring the fsync to one barrier before the descriptor (the
+publication order in P-004 §12 already makes every page unreferenced garbage until the root
+slot lands, so a crash mid-batch is already safe), and reducing the page count itself.
+
+**`bCheckpointCapture` stays `false`.** The measured stall is smaller but the projection to the
+256-chunk trigger is still multi-second, so P-003 §4's gate is still failed.
+
+### 3. Consequences
+
+The order of work changes: index write amplification precedes the pump, and the pump's scope
+shrinks to whatever is still expensive once the fsync barrier is fixed — possibly to nothing,
+which would be the better outcome.
+
+The general point is worth keeping. **A prediction in an adopted proposal is not evidence.**
+P-003 §4 named a real inefficiency, the fix was worth building on its own merits, and the
+document's account of why capture was slow was still wrong by a factor of nine. The phase
+breakdown is now permanent in `FTerrainCheckpointStats` and is logged on every capture, so the
+next claim about where the time goes is checkable rather than inherited.

@@ -108,10 +108,13 @@ public:
 	 * game**, and P-003 section 4 is explicit that a visible multi-second stall under the
 	 * supported workload FAILS.
 	 *
-	 * P-003 section 4 also named the cause before it was measured: *"the current
-	 * 32,768-per-voxel-call adapter path must gain a measured bulk-read implementation before
-	 * production integration."* Two things fix this — a bulk `ReadRegion` in the adapter, and
-	 * the incremental copy-before-write pump — and neither is built.
+	 * P-003 section 4 named a cause before it was measured: *"the current 32,768-per-voxel-call
+	 * adapter path must gain a measured bulk-read implementation before production
+	 * integration."* That bulk read is now built, and it was not the cause. Capture went from
+	 * ~42 to ~25 ms/chunk, and the phase breakdown says why: of a 0.197 s capture over 8
+	 * chunks, reading is 0.003 s and the index path-copy is 0.168 s. The stall is index write
+	 * amplification — 49 durably written pages for 8 changed keys — not reading terrain
+	 * (D-035). Every capture logs its own phase times, so this is checkable, not inherited.
 	 *
 	 * Turning it on is a real trade and it is yours to make: an occasional multi-second freeze
 	 * during play, in exchange for a startup that does not slow down forever. Journalling is
