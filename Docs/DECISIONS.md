@@ -1823,3 +1823,20 @@ not asked** · **Scope:** T-133, gate 8, R-018 · **Status:** ACCEPTED · **Spec
 - **Result:** 99 edits/s sustained with no refusals and frames p95 34–38 ms, over three runs. R-018
   is closed on this machine and stays open for Linux.
 
+## D-051 — The server's collision comes only from interests (GO-1); Gate-Observe rulings (2026-09-22)
+
+**Recorded:** CP-024 · **Class:** technical (per **D-023**) · **Architect ruling, logged
+not asked** · **Scope:** T-134, 1F Gate-Observe · **Status:** ACCEPTED · **Report:** P-013
+
+- **GO-1:** on the server role the adapter turns off the plugin's visible-chunk collision
+  (`bComputeVisibleChunksCollisions`). Its coarse whole-world mesh covered the full-detail
+  interest collision, so small digs never reached the server's physics. Clients keep the default.
+- **Undermined terrain is not simulated.** Floating terrain persisting is accepted for Phase 1.
+- **Foliage is a game system keyed by terrain chunk**, driven by the service's published edits,
+  when vegetation is authored. Plugin spawners (Pro only) are not an option.
+- **Navigation measurement waits for a level with a navmesh (Phase 5).** The harness's `NavWatch`
+  measures it then.
+- **Development-only switches:** `-TerrainObserve` lets the console edit path run on a dedicated
+  server; `-TerrainNavmesh` turns the plugin navmesh on. Neither is in a shipping build.
+- **E-9 (R-010) is the next task**, ahead of the backend decision.
+

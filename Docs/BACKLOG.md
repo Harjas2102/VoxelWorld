@@ -109,11 +109,13 @@ deliberately removing arbitrary terrain manipulation from Pillar 1).
 - **1F** — Stress profile, collision, foliage, nav, streaming → **decide the backend**.
   **Gate 8 PASS on this machine at CP-023 (T-133):** 99 edits/s sustained, 0 refusals, frames
   p95 34–38 ms, correctness exact. Codex review F1 to F5 are done; F6 waits for Linux (R-007).
-  **Next: T-134, the Gate-Observe pass.** For each of collision edge cases, foliage and PCG over
-  removed terrain, nav dirtying, undermined or floating terrain, and streaming of modified chunks,
-  document what the plugin does, with evidence, and what our wrapper would have to own. Items
-  that need eyes in the editor become short Director checks. Then the backend decision:
-  PASS, CONDITIONAL or FAIL (Phase 1 exit).
+  **Gate-Observe done at CP-024 (T-134, P-013):** GO-1 found and fixed (server collision ignored
+  small digs); no fall-through gap; undermined terrain persists; collision streams correctly;
+  foliage and nav documented with response models. **R-010 is live:** every server correction on
+  terrain is discarded.
+  **Next: T-135, E-9.** Make the terrain mesh non-movable (ARCHITECTURE §7.4) so corrections
+  resolve, and re-count them in the MP harness. The fallback is a movement-component override.
+  Then the backend decision: PASS, CONDITIONAL or FAIL (Phase 1 exit).
 
 ### T-006 — Editor fluency *(rescoped at CP-002; not started)*
 
@@ -242,6 +244,12 @@ T-101B sub-step 1D, which requires the multiplayer-capable version instead.
 ---
 
 ## Done
+
+- **T-134** *(CP-024)* **The 1F Gate-Observe pass.** `Terrain.Observe` traces the physics scene
+  through scripted edits, standalone and on a dedicated server. **GO-1 found and fixed:** server
+  collision ignored small digs; after the fix, edits reach server collision in about 100 ms, with
+  0 frames of missing collision. Undermining, streaming, foliage and nav documented. R-010
+  confirmed live. **D-051**, report **P-013**.
 
 - **T-133** *(CP-023)* **Journal group commit and a chunk-priced checkpoint trigger; gate 8's
   performance half passes on this machine.** 99 edits/s sustained (was 67–78), 0 refusals (was

@@ -5,12 +5,35 @@
 
 ---
 
-**Checkpoint:** CP-023 · **Date:** 2026-09-22
+**Checkpoint:** CP-024 · **Date:** 2026-09-22
 **Phase:** 1 — Terrain Feasibility
 **Expected next agent:** either (D-028)
-**Current task:** T-134 — the 1F Gate-Observe pass: collision edge cases, foliage and PCG over
-removed terrain, nav dirtying, undermined terrain, and streaming of modified chunks. These are
-documented, not solved, and lead to the backend decision (BACKLOG Phase 1 exit).
+**Current task:** T-135 — E-9, the movement-base experiment (R-010). Make the terrain mesh
+non-movable so server corrections to clients standing on terrain resolve, re-count them in the MP
+harness, then take the backend decision (Phase 1 exit).
+
+## What happened at CP-024
+
+**One increment, T-134 (D-051, P-013): the Gate-Observe pass.** `Terrain.Observe` (development
+only) ran scripted edits through the real path and traced the physics scene every frame, both
+standalone and on a dedicated server.
+
+| Observed | Result |
+|---|---|
+| **GO-1, found and fixed** | The server's collision **never showed a 1.5 m or 3 m dig**. A coarse whole-world "visible chunk" collision mesh (about 512 m) sat over the full-detail collision. Players would rubber-band over holes clients could see. Visible-chunk collision is now off on the server; **every edit reaches server collision in about 100 ms** |
+| Fall-through window | **0 frames without collision** over 16 edits, because collision is double-buffered. The old fall was a fill engulfing the player, which is already refused for every pawn |
+| Undermined terrain | Stays exactly in place; overhangs and floating lumps persist. No structural simulation, by design |
+| Streaming | Edits never unload. Server collision exists only near interests, and returns in 232 ms with the dig intact |
+| Foliage / PCG | None in the level. Plugin spawners need Voxel Plugin Pro. The response model is game-owned, keyed by chunk |
+| Navigation | Source-traced only: the level has no navmesh bounds. Measurement deferred to Phase 5 |
+| **R-010 is live** | **Every server correction to clients on terrain is discarded** (55–142 per client per MP run), because the terrain mesh is Movable with no net identity. E-9 is next |
+
+Regression: 43/43; both targets build; MP 3 rounds PASS; stress PASS at 99 edits/s, with the worst
+frame down to 69–84 ms from 88–96.
+
+**Drift checks: NO FLAG MOVED.** No `Build.cs` changed. D-011 holds: the new switches are in the
+adapter and the development-only harness. **Player-facing:** the server now sees every hole a
+player digs.
 
 ## What happened at CP-023
 

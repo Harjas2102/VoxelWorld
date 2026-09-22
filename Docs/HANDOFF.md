@@ -1,7 +1,7 @@
 # HANDOFF
 
-**Checkpoint:** CP-023 · **Date:** 2026-09-22 · **Branch:** `main`
-**Agents:** Claude (Opus 5) wrote T-128 to T-133. Codex independently reviewed CP-016 to CP-020
+**Checkpoint:** CP-024 · **Date:** 2026-09-22 · **Branch:** `main`
+**Agents:** Claude (Opus 5) wrote T-128 to T-134. Codex independently reviewed CP-016 to CP-020
 (`Docs/reviews/2026-09-21-checkpoints-review-codex.md`). Claude corrected F1 to F5 (T-132.1 D-048,
 T-132.2 D-049) and self-reviewed the fixes; the fixes themselves have not had a cross-vendor read.
 **Expected next agent:** either (D-028).
@@ -11,8 +11,8 @@ T-132.2 D-049) and self-reviewed the fixes; the fixes themselves have not had a 
 ## Where the project is
 
 **Phase 1's gate items 1B through 1E are done. Gate 8 passes on this machine since CP-023 (T-133:
-99 edits/s, frames p95 34–38 ms). What remains of 1F is the Gate-Observe pass (T-134), and then
-the backend decision.** Since CP-018:
+99 edits/s, frames p95 34–38 ms). The Gate-Observe pass is done (CP-024, T-134, P-013). What
+remains of 1F is E-9, the movement base (T-135, R-010), and then the backend decision.** Since CP-018:
 - **T-128, P-007:** one writer per world, enforced by an OS lock.
 - **T-129, P-008:** players who join or rejoin see the saved, edited world; DEF-3 resolved.
 - **T-130, P-009:** the ground knows its material exactly, and each edit measures what it moved.
@@ -203,10 +203,33 @@ report, rulings and self-review are in `Docs/proposals/P-011-stress-profile.md`,
 - **Still open:** worst frames of 88–96 ms a few times per run, at checkpoint or retention moments.
   Restoring 265 chunks at boot took 2.4 s, which was not investigated.
 
+### T-134: the Gate-Observe pass (Claude, recorded at CP-024, D-051)
+
+- **Report:** `Docs/proposals/P-013-gate-observe.md`. R2; writer and self-reviewer are the same
+  agent. Base `ee7bbc9`. Harness: `Terrain.Observe` (development only,
+  `TerrainObserve.cpp`); `RequestEdit` also accepts a dedicated server started with
+  `-TerrainObserve`; the adapter has a development-only `-TerrainNavmesh` switch and logs the
+  voxel world's settings at startup.
+- **GO-1, found and fixed:** the server's collision ignored small digs. Coarse "visible chunk"
+  collision, one chunk of about 512 m, sat over the full-detail interest collision. The fix
+  turns visible-chunk collision off on the server role. After it, every edit reaches server
+  collision in about 100 ms, with 0 frames of missing collision.
+- **Findings:**
+  - no fall-through gap (collision is double-buffered);
+  - undermined terrain stays put;
+  - collision unloads away from interests and returns in 232 ms with the dig intact;
+  - plugin foliage needs Pro;
+  - the level has no foliage, PCG or navmesh; nav is source-traced only (no bounds volume).
+- **R-010 is live:** every server correction to clients on terrain is discarded (55–142 per
+  client per run), because the terrain mesh is Movable and has no network identity. E-9 is next
+  (T-135).
+- **Regression:** 43/43; both targets; MP 3 rounds PASS; stress PASS at 99/s with the worst frame
+  down to 69–84 ms.
+
 ### Next safe actions, in order
 
-1. **T-134: the Gate-Observe pass** (BACKLOG 1F). It is mostly measurement and documentation.
-   Anything that needs eyes in the editor goes to the Director as a short, exact check. Then the
-   backend decision.
+1. **T-135: E-9, the movement-base experiment** (R-010, P-013 §3). Make the terrain mesh
+   non-movable, so corrections become absolute, and re-count the discarded corrections in the MP
+   harness. Then the backend decision (Phase 1 exit).
 2. **F6** with the first Linux build (R-007).
 3. When Codex is next available: a short re-read of T-132.1, T-132.2 and T-133 (P-012).

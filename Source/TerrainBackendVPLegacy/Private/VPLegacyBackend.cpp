@@ -330,6 +330,41 @@ bool FVPLegacyBackend::ConformVoxelWorld(AVoxelWorld& Actor)
 		}
 	}
 
+	// A DEDICATED SERVER'S COLLISION COMES ONLY FROM INTERESTS (T-134, P-013 §2, GO-1). The plugin
+	// also gives collision to every chunk it would *draw*, up to LOD 5. A server draws nothing near
+	// anyone, so that is one coarse chunk about 512 m across, covering the whole world -- and it
+	// sits OVER the full-detail collision our interests build. Measured: a 1.5 m or 3 m dig reached
+	// the full-detail layer and never the coarse one, so the server's physics still saw the old
+	// ground 8 s later while every client saw the hole. The server decides where players stand, so
+	// that is rubber-banding exactly where people dig. A client keeps the default: what it draws
+	// near its player IS full detail, and coarse collision far away costs nothing there.
+	if (Init.Role == ETerrainRole::Server && Actor.bComputeVisibleChunksCollisions)
+	{
+		UE_LOG(LogTerrainBackendVPLegacy, Log,
+			TEXT("Server: collision only where an interest asks for it (visible-chunk collision off)."));
+		Actor.bComputeVisibleChunksCollisions = false;
+		bNeedsRecreate = true;
+	}
+
+#if !UE_BUILD_SHIPPING
+	// T-134's Gate-Observe pass (P-013): the level's actor ships with the plugin navmesh off, so
+	// measuring nav under edits needs it on. Development only, never a gameplay setting.
+	if (FParse::Param(FCommandLine::Get(), TEXT("TerrainNavmesh")) && !Actor.bEnableNavmesh)
+	{
+		UE_LOG(LogTerrainBackendVPLegacy, Warning, TEXT("-TerrainNavmesh: enabling the plugin navmesh for observation."));
+		Actor.bEnableNavmesh = true;
+		bNeedsRecreate = true;
+	}
+#endif
+	// What the gate observes (P-013), stated once at startup instead of rediscovered.
+	UE_LOG(LogTerrainBackendVPLegacy, Log,
+		TEXT("Voxel world settings: collisions=%s (trace flag %d, visible chunks %s up to LOD %d), navmesh=%s, spawner config=%s, merge chunks=%s."),
+		Actor.bEnableCollisions ? TEXT("on") : TEXT("off"), int32(Actor.CollisionTraceFlag.GetValue()),
+		Actor.bComputeVisibleChunksCollisions ? TEXT("on") : TEXT("off"), Actor.VisibleChunksCollisionsMaxLOD,
+		Actor.bEnableNavmesh ? TEXT("on") : TEXT("off"),
+		Actor.SpawnerConfig ? TEXT("set (spawners need Voxel Plugin Pro)") : TEXT("none"),
+		Actor.bMergeChunks ? TEXT("on") : TEXT("off"));
+
 	if (!Actor.IsCreated())
 	{
 		Actor.CreateWorld();

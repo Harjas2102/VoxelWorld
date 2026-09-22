@@ -125,9 +125,12 @@ Severity / probability scale: **High · Medium · Low**.
   behaviour of most systems.
 - **Mitigation experiment:** Gate-Observe — remove terrain under foliage, document what
   happens, define a response model. Not solved at the gate.
-- **Owner / task:** T-101B (sub-step 1F, Gate-Observe)
-- **Result:** *open*
-- **Decision:** *open*
+- **CP-024 (T-134, P-013 §6):** the level has no foliage or PCG, and the plugin's spawners need
+  Voxel Plugin Pro. The response model is a game-owned foliage system keyed by terrain chunk,
+  driven by the service's published edits (D-051). It is built when vegetation is authored.
+- **Owner / task:** T-101B (sub-step 1F, Gate-Observe) — observed at CP-024
+- **Result:** *observed; response model ruled (D-051)*
+- **Decision:** D-051
 
 ## R-006 — Dynamic navigation after edits
 
@@ -135,9 +138,14 @@ Severity / probability scale: **High · Medium · Low**.
 - **Probability:** Medium
 - **Mitigation experiment:** Gate-Observe — measure nav dirtying and rebuild behaviour
   after terrain edits. Does not need to be production-ready; it needs to be known.
-- **Owner / task:** T-101B (sub-step 1F, Gate-Observe)
-- **Result:** *open*
-- **Decision:** *open*
+- **CP-024 (T-134, P-013 §7): source-traced, not measured.** Every terrain mesh update notifies
+  the navigation system when the plugin navmesh is on, and a dynamic navmesh rebuilds the dirtied
+  tiles. The level has no `NavMeshBoundsVolume`, and one cannot be built at runtime, so there is
+  nothing to measure yet. `Terrain.Observe`'s `NavWatch` measures it once a Phase 5 level has a
+  navmesh.
+- **Owner / task:** Phase 5 (wildlife), with `Terrain.Observe`
+- **Result:** *open — mechanism known, cost unmeasured*
+- **Decision:** D-051 (defer the measurement)
 
 ## R-007 — Dedicated-server / plugin compatibility, and platform divergence generally
 
@@ -308,10 +316,18 @@ Severity / probability scale: **High · Medium · Low**.
   this at build step 3, when the multiplayer route is exercised for the first time.
 - **Unchanged and still open: the KillZ.** Nothing in T-113 addressed it, and T-113 did not
   make it worse. It remains a prerequisite for anyone actually playing.
-- **Owner / task:** T-101B; the invoker also blocks any multiplayer terrain test at all
-- **Result:** *open*. The invoker half is now implemented and behind the game-owned
-  boundary; the movement-base failure, the collision-readiness window and the KillZ are all
-  untouched. No multiplayer claim follows from a standalone run.
+- **CP-024 (T-134, P-013) — measured.**
+  - **The collision-readiness window is closed as a fall risk.** Collision is double-buffered: 0
+    frames without collision over 16 edits. On the server an edit reaches collision in about
+    100 ms, after GO-1 fixed a coarse overlay that hid small digs.
+  - **The movement-base failure is confirmed on every run.** Every server correction to every
+    client standing on terrain is discarded: 55–142 per client per MP run, 0 applied. The mesh
+    is `Movable` with no net GUID.
+  - **E-9 is T-135.**
+  - The KillZ is still not built.
+- **Owner / task:** T-135 (E-9); KillZ still open
+- **Result:** *open*. Collision readiness is measured and safe; the movement base is the
+  remaining adoption-relevant problem.
 - **Decision:** *open* — feeds D-017 (terrain architecture v1)
 
 ## R-011 — Implementation deferral

@@ -304,8 +304,11 @@ bool UTerrainService::RequestEdit(const FTerrainEditRequest& Request, FTerrainEd
 	if (!HasAuthority()) { OutReceipt = Reject(ETerrainEditRejection::NoAuthority); return false; }
 #if !UE_BUILD_SHIPPING
 	// Legacy console diagnostics only. Gameplay uses the owning controller's transport.
-	// There is no network RPC into this admin path, and it is unavailable in multiplayer.
-	if (GetWorld()->GetNetMode() == NM_Standalone)
+	// There is no network RPC into this admin path, and it is unavailable in multiplayer --
+	// except on a dedicated server started with -TerrainObserve, for T-134's Gate-Observe trials,
+	// which have to measure the server's own collision (P-013). Still no RPC reaches it.
+	if (GetWorld()->GetNetMode() == NM_Standalone
+		|| (GetWorld()->GetNetMode() == NM_DedicatedServer && FParse::Param(FCommandLine::Get(), TEXT("TerrainObserve"))))
 	{
 		FTerrainOp Op;
 		auto Failure = QuantiseRequest(Request,Op);
