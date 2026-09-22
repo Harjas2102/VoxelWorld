@@ -46,6 +46,13 @@ public:
 	void Pump(double Now, const FTerrainQueueCallbacks& Cb, int32 MaxOps = 32, double BudgetSeconds = .008);
 	void Cancel(const FTerrainQueueCallbacks& Cb);
 	int32 Depth() const { return PendingCount; }
+	/**
+	 * True when no multi-part transaction is half-executed: every job has run none or all of its
+	 * parts. A checkpoint cut is legal here even with jobs WAITING -- they will simply commit at
+	 * later sequences (P-003 §4) -- which matters because under sustained load the queue is never
+	 * empty (T-132).
+	 */
+	bool IsBetweenTransactions() const { return ActiveSource == 0; }
 	FTerrainOpSeq NextSequence() const { return NextOpSeq; }
 
 	/**

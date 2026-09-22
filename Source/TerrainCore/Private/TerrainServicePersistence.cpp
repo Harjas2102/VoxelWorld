@@ -359,6 +359,7 @@ void UTerrainService::ReclaimStore()
 		UE_LOG(LogTerrainCore, Warning, TEXT("Terrain.Reclaim: this world has no open store."));
 		return;
 	}
+	CapturePump.SetSettledThrough(Settlement ? Settlement->GetWatermark() : MAX_uint64);
 	if (CapturePump.IsActive())
 	{
 		// Retention would refuse anyway; saying so here is clearer than reporting its error.
@@ -482,13 +483,14 @@ void UTerrainService::MaybeCaptureCheckpoint()
 	{
 		return;
 	}
-	// P-003 §2: "Starting a new checkpoint cut is forbidden until every in-flight record is
-	// settled." A cut taken with W < H would let a later W < G boot check misfire.
-	if (Settlement && Settlement->Pending() != 0)
-	{
-		return;
-	}
-	if (EditQueue.Depth() != 0)
+	// P-003 §3's settlement invariant (G <= W at every durable root) is enforced at PUBLICATION,
+	// in the pump, not here: under sustained load some records are always unsettled, and gating the
+	// START on "none unsettled" starved checkpoints completely (T-132: 0 in 7,871 edits).
+	//
+	// And the cut needs no transaction half-executed -- not an empty queue. Waiting jobs commit at
+	// later sequences; under sustained load the queue is never empty, which was the other half of
+	// the starvation.
+	if (!EditQueue.IsBetweenTransactions())
 	{
 		return;
 	}

@@ -226,6 +226,7 @@ void FTerrainSettlementWorker::Submit(FTerrainSettlementInput&& Input)
 	}
 	LastSubmitted = Input.OpSeq;
 	++Submitted;
+	SubmitTimes.Add(Input.OpSeq, FPlatformTime::Seconds());
 	Queue.Add(MoveTemp(Input));
 	Dispatch();
 }
@@ -269,6 +270,17 @@ bool FTerrainSettlementWorker::Poll()
 		}
 		SettledCount += Result.Inputs.Num();
 		Watermark = Result.Inputs.Last().OpSeq;
+		const double Now = FPlatformTime::Seconds();
+		for (const FTerrainSettlementInput& In : Result.Inputs)
+		{
+			double SubmittedAt = 0;
+			if (SubmitTimes.RemoveAndCopyValue(In.OpSeq, SubmittedAt))
+			{
+				MaxLatencySeconds = FMath::Max(MaxLatencySeconds, Now - SubmittedAt);
+				SumLatencySeconds += Now - SubmittedAt;
+				++LatencySamples;
+			}
+		}
 		SettledForNotify.Append(MoveTemp(Result.Inputs));
 	}
 	Dispatch();

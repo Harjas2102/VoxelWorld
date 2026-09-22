@@ -69,6 +69,13 @@ public:
 	UFUNCTION(Client,Reliable) void ClientInventory(const TArray<FTerrainYield>& Balances);
 	TArray<FTerrainYield> LastInventory;
 
+	// T-132 stress harness (development only).
+	UFUNCTION(Client,Reliable) void ClientStressVerify(const TArray<FIntVector>& Keys);
+	UFUNCTION(Server,Reliable) void ServerStressHashes(const TArray<FIntVector>& Keys, const TArray<uint64>& Density, const TArray<uint64>& Materials);
+	int32 SnapshotsSentTo = 0;
+	int64 SnapshotBytesTo = 0;
+	double ClientFrameMaxMs = 0, ClientNextFrameLog = 0;
+
 	// Development harness RPCs are inert unless the server explicitly enables TerrainMPTest.
 	UFUNCTION(Client,Reliable) void ClientBeginTest(int32 Index, float Duration, bool Observer);
 	UFUNCTION(Server,Reliable) void ServerTestDone();
@@ -94,6 +101,26 @@ public:
 	int32 ReceivedOps = 0, ApplyFailures = 0, SnapshotsApplied = 0, DroppedOps = 0;
 private:
 	FTerrainSnapshotAssembler Assembler;
+
+	/**
+	 * T-132: everything the server sends that changes terrain -- ops and completed snapshots --
+	 * waits here in arrival order and is applied under a per-frame time budget. Order is exactly
+	 * the channel's, so P-008's argument is untouched; only WHEN each item is applied moves, and a
+	 * burst of snapshot installs is spread over frames instead of freezing one (a measured 416 ms).
+	 */
+	struct FInbound
+	{
+		bool bSnapshot = false;
+		TArray<uint8> Bytes;                          // an op's encoding, or a snapshot's compressed image
+		TArray<FTerrainChunkRevision> Revisions;
+		FIntVector Key = FIntVector::ZeroValue;
+		uint32 Rev = 0, Generation = 0;
+	};
+	TArray<FInbound> Inbox;
+	int32 InboxHead = 0;
+	void ProcessInbox(double BudgetSeconds);
+	void ApplyInboundOp(const FInbound& Item);
+	void ApplyInboundSnapshot(const FInbound& Item);
 	FTerrainSessionDescriptor Session;
 	bool bHasSession = false, bSentReady = false, bRunningTest = false;
 	int64 NextRequestId = 1;

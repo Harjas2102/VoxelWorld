@@ -176,6 +176,10 @@ public:
 	 */
 	float TestDelaySeconds = 0.f;
 
+	/** Measured submit-to-settled latency, for the stress profile (T-132). */
+	double MaxLatencySeconds = 0, SumLatencySeconds = 0;
+	int64 LatencySamples = 0;
+
 	/** Settled OpSeqs since the last call, for the service to notify owners. */
 	TArray<FTerrainSettlementInput> TakeSettled();
 
@@ -189,6 +193,7 @@ private:
 	TArray<FTerrainSettlementInput> Queue;           // submitted, not yet dispatched
 	TQueue<FResult, EQueueMode::Mpsc> Done;          // finished on the pipe
 	TArray<FTerrainSettlementInput> SettledForNotify;
+	TMap<FTerrainOpSeq, double> SubmitTimes;
 	int32 Submitted = 0, SettledCount = 0, InFlight = 0;
 	FTerrainOpSeq Watermark = 0, LastSubmitted = 0;
 	bool bFailed = false, bStarted = false;

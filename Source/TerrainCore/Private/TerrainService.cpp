@@ -184,7 +184,12 @@ void UTerrainService::CreateBackend(UWorld& InWorld)
 	FTerrainSourceState Admin;
 	Admin.PlacementMaterial = ETerrainMaterial::Fill;   // P-010 §3: placement never yields
 	EditQueue.RegisterSource(1,Admin);
-	InWorld.GetTimerManager().SetTimer(ServiceTickHandle,this,&UTerrainService::TickService,0.01f,true);
+	// Exactly once per world frame (T-132). This was a 10 ms looping timer, and Unreal fires a looping
+	// timer once per ELAPSED interval: on a 30 Hz server that ran the service about four times per
+	// frame, so every per-frame budget -- the edit pump, the capture slice, the retention step --
+	// was really four times its size, and frames reached 160-310 ms under load.
+	ServiceTickHandle = FWorldDelegates::OnWorldTickStart.AddWeakLambda(this,
+		[this](UWorld* Ticked, ELevelTick, float) { if (Ticked == GetWorld()) TickService(); });
 	UE_LOG(LogTerrainCore, Log,
 		TEXT("Terrain backend '%s' ready: role=%s, voxel=%.1f cm, bounds=[%d,%d,%d)-[%d,%d,%d), generator version %u."),
 		*BackendName.ToString(),
@@ -226,7 +231,8 @@ void UTerrainService::DestroyBackend()
 	// (P-003 §2).
 	CloseWorldStore();
 
-	if (GetWorld()) GetWorld()->GetTimerManager().ClearTimer(ServiceTickHandle);
+	FWorldDelegates::OnWorldTickStart.Remove(ServiceTickHandle);
+	ServiceTickHandle.Reset();
 	Streams.Reset();
 
 	// Clear interests through the backend before shutting it down: the backend owns whatever
@@ -309,7 +315,9 @@ bool UTerrainService::RequestEdit(const FTerrainEditRequest& Request, FTerrainEd
 		const auto Cb = QueueCallbacks();
 		EditQueue.Submit(1,Id,Op,GetWorld()->GetTimeSeconds(),Cb,OutReceipt,
 			GetDefault<UTerrainSettings>()->MaxVoxelsPerOp,Failure);
-		EditQueue.Pump(GetWorld()->GetTimeSeconds(),Cb,256,1.);
+		// The P-003 §2 window applies here too: this inline pump used to bypass it (found at T-132).
+		if (!Settlement || Settlement->Pending() < FTerrainSettlementWorker::MaxPending)
+			EditQueue.Pump(GetWorld()->GetTimeSeconds(),Cb,256,1.);
 		if (LastAdminReceipt.RequestId == Id) OutReceipt=LastAdminReceipt;
 		return OutReceipt.bApplied;
 	}

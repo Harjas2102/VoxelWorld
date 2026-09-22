@@ -132,7 +132,7 @@ private:
 	ETerrainServiceState State = ETerrainServiceState::Uninitialised;
 	bool bDestroyingBackend = false;
 	FDelegateHandle WorldTearDownHandle;
-	FTimerHandle ServiceTickHandle;
+	FDelegateHandle ServiceTickHandle;   // FWorldDelegates::OnWorldTickStart, once per frame
 	void TickService();
 	void RefreshSubscriptions(UTerrainStreamComponent& Stream);
 	/** Authority: sends queued snapshots within each connection's byte budget (P-008 §4). */
@@ -319,6 +319,36 @@ private:
 	TUniquePtr<FTerrainWorldStore>            WorldStore;
 	TUniquePtr<FTerrainWorldStoreJournal>     WorldJournal;
 	TUniquePtr<FTerrainSettlementWorker>      Settlement;
+
+	/** Journal append+flush time per commit, for the stress profile (T-132). */
+	struct FCommitStats { double Max = 0, Sum = 0; int64 Count = 0; } CommitStats;
+
+	// ---- T-132 stress harness (development only; inert without -TerrainStress) ----
+	static constexpr uint32 StressBotBase = 100000;
+	struct FStressState
+	{
+		bool bStarted = false, bFinished = false;
+		int32 Phase = 0, Bots = 32, TargetEdits = 5000, LiveSeconds = 20;
+		double RegionCm = 10000, StartTime = 0, PhaseTime = 0, NextSecond = 0, JoinTime = 0, SyncedAt = 0, QuietSince = 0;
+		FTerrainOpSeq StartSeq = 0, SecondStartSeq = 0;
+		TArray<double> NextSubmit;
+		TArray<FRandomStream> Rng;
+		int64 RequestId = 1;
+		TMap<int32, int32> Rejections;
+		double TickMaxMs = 0, FrameMaxMs = 0, SecondTickMaxMs = 0, SecondFrameMaxMs = 0;
+		int32 PendingMax = 0, WindowFullTicks = 0;
+		uint32 JoinerSource = 0;
+		int32 VerifyOutstanding = 0, VerifyChunks = 0, VerifyMismatches = 0;
+		uint64 MemoryStart = 0, MemoryAfterA = 0;
+		double PhaseASeconds = 0;
+		FTerrainOpSeq PhaseAOps = 0;
+	} Stress;
+	void TickStressTest(double TickSeconds);
+	void LogStressSummary(const TCHAR* Label);
+public:
+	bool IsStressTest() const;
+	void ReceiveStressHashes(UTerrainStreamComponent& Stream, const TArray<FIntVector>& Keys, const TArray<uint64>& Density, const TArray<uint64>& Materials);
+private:
 	TMap<uint32, uint64>                      SourceOwners;
 	TMap<uint64, TMap<uint32, int64>>         SettledBalances;
 	FTimerHandle                              DigStressHandle;

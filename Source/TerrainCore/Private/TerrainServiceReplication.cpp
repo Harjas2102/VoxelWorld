@@ -38,6 +38,7 @@ void UTerrainService::UnregisterStream(uint32 Id)
 void UTerrainService::TickService()
 {
 	if (!IsBackendReady() || !HasAuthority()) return;
+	const double TickStarted=FPlatformTime::Seconds();
 	for (auto It=GetWorld()->GetPlayerControllerIterator();It;++It)
 	{
 		APlayerController* PC=It->Get(); if (!PC) continue;
@@ -67,6 +68,7 @@ void UTerrainService::TickService()
 	MaybeCollect();
 
 	TickMultiplayerTest();
+	TickStressTest(FPlatformTime::Seconds()-TickStarted);
 }
 ETerrainEditRejection UTerrainService::QuantiseRequest(const FTerrainEditRequest& R, FTerrainOp& Op) const
 {
@@ -156,6 +158,9 @@ FTerrainQueueCallbacks UTerrainService::QueueCallbacks()
 	Cb.Refresh=[this](uint32 Id,FTerrainSourceState& S)
 	{
 		if (Id==1) return;
+#if !UE_BUILD_SHIPPING
+		if (Id>=StressBotBase) { S.bConnected=true; S.PlacementMaterial=ETerrainMaterial::Fill; return; }   // T-132 harness
+#endif
 		auto* Stream=Streams.FindRef(Id).Get();
 		auto* PC=Stream ? Cast<APlayerController>(Stream->GetOwner()) : nullptr;
 		APawn* Pawn=PC ? PC->GetPawn() : nullptr;
@@ -231,7 +236,11 @@ bool UTerrainService::CommitOp(const FTerrainOp& Op,const FTerrainEditResult& R,
 		FTerrainCommitIdentity Paid=Identity;
 		if (Settlement) TerrainComputeEconomy(OwnerForSource(Op.SourceId),Op.ToolId,R.Removed,Paid.Economy);
 
-		if (!CommitJournal->RecordCommit(Op,R,Paid,Changed))
+		const double RecordStarted=FPlatformTime::Seconds();
+		const bool bRecorded=CommitJournal->RecordCommit(Op,R,Paid,Changed);
+		const double RecordSeconds=FPlatformTime::Seconds()-RecordStarted;
+		CommitStats.Max=FMath::Max(CommitStats.Max,RecordSeconds); CommitStats.Sum+=RecordSeconds; ++CommitStats.Count;
+		if (!bRecorded)
 		{
 			bStorageFaulted = true;
 			UE_LOG(LogTerrainCore,Error,
@@ -333,6 +342,7 @@ bool UTerrainService::SendSnapshot(UTerrainStreamComponent& Stream,const FTerrai
 	Stream.SnapshotBytesInFlight+=Compressed.Num();
 	Stream.DeliveredRevisions.Add(Key,Rev);
 	++SnapshotsSent; SnapshotBytesSent+=Compressed.Num();
+	++Stream.SnapshotsSentTo; Stream.SnapshotBytesTo+=Compressed.Num();
 	UE_LOG(LogTerrainCore,Verbose,TEXT("Snapshot (%d,%d,%d) rev %u -> source %u: %d bytes in %d fragment(s)"),
 		Key.X,Key.Y,Key.Z,Rev,Stream.SourceId,Compressed.Num(),Pieces.Num());
 	return true;

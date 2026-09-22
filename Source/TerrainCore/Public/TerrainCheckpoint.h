@@ -184,6 +184,14 @@ public:
 	FTerrainOpSeq GetCut() const { return G; }
 
 	/**
+	 * P-003 §3: a published root must never be ahead of the settlement watermark (G <= W), or a
+	 * crash right after publication would boot into W < G, which refuses. The owner reports W each
+	 * frame; the capture does all its chunk work regardless and only the PUBLICATION waits until
+	 * W reaches the cut. Defaults to "everything settled" for a world with no ledger.
+	 */
+	void SetSettledThrough(FTerrainOpSeq W) { SettledThrough = W; }
+
+	/**
 	 * Takes the cut and begins a capture over exactly these keys.
 	 *
 	 * `InG` must be the committed journal head at this moment, for the same reason it always
@@ -248,6 +256,7 @@ private:
 
 	FTerrainOpSeq G = 0;
 	FTerrainOpSeq PrevG = 0;
+	FTerrainOpSeq SettledThrough = MAX_uint64;
 	int64         UtcMillis = 0;
 
 	TMap<FTerrainChunkKey, FTerrainOpSeq> Pending;

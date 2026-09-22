@@ -34,6 +34,21 @@ void UTerrainStreamComponent::TickComponent(float Delta,ELevelTick Type,FActorCo
 	const auto* PC=Cast<APlayerController>(GetOwner());
 	if (!PC || !PC->IsLocalController()) return;
 	auto* S=GetWorld()->GetSubsystem<UTerrainService>();
+#if !UE_BUILD_SHIPPING
+	// T-132: the client's longest frame, which is where snapshot installs show up as stalls.
+	if (bReady && GetWorld()->GetTimeSeconds() > 5.0)
+	{
+		ClientFrameMaxMs=FMath::Max(ClientFrameMaxMs,double(Delta)*1000.0);
+		if (GetWorld()->GetTimeSeconds()>=ClientNextFrameLog)
+		{
+			if (ClientNextFrameLog>0) UE_LOG(LogTerrainCore,Log,TEXT("Stress.ClientFrame max %.1f ms over the last 5 s"),ClientFrameMaxMs);
+			ClientFrameMaxMs=0; ClientNextFrameLog=GetWorld()->GetTimeSeconds()+5.0;
+		}
+	}
+#endif
+	// Apply what the server sent, in order, within a frame budget (T-132). At least one item always
+	// goes, so a snapshot larger than the budget still makes progress.
+	if (!GetOwner()->HasAuthority()) ProcessInbox(0.008);
 	if (bHasSession && !bSentReady && S && S->IsBackendReady())
 	{
 		const auto* Config=GetDefault<UTerrainSettings>();
@@ -113,15 +128,48 @@ void UTerrainStreamComponent::ClientApplyOp_Implementation(const TArray<uint8>& 
 	if (FParse::Value(FCommandLine::Get(),TEXT("TerrainMPDropOp="),DropAt) && DropAt>0 && ReceivedOps+DroppedOps+1==DropAt && !DroppedOps)
 	{ ++DroppedOps; UE_LOG(LogTerrainCore,Display,TEXT("MP.Resync: dropped op %d on purpose"),DropAt); return; }
 #endif
+	FInbound Item; Item.Bytes=Bytes; Item.Revisions=Revisions;
+	Inbox.Add(MoveTemp(Item));
+}
+void UTerrainStreamComponent::ApplyInboundOp(const FInbound& Item)
+{
 	++ReceivedOps;
 	auto* S=GetWorld()->GetSubsystem<UTerrainService>();
 	TArray<FIntVector> Resync;
-	const bool bUsable=S && S->ApplyReplicatedOp(Bytes,Revisions,Resync);
-	if (!bUsable) { Resync.Reset(); for (const auto& V:Revisions) Resync.Add(V.Key); }
+	const bool bUsable=S && S->ApplyReplicatedOp(Item.Bytes,Item.Revisions,Resync);
+	if (!bUsable) { Resync.Reset(); for (const auto& V:Item.Revisions) Resync.Add(V.Key); }
 	if (Resync.IsEmpty()) return;
 	++ApplyFailures;
 	ServerRequestResync(Resync);
 	UE_LOG(LogTerrainCore,Warning,TEXT("Terrain revision/contract gap in %d chunk(s); requesting resync."),Resync.Num());
+}
+void UTerrainStreamComponent::ApplyInboundSnapshot(const FInbound& Item)
+{
+	auto* S=GetWorld()->GetSubsystem<UTerrainService>();
+	const double Started=FPlatformTime::Seconds();
+	const bool bApplied=S && S->ApplyReplicatedSnapshot(FTerrainChunkKey(Item.Key.X,Item.Key.Y,Item.Key.Z),Item.Rev,Item.Bytes);
+	if (bApplied)
+	{
+		++SnapshotsApplied;
+		// The client-side cost of a join, per chunk: E-6 wants it measured, not assumed.
+		UE_LOG(LogTerrainCore,Log,TEXT("Terrain snapshot (%d,%d,%d) rev %u installed: %d bytes in %.1f ms"),
+			Item.Key.X,Item.Key.Y,Item.Key.Z,Item.Rev,Item.Bytes.Num(),(FPlatformTime::Seconds()-Started)*1000.);
+	}
+	else UE_LOG(LogTerrainCore,Warning,TEXT("Terrain snapshot for chunk (%d,%d,%d) could not be applied."),Item.Key.X,Item.Key.Y,Item.Key.Z);
+	ServerAckSnapshot(Item.Key,Item.Generation,bApplied);
+}
+void UTerrainStreamComponent::ProcessInbox(double BudgetSeconds)
+{
+	const double Started=FPlatformTime::Seconds();
+	int32 Done=0;
+	while (InboxHead<Inbox.Num() && (Done==0 || FPlatformTime::Seconds()-Started<BudgetSeconds))
+	{
+		const FInbound& Item=Inbox[InboxHead++];
+		if (Item.bSnapshot) ApplyInboundSnapshot(Item); else ApplyInboundOp(Item);
+		++Done;
+	}
+	if (InboxHead==Inbox.Num()) { Inbox.Reset(); InboxHead=0; }
+	else if (InboxHead>256) { Inbox.RemoveAt(0,InboxHead); InboxHead=0; }
 }
 void UTerrainStreamComponent::ClientChunkSnapshot_Implementation(const FTerrainSnapshotFragment& F)
 {
@@ -138,17 +186,9 @@ void UTerrainStreamComponent::ClientChunkSnapshot_Implementation(const FTerrainS
 		return;
 	case FTerrainSnapshotAssembler::EResult::Complete:
 	{
-		const double Started=FPlatformTime::Seconds();
-		const bool bApplied=S && S->ApplyReplicatedSnapshot(View.Key,View.Rev,Compressed);
-		if (bApplied)
-		{
-			++SnapshotsApplied;
-			// The client-side cost of a join, per chunk: E-6 wants it measured, not assumed.
-			UE_LOG(LogTerrainCore,Log,TEXT("Terrain snapshot (%d,%d,%d) rev %u installed: %d bytes in %.1f ms"),
-				F.Key.X,F.Key.Y,F.Key.Z,F.Rev,Compressed.Num(),(FPlatformTime::Seconds()-Started)*1000.);
-		}
-		else UE_LOG(LogTerrainCore,Warning,TEXT("Terrain snapshot for chunk (%d,%d,%d) could not be applied."),F.Key.X,F.Key.Y,F.Key.Z);
-		ServerAckSnapshot(F.Key,F.Generation,bApplied);
+		// In line with the ops around it: installed when its turn in the inbox comes.
+		FInbound Item; Item.bSnapshot=true; Item.Bytes=MoveTemp(Compressed); Item.Key=F.Key; Item.Rev=F.Rev; Item.Generation=F.Generation;
+		Inbox.Add(MoveTemp(Item));
 		return;
 	}
 	case FTerrainSnapshotAssembler::EResult::Rejected:
@@ -157,6 +197,25 @@ void UTerrainStreamComponent::ClientChunkSnapshot_Implementation(const FTerrainS
 		UE_LOG(LogTerrainCore,Warning,TEXT("Terrain snapshot fragment out of sequence; chunk (%d,%d,%d) requested again."),Discarded.X,Discarded.Y,Discarded.Z);
 		return;
 	}
+}
+void UTerrainStreamComponent::ClientStressVerify_Implementation(const TArray<FIntVector>& Keys)
+{
+#if !UE_BUILD_SHIPPING
+	if (Keys.Num()>64 || GetOwner()->HasAuthority()) return;
+	ProcessInbox(TNumericLimits<double>::Max());   // everything sent before this request, applied first
+	auto* S=GetWorld()->GetSubsystem<UTerrainService>(); if (!S) return;
+	TArray<uint64> Density, Materials;
+	for (const auto& K:Keys)
+	{
+		const FTerrainChunkKey Key(K.X,K.Y,K.Z);
+		Density.Add(S->HashChunk(Key)); Materials.Add(S->HashChunkMaterials(Key));
+	}
+	ServerStressHashes(Keys,Density,Materials);
+#endif
+}
+void UTerrainStreamComponent::ServerStressHashes_Implementation(const TArray<FIntVector>& Keys,const TArray<uint64>& Density,const TArray<uint64>& Materials)
+{
+	if (auto* S=GetWorld()->GetSubsystem<UTerrainService>()) S->ReceiveStressHashes(*this,Keys,Density,Materials);
 }
 void UTerrainStreamComponent::ClientInventory_Implementation(const TArray<FTerrainYield>& Balances)
 {
@@ -199,6 +258,7 @@ void UTerrainStreamComponent::ClientVerifyTest_Implementation(const TArray<FIntV
 {
 #if !UE_BUILD_SHIPPING
 	if (Keys.Num()>64) return;
+	ProcessInbox(TNumericLimits<double>::Max());   // everything sent before this request, applied first
 	TArray<uint64> Hashes;
 	if (auto* S=GetWorld()->GetSubsystem<UTerrainService>())
 	{

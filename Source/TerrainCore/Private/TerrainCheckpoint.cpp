@@ -35,7 +35,11 @@ void FTerrainResidencyPins::Pin(
 			+ (double(Bounds.Min.Z) + TerrainChunkSizeVox * 0.5) * VoxelCm);
 	// Half a chunk's diagonal, so the sphere contains the whole cube.
 	Interest.RadiusCm   = TerrainChunkSizeVox * VoxelCm * 0.87;
-	Interest.bCollision = true;
+	// Residency only. A pin exists so a dirty chunk can still be READ by capture, restore and
+	// replay; it is not a player, and nothing needs collision or navmesh there. Asking for
+	// collision made the plugin cook and keep collision and navmesh for every chunk ever edited,
+	// and under capture that contention produced 160-310 ms server frames (T-132).
+	Interest.bCollision = false;
 	Interest.bRender    = false;
 
 	Backend.SetStreamingInterest(Interest);
@@ -160,6 +164,12 @@ bool FTerrainCapturePump::Advance(double BudgetSeconds)
 		}
 	}
 
+	// Every chunk is encoded. Publication waits, if it must, for settlement to reach the cut --
+	// copy-before-write keeps protecting the cut meanwhile, so waiting costs nothing but time.
+	if (SettledThrough < G)
+	{
+		return false;
+	}
 	Finish();
 	return true;
 }

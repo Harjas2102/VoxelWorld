@@ -33,10 +33,28 @@ python Tools\Test-TerrainLease.py ; python Tools\Test-TerrainCheckpoint.py ; pyt
 In a standalone game, `Terrain.AdapterChecks` runs the plugin's density, material and E-1
 checks, and `Terrain.LedgerAudit` recomputes every balance from the journal.
 
+## T-132 breadcrumb (post-CP-019, not yet checkpointed)
+
+**T-132 is implemented, measured and committed. The next `checkpoint` records it (D-047).** The
+report, rulings and self-review are in `Docs/proposals/P-011-stress-profile.md`, and the driver is
+`Tools/Test-TerrainStress.ps1`.
+- **Five defects found and fixed:**
+  - the service ran about 4 times per 30 Hz frame (a 10 ms looping timer);
+  - **checkpoints starved under sustained load** (0 in 7,871 edits);
+  - the console pump bypassed the settlement window;
+  - residency pins built collision and navmesh for every edited chunk;
+  - clients installed snapshot bursts in one frame (now an ordered 8 ms/frame inbox).
+- **Gate 8: correctness PASS, performance FAIL at 96 edits/s on this machine.** Sustained
+  throughput is 71–78/s, and server frames are p95 65–80 ms. The named costs are one journal flush
+  per edit (3.5 ms, on the game thread) and checkpoint re-reads (about 3 ms per chunk).
+- **E-6:** a joiner caught up in 6.1 s mid-edit (243 snapshots, 1.6 MB), installing one chunk per
+  frame at about 23 ms each.
+- Writer and reviewer were the same agent.
+
 ## What is NOT done, stated plainly
 
-- **E-6 and the gate-8 stress profile (T-132, next).** Nobody has measured a heavy region with a
-  joiner arriving mid-edit, or throughput against 96 ops/s with FULL-sync settlement.
+- **Throughput at the design point (T-133, next):** 96 edits/s is not sustained on this machine
+  (71–78/s). The fix is journal group commit plus a checkpoint trigger priced in chunks (P-011 §4).
 - **Player identity** (R-017): owners come from the Null online subsystem, which is per machine at
   best. A real login is a Director decision in Phase 4.
 - **No inventory UI, no spending or crafting.** Placement is free and places Fill.
@@ -52,8 +70,8 @@ checks, and `Terrain.LedgerAudit` recomputes every balance from the journal.
 
 ## Next safe action
 
-**T-132: the edit stress profile, with E-6.** Script thousands of edits across a region (for
-example with a longer `Terrain.DigStress`), then join a fresh client mid-edit. Measure server and
-client frame time, snapshot bytes and install stalls, save growth, bandwidth, memory, settlement
-latency and window saturation. Gate on measurements. After that comes 1F: collision, foliage, nav
-and streaming observations, then the backend decision.
+**T-133: journal group commit and checkpoint trigger policy** (P-011 §4). Batch every commit in
+one pump call behind a single flush, and broadcast and settle only after that flush. It needs a
+short spec, and the crash matrix must cover a torn multi-record append. Gate it on
+`Tools\Test-TerrainStress.ps1`: 96 edits/s sustained with server frames near 33 ms. After that,
+1F's observations and the backend decision.
