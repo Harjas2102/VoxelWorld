@@ -107,6 +107,8 @@ deliberately removing arbitrary terrain manipulation from Pillar 1).
   except E-6 (CP-019, T-129)**. Ordered snapshots, nearest first, with backpressure and resync;
   DEF-3 resolved. *Not done:* E-6, a heavy region with a joiner arriving mid-edit.
 - **1F** — Stress profile, collision, foliage, nav, streaming → **decide the backend**.
+  **Stress profile done at CP-020 (T-132):** correctness PASS, 96/s not yet sustained (R-018, T-133
+  next). Collision, foliage, nav and streaming observations remain.
 
 ### T-006 — Editor fluency *(rescoped at CP-002; not started)*
 
@@ -235,6 +237,14 @@ T-101B sub-step 1D, which requires the multiplayer-capable version instead.
 ---
 
 ## Done
+
+- **T-132** *(CP-020)* **The edit stress profile and E-6.** `Tools/Test-TerrainStress.ps1` runs 32
+  sources at 96/s through the real pipeline, with a client joining mid-edit.
+  - Found and fixed: the service ticked about 4 times per frame; **checkpoints starved under load**;
+    the console pump bypassed the window; pins built collision; client install bursts.
+  - Correctness PASS. **Performance FAIL at 96/s** (71–78/s, frames p95 65–80 ms), with named
+    causes.
+  - E-6: caught up in 6.1 s mid-edit. **D-047**, report **P-011**.
 
 - **T-131** *(CP-019)* **Settlement ledger — digging pays; DEF-1 resolved for terrain.**
   - The credit is decided before the journal write and recorded in it. The new `EntityStore`

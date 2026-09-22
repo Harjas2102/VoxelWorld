@@ -5,13 +5,55 @@
 
 ---
 
-**Checkpoint:** CP-019 · **Date:** 2026-09-21
+**Checkpoint:** CP-020 · **Date:** 2026-09-21
 **Phase:** 1 — Terrain Feasibility
 **Expected next agent:** either (D-028)
-**Current task:** T-132 — gate item 8, the edit stress profile, together with E-6: thousands of
-operations and a joiner arriving mid-edit, measuring server and client frame time, rebuild
-latency, save growth, bandwidth, memory and settlement throughput against 96 ops/s. That is the
-last gate-critical measurement before 1F's backend decision.
+**Current task:** T-133 — journal group commit, plus a checkpoint trigger priced in chunks, so the
+server sustains the 96 edits/s design point (R-018). Gate it on `Tools/Test-TerrainStress.ps1`.
+
+## What happened at CP-020
+
+**One increment, T-132 (D-047, P-011): the first measurement of the whole stack at its design
+load. Everything stayed correct, and the server cannot yet keep up.**
+
+`Tools/Test-TerrainStress.ps1` drives a dedicated server with 32 sources at the queue's limit
+(96 edits/s) through the real queue, journal, checkpoints, retention and settlement. A fresh
+client joins mid-edit, and every edited chunk it holds is verified against the server.
+
+**Five defects found and fixed:**
+1. **The service ran about 4 times per 30 Hz frame.** A 10 ms looping timer fires once per
+   elapsed interval, so every per-frame budget was quadrupled. Server frames reached 164 ms at p95
+   and 310 ms at worst. Unreal Insights found it: 3,355 service calls in 847 frames. The service now
+   ticks once per world frame.
+2. **Checkpoints starved under sustained load: 0 in 7,871 edits.** The start gate waited for an
+   empty queue and zero unsettled records, and fix 1 had been hiding this. The fix: a cut needs
+   only no half-executed transaction, and G ≤ W is enforced at publication. Result: 29 checkpoints
+   and 29 retention cycles in the run.
+3. The console pump bypassed the settlement window.
+4. Residency pins built collision and navmesh for every edited chunk.
+5. Clients installed snapshot bursts in one frame (416 ms). They now use an ordered inbox with an
+   8 ms per-frame budget.
+
+| Result (final source) | |
+|---|---|
+| Correctness under load | **PASS.** 254 edited chunks identical on the joiner in density and material; ledger exact over 7,659 edits |
+| **Throughput** | **71–78 edits/s sustained, below 96** (R-018); 1,463–2,055 queue-full refusals; worst queue age 8 s |
+| **Server frame** | **p95 65–80 ms, worst 88 ms**, against a 33 ms frame |
+| Named costs | the journal flush (3.5 ms per edit, on the game thread) and checkpoint re-reads (about 3 ms per chunk) |
+| **E-6** | caught up in **6.1 s** mid-edit: 243 snapshots, 1.6 MB, one install per frame at about 23 ms each |
+| Save growth | journal about 235 B/edit; the save is bounded by the dug area (55.8 MB for about 250 dug chunks, two retained generations) |
+
+Regression after the fixes: 42/42 automation. `MP.Convergence` passes 3 rounds with an observer,
+with the ledger audit passing every round. `-DropOp`, the checkpoint, lease, settlement kill test,
+retention (256 hashes) and adapter checks all pass. Both targets build.
+
+## Drift checks (VISION.md, run at CP-020)
+
+**NO FLAG MOVED.** Server authority, D-011, D-025 and every `Build.cs` are unchanged.
+- **Player-facing:** a joining player no longer freezes while catching up, and each edit a client
+  sees can arrive up to one frame later (the inbox).
+- **Not yet player-ready:** 32 players digging flat out would see lag and some refused digs until
+  T-133 lands.
 
 ## What happened at CP-019
 

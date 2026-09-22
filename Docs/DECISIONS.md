@@ -1721,3 +1721,38 @@ runs.
 - Spending, crafting and transfers.
 - Backups and ledger GC.
 - Durable player identity, which needs a real login.
+
+## D-047 — The stress profile's fixes; checkpoint gating moved to publication; group commit next (2026-09-21)
+
+**Recorded:** CP-020 · **Class:** technical (per **D-023**) · **Architect ruling, logged
+not asked** · **Scope:** T-132, gate 8, E-6 · **Status:** ACCEPTED · **Report:** P-011
+
+### 1. Rulings
+
+- **The service ticks once per world frame** (`FWorldDelegates::OnWorldTickStart`). The old 10 ms
+  looping timer fired once per elapsed interval, which is about 4 times per 30 Hz frame, and so
+  quadrupled every per-frame budget.
+- **A checkpoint cut needs only no half-executed transaction** (`IsBetweenTransactions`), not an
+  empty queue. **P-003 §3's G ≤ W is enforced at publication:** the pump encodes every chunk, and
+  the root waits until the settlement watermark reaches G. The old start gates starved checkpoints
+  completely under sustained load.
+- Residency pins are **residency only**, with no collision or navmesh.
+- The console pump respects the 32-record settlement window.
+- Clients apply ops and snapshots from an **ordered inbox**, under an 8 ms per-frame budget with at
+  least one item per frame. Channel order is preserved, so P-008 is unchanged.
+
+### 2. Measured, on this machine
+
+Correctness passes under the full design load. **Performance fails at 96 edits/s:**
+- sustained 71–78 edits/s, and server frames p95 65–80 ms;
+- the named causes are one journal flush per edit (3.5 ms, on the game thread) and checkpoint
+  re-reads (about 3 ms per chunk).
+
+E-6: a joiner caught up in 6.1 s mid-edit (243 snapshots, 1.6 MB).
+
+### 3. Next
+
+**T-133: journal group commit** takes up P-003 §2's anticipated batching, now that the evidence
+exists. All commits in one pump call are appended, one flush covers them, and only then are they
+broadcast or settled. A checkpoint trigger priced in chunks comes with it. It gets a short spec,
+and the crash matrix must cover a torn multi-record append.

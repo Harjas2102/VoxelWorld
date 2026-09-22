@@ -1,7 +1,7 @@
 # HANDOFF
 
-**Checkpoint:** CP-019 · **Date:** 2026-09-21 · **Branch:** `main`
-**Agents:** Claude (Opus 5) wrote and self-reviewed T-128 to T-131 under the Director's standing
+**Checkpoint:** CP-020 · **Date:** 2026-09-21 · **Branch:** `main`
+**Agents:** Claude (Opus 5) wrote and self-reviewed T-128 to T-132 under the Director's standing
 instruction. Writer and reviewer were the same agent, which is weaker evidence than a
 cross-vendor review (R-016).
 **Expected next agent:** either (D-028).
@@ -10,8 +10,8 @@ cross-vendor review (R-016).
 
 ## Where the project is
 
-**Phase 1's gate items 1B, 1C and 1D are done, 1E is done except for the E-6 measurement, and
-1F remains.** Since CP-018:
+**Phase 1's gate items 1B through 1E are done (E-6 measured at CP-020). 1F's stress profile is
+done; throughput at the design point (R-018, T-133) and 1F's observations remain.** Since CP-018:
 - **T-128, P-007:** one writer per world, enforced by an OS lock.
 - **T-129, P-008:** players who join or rejoin see the saved, edited world; DEF-3 resolved.
 - **T-130, P-009:** the ground knows its material exactly, and each edit measures what it moved.
@@ -29,13 +29,14 @@ python Tools\Test-TerrainSettlement.py            # hard kills + journal audit +
 .\Tools\Test-TerrainMultiplayer.ps1 -Rounds 3 -IncludeObserver -CheckpointCapture   # joins, materials, ledger audit per round
 .\Tools\Test-TerrainMultiplayer.ps1 -Rounds 2 -DurationSeconds 30 -CheckpointCapture -DropOp 20
 python Tools\Test-TerrainLease.py ; python Tools\Test-TerrainCheckpoint.py ; python Tools\Test-TerrainRetention.py
+.\Tools\Test-TerrainStress.ps1 -Edits 5000 -LiveSeconds 20   # gate 8 + E-6 (about 3 min)
 ```
 In a standalone game, `Terrain.AdapterChecks` runs the plugin's density, material and E-1
 checks, and `Terrain.LedgerAudit` recomputes every balance from the journal.
 
-## T-132 breadcrumb (post-CP-019, not yet checkpointed)
+## T-132 (recorded at CP-020, D-047)
 
-**T-132 is implemented, measured and committed. The next `checkpoint` records it (D-047).** The
+**T-132 is recorded.** The
 report, rulings and self-review are in `Docs/proposals/P-011-stress-profile.md`, and the driver is
 `Tools/Test-TerrainStress.ps1`.
 - **Five defects found and fixed:**

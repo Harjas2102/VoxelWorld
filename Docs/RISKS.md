@@ -41,9 +41,14 @@ Severity / probability scale: **High · Medium · Low**.
     edited world, passes 3 rounds with an observer.
   - `-DropOp` proves a lost op is detected and repaired.
   - Snapshot install costs the client 16–25 ms per chunk after the bulk `WriteRegion` fix.
-  - **Still open: E-6.** A heavily dug region with a joiner arriving mid-edit has not been
-    measured. A 100-chunk region would cost about 2 s of cumulative client stalls.
-- **Decision:** D-044 (technical). The risk stays open until E-6 is measured.
+- **E-6 measured at CP-020 (P-011).**
+  - A joiner arriving mid-edit in a 100 m region dug by 5,000 edits caught up in **6.1 s** (243
+    snapshots, 1.6 MB, 1.74 MB over the connection), while edits continued at about 75/s.
+  - Installs cost about 23 ms per chunk and are applied one per frame by an ordered inbox, so they
+    no longer burst.
+  - All 254 edited chunks verified identical in density and material.
+- **Decision:** D-044, D-047. **Closed for the design workload.** The residual is Linux, and a
+  region much larger than the interest radius.
 
 ## R-003 — Terrain save growth and compaction
 
@@ -76,7 +81,14 @@ Severity / probability scale: **High · Medium · Low**.
   **None of this is a measured save file.** Nothing writes to disk yet, so "hundreds to
   thousands of edits, then measure growth" — the mitigation experiment this risk actually
   names — has still not been run. Bytes/edit under the §7.1 workload remains open.
-- **Decision:** *open*
+- **CP-020, measured (P-011).** Over 7,659 edits at the design load:
+  - the journal grows about **235 B/edit**;
+  - the world directory held **55.8 MB**, mostly two retained checkpoint generations of about 250
+    Dense chunks (131 KB each), plus a 0.35 MB ledger with a 4 MB WAL;
+  - retention reclaimed about 18 MB per cycle, 29 times.
+  Save growth is bounded by the dug area, not by edit count. The journal still grows without limit
+  until trimming exists.
+- **Decision:** *open*, until journal trimming exists.
 
 ## R-004 — Material-yield accuracy
 
@@ -614,4 +626,20 @@ D-028 was written for. Keep writing the breadcrumb *before* the risky half, not 
 - **Owner / task:** Phase 4 (multiplayer vertical slice)
 - **Result:** *open*
 - **Decision:** *open*
+
+## R-018 — The server cannot yet sustain the 96 edits/s design point
+
+- **Severity:** Medium — at 32 players digging continuously, edits would queue for seconds and
+  some would be refused; server frames would run 2–3× long, which players feel as lag.
+- **Probability:** High on the development machine (measured). Unknown on the Linux server.
+- **Evidence (CP-020, P-011):**
+  - 71–78 edits/s sustained, with server frames p95 65–80 ms.
+  - One journal flush per edit takes 3.5 ms on the game thread; checkpoint re-reads cost about
+    3 ms per chunk.
+  - Settlement is not the bottleneck: the window never filled.
+- **Mitigation experiment:** journal group commit (T-133), then re-run
+  `Tools/Test-TerrainStress.ps1`. Target: 96/s sustained with frames near 33 ms.
+- **Owner / task:** T-133
+- **Result:** *open*
+- **Decision:** D-047 (technical)
 

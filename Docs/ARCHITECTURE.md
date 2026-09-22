@@ -26,6 +26,13 @@
 > - **K9's SingleIndex switch is deferred** (D-045): material ids are exact through the colour
 >   table, and the switch changes how terrain looks.
 > Where the text below says these are open or "must not be implemented", this note supersedes it.
+>
+> **CP-020 (D-047, P-011):**
+> - The service ticks once per world frame.
+> - Checkpoint cuts need only no half-executed transaction; G ≤ W is enforced at publication.
+> - Measured against §7.1's design point on the development machine: **96 ops/s is not sustained**
+>   (71–78/s). The causes are the per-edit journal flush and checkpoint re-reads. Journal group
+>   commit (T-133) is the adopted next step, as P-003 §2 anticipated.
 
 > **P-003 architectural adoption, 2026-09-20 (technical ruling, D-023/D-032).**
 > [P-003 revision 3](proposals/P-003-persistence-commit-and-recovery.md) §§1–7 is the
