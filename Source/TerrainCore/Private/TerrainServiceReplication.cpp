@@ -58,10 +58,8 @@ void UTerrainService::TickService()
 	}
 	PumpSnapshots();
 	TickSettlement();
-	// P-003 §2: at most 32 committed records may await settlement; beyond that, stop executing
-	// new mutations until the ledger catches up. Admission still queues within its own bounds.
-	if (!Settlement || Settlement->Pending() < FTerrainSettlementWorker::MaxPending)
-		EditQueue.Pump(Now,QueueCallbacks());
+	// P-003 §2's settlement window is held per operation, by the queue's CanExecute callback.
+	EditQueue.Pump(Now,QueueCallbacks());
 
 	// After the pump, never inside it: a capture taken mid-transaction would not be a cut.
 	MaybeCaptureCheckpoint();
@@ -155,6 +153,10 @@ ETerrainEditRejection UTerrainService::ValidateOp(const FTerrainOp& Op,const FTe
 FTerrainQueueCallbacks UTerrainService::QueueCallbacks()
 {
 	FTerrainQueueCallbacks Cb;
+	// P-003 §2: at most 32 committed records may await settlement. Asked before every mutation,
+	// so no pump call -- the frame's, the console's 256-op one, a split's children -- can pass it.
+	// Admission still queues within its own bounds; the work simply waits.
+	Cb.CanExecute=[this]() { return !Settlement || Settlement->Pending() < FTerrainSettlementWorker::MaxPending; };
 	Cb.Refresh=[this](uint32 Id,FTerrainSourceState& S)
 	{
 		if (Id==1) return;
@@ -254,7 +256,11 @@ bool UTerrainService::CommitOp(const FTerrainOp& Op,const FTerrainEditResult& R,
 			return false;
 		}
 		// Durable: hand it to the ledger. Step 4 never gates the broadcast below.
-		if (Settlement && WorldJournal) Settlement->Submit(WorldJournal->TakeLastSettlement());
+		if (Settlement && WorldJournal)
+		{
+			Settlement->Submit(WorldJournal->TakeLastSettlement());
+			SettlementPendingPeak=FMath::Max(SettlementPendingPeak,Settlement->Pending());
+		}
 	}
 
     NextOpSeq=Op.OpSeq+1;

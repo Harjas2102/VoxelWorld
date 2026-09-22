@@ -1777,3 +1777,27 @@ not asked** · **Scope:** T-132.1, Codex review F1/F2 · **Status:** ACCEPTED ·
   on the latch.
 - Remaining review findings F3 to F5 are T-132.2, before T-133. F6 is attached to R-007.
 
+## D-049 — The settlement window is held per operation; the stress gate and the crash oracle are whole (2026-09-21)
+
+**Recorded:** CP-022 · **Class:** technical (per **D-023**) · **Architect ruling, logged
+not asked** · **Scope:** T-132.2, Codex review F3/F4/F5 · **Status:** ACCEPTED ·
+**Review:** `Docs/reviews/2026-09-21-checkpoints-review-codex.md`
+
+- **The queue asks `FTerrainQueueCallbacks::CanExecute` before every operation it executes.** The
+  service's callback is the P-003 §2 window, `Pending() < 32`. It replaces both per-call gates, so
+  no pump call can pass it: not the frame's, not the console's 256-op one, and not a split's
+  children. Work beyond the window stays queued rather than being refused.
+- **`RunLedgerAudit` returns its verdict** (Pass, Fail or Deferred).
+- **Stress PASS means the whole stack passed:** the terrain on the joiner, the ledger audit, and the
+  window peak (sampled at every Submit) of at most 32. A run with persistence, checkpoints or
+  settlement off is **PARTIAL**. The driver treats PARTIAL as failure unless `-Measurement` is
+  given.
+- **The crash oracle is P-003 §2's window:**
+  - the acknowledged head is a hard lower bound;
+  - one record above it is allowed only when the last append failed, since a complete record
+    whose acknowledgement was lost is recovery authority;
+  - exact hashes against the reference.
+  The matrix injects a third fault, a full write with failure reported, and a negative control
+  proves the oracle rejects lost acknowledged history.
+- F6 (Linux parent-directory sync) stays with R-007 for the first Linux build.
+

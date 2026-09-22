@@ -21,7 +21,7 @@
  * TerrainCore.Persistence.Capture.Service -- the capture pump as the SERVICE drives it.
  *
  * `Capture.Pump` proves the pump is right when its caller is. Codex's review of CP-016..CP-020
- * found two defects in the caller that a pump-only test could never see:
+ * found defects in the caller that a component-only test could never see:
  *
  *   F1. The service never told the pump the settlement watermark W, so `G <= W` (P-003 §3) was
  *       dead code in normal play, and an empty cut skipped it even when told. A crash right after
@@ -29,13 +29,16 @@
  *   F2. A copy-before-write failure, inside an edit, ended the capture with nobody told. The
  *       session kept capturing, and the next checkpoint published past history the failed cut had
  *       taken out of the dirty set.
+ *   F3. The 32-record settlement window was checked once per pump call, so one call running many
+ *       operations could pass it (measured at 34).
  *
- * Both run here through the real service entry points -- `MaybeCaptureCheckpoint`, the queue's
- * Apply callback, `CommitOp` -- with a real settlement worker whose watermark only moves when the
+ * All of them run here through the real service entry points -- `MaybeCaptureCheckpoint`, the
+ * queue's callbacks and `Pump`, `CommitOp` -- with a real settlement worker whose watermark only moves when the
  * test polls it, so "settlement is slow" is deterministic rather than a sleep.
  *
  * Mutation-checked against the pre-fix source: F1's cases publish at G=2 with W=0 and at G=3
- * with W=2; F2's case publishes a second cut and B restores to its pre-edit state.
+ * with W=2; F2's case publishes a second cut and B restores to its pre-edit state; F3's executes all
+ * 48 operations in one pump call.
  */
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FTerrainCaptureServiceTest, "TerrainCore.Persistence.Capture.Service",
@@ -292,6 +295,61 @@ bool FTerrainCaptureServiceTest::RunTest(const FString& Parameters)
 		if (!SettleThrough(3)) { AddError(TEXT("F1: settlement did not reach 3")); return false; }
 		Service->MaybeCaptureCheckpoint();
 		TestEqual(TEXT("F1: and publishes at G=3 once W does"), PublishedG(*Service), (FTerrainOpSeq)3);
+
+		Service->DestroyBackend();
+		World->DestroyWorld(/*bInformEngineOfWorld=*/false);
+	}
+
+	// ===== F3: the settlement window holds per operation, inside one big pump call ==========
+	//
+	// Codex measured 34 unsettled against the 32-record bound: the window was checked once per
+	// pump call, and one call may run many operations. Here 48 are queued and ONE pump call with
+	// the console's shape (256 ops, a generous budget) is made, with settlement standing still.
+	{
+		FTerrainMemoryStorageDevice Device;
+		FFaultingReadBackend* Backend = nullptr;
+		TStrongObjectPtr<UWorld> World;
+		UTerrainService* Service = MakeService(Device, Backend, World);
+		if (!Service) { AddError(TEXT("Service setup failed")); return false; }
+		Service->Settlement = MakeUnique<FTerrainSettlementWorker>();
+		Service->Settlement->Start(MakeUnique<FInstantLedger>(), 0);
+
+		const FTerrainQueueCallbacks Cb = Service->QueueCallbacks();
+		constexpr int32 Sources = 16, JobsEach = 3;   // the queue's per-source burst is 3
+		for (int32 S = 0; S < Sources; ++S)
+		{
+			Service->EditQueue.RegisterSource(UTerrainService::StressBotBase + S, FTerrainSourceState());
+		}
+		int32 Queued = 0;
+		for (int32 J = 0; J < JobsEach; ++J)
+		{
+			for (int32 S = 0; S < Sources; ++S)
+			{
+				FTerrainEditReceipt Receipt;
+				const FTerrainOp Op = ServiceDig(ChunkA + FIntVector((S % 4) * 3 - 4, (S / 4) * 3 - 4, -J * 3), 2, 0);
+				Queued += Service->EditQueue.Submit(UTerrainService::StressBotBase + S, J + 1, Op, 0.0, Cb, Receipt) ? 1 : 0;
+			}
+		}
+		TestEqual(TEXT("F3: more operations queued than the window allows"), Queued, Sources * JobsEach);
+
+		const int32 Window = FTerrainSettlementWorker::MaxPending;
+		Service->EditQueue.Pump(0.0, Cb, 256, 10.0);
+		TestEqual(TEXT("F3: one 256-op pump call executes exactly the window's worth"),
+			Service->WorldStore->GetJournal()->GetHead(), (FTerrainOpSeq)Window);
+		TestEqual(TEXT("F3: so exactly 32 records are unsettled"), Service->Settlement->Pending(), Window);
+		TestEqual(TEXT("F3: and the peak, sampled at every Submit, never passed it"), Service->SettlementPendingPeak, Window);
+		TestEqual(TEXT("F3: the rest are still queued, not refused"), Service->EditQueue.Depth(), Queued - Window);
+
+		const double Deadline = FPlatformTime::Seconds() + 10.0;
+		while (Service->Settlement->Pending() > 0 && FPlatformTime::Seconds() < Deadline)
+		{
+			FPlatformProcess::Sleep(0.002f);
+			Service->Settlement->Poll();
+		}
+		Service->EditQueue.Pump(0.0, Cb, 256, 10.0);
+		TestEqual(TEXT("F3: once settled, the rest execute"),
+			Service->WorldStore->GetJournal()->GetHead(), (FTerrainOpSeq)Queued);
+		TestTrue(TEXT("F3: and the peak still never passed the window"), Service->SettlementPendingPeak <= Window);
 
 		Service->DestroyBackend();
 		World->DestroyWorld(/*bInformEngineOfWorld=*/false);

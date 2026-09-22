@@ -623,6 +623,10 @@ D-028 was written for. Keep writing the breadcrumb *before* the risky half, not 
   - **The lesson for this project:** "the component test passes" has repeatedly not meant "the
     owner uses the component correctly". Service-level tests with mutations are now the standard
     for persistence fixes (`Capture.Service`).
+- **CP-022 — F3 to F5 closed (D-049).** Five of the six findings are now fixed and
+  mutation-checked. The fix for F5 confirmed that the reviewer was right twice over: the old crash
+  oracle lacked a lower bound, **and** its upper bound would have rejected a legitimate recovery
+  after a lost acknowledgement. Only F6 remains, which is Linux-only (R-007).
 
 ## R-017 — Player identity is not yet durable
 
@@ -654,6 +658,8 @@ D-028 was written for. Keep writing the breadcrumb *before* the risky half, not 
   - Settlement is not the bottleneck: the window never filled.
 - **Mitigation experiment:** journal group commit (T-133), then re-run
   `Tools/Test-TerrainStress.ps1`. Target: 96/s sustained with frames near 33 ms.
+- **CP-021/CP-022 re-runs:** 76.7/s and 68.3/s, with correctness unchanged. Run-to-run spread on
+  this machine is about ±5/s, so T-133's result needs several runs, not one.
 - **Owner / task:** T-133
 - **Result:** *open*
 - **Decision:** D-047 (technical)

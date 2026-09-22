@@ -103,6 +103,7 @@ void FTerrainEditQueue::Pump(double Now, const FTerrainQueueCallbacks& Cb, int32
 	for (int32 Done = 0; Done < MaxOps && PendingCount > 0; ++Done)
 	{
 		if (Done && FPlatformTime::Seconds()-Start >= BudgetSeconds) break;
+		if (Cb.CanExecute && !Cb.CanExecute()) break;   // before anything is touched, every time
 		uint32 Id = ActiveSource;
 		if (!Id)
 		{

@@ -1,9 +1,9 @@
 # HANDOFF
 
-**Checkpoint:** CP-021 · **Date:** 2026-09-21 · **Branch:** `main`
-**Agents:** Claude (Opus 5) wrote T-128 to T-132.1. Codex independently reviewed CP-016 to CP-020
-(`Docs/reviews/2026-09-21-checkpoints-review-codex.md`). Claude corrected F1 and F2 (T-132.1,
-D-048) and self-reviewed the fix.
+**Checkpoint:** CP-022 · **Date:** 2026-09-21 · **Branch:** `main`
+**Agents:** Claude (Opus 5) wrote T-128 to T-132.2. Codex independently reviewed CP-016 to CP-020
+(`Docs/reviews/2026-09-21-checkpoints-review-codex.md`). Claude corrected F1 to F5 (T-132.1 D-048,
+T-132.2 D-049) and self-reviewed the fixes; the fixes themselves have not had a cross-vendor read.
 **Expected next agent:** either (D-028).
 
 ---
@@ -30,6 +30,7 @@ python Tools\Test-TerrainSettlement.py            # hard kills + journal audit +
 .\Tools\Test-TerrainMultiplayer.ps1 -Rounds 2 -DurationSeconds 30 -CheckpointCapture -DropOp 20
 python Tools\Test-TerrainLease.py ; python Tools\Test-TerrainCheckpoint.py ; python Tools\Test-TerrainRetention.py
 .\Tools\Test-TerrainStress.ps1 -Edits 5000 -LiveSeconds 20   # gate 8 + E-6 (about 3 min)
+.\Tools\Test-TerrainStress.ps1 -Edits 100 -LiveSeconds 2 -ServerIni 'SettlementModule=None'   # must THROW (PARTIAL)
 ```
 In a standalone game, `Terrain.AdapterChecks` runs the plugin's density, material and E-1
 checks, and `Terrain.LedgerAudit` recomputes every balance from the journal.
@@ -54,7 +55,7 @@ report, rulings and self-review are in `Docs/proposals/P-011-stress-profile.md`,
 
 ## What is NOT done, stated plainly
 
-- **Throughput at the design point (T-133, after T-132.2):** 96 edits/s is not sustained on this machine
+- **Throughput at the design point (T-133, next):** 96 edits/s is not sustained on this machine
   (71–78/s). The fix is journal group commit plus a checkpoint trigger priced in chunks (P-011 §4).
 - **Player identity** (R-017): owners come from the Null online subsystem, which is per machine at
   best. A real login is a Director decision in Phase 4.
@@ -67,8 +68,9 @@ report, rulings and self-review are in `Docs/proposals/P-011-stress-profile.md`,
 - **Journal trimming, retention pins and backups** are not built.
 - **Resync has no rate limit** (P-008 §7).
 - **K9's SingleIndex switch** is deferred, because it changes how terrain looks.
-- **Codex review F3 to F6 are open** (T-132.2 next; F6 with Linux). The specs P-005 to P-010 themselves
-  have still not had a cross-vendor design read; CP-021's review covered the code of CP-016 to CP-020.
+- **Codex review F6 is open** (Linux parent-directory sync, R-007). F1 to F5 are fixed. The specs
+  P-005 to P-010 have still not had a cross-vendor design read; the review covered the code of
+  CP-016 to CP-020. The fixes are worth a short Codex re-read when it is next available.
 
 ## Next safe action
 
@@ -126,18 +128,54 @@ report, rulings and self-review are in `Docs/proposals/P-011-stress-profile.md`,
 - **Recorded at CP-021** with the review report. STATE, D-048, BACKLOG, RISKS (R-016, R-007) and
   P-011's correction note are updated.
 
+### T-132.2: F3, F4 and F5 corrected (Claude, recorded at CP-022, D-049)
+
+- **Task:** the review's P2 findings F3 to F5. R3 (persistence tests and gates), under the standing
+  instruction. Base `af88a30`. Writer and self-reviewer were the same agent.
+- **F3, fixed.** `FTerrainQueueCallbacks::CanExecute` is asked before every operation `Pump` runs,
+  including each child of a split transaction. The service's callback is
+  `Pending() < MaxPending`, which replaces the two per-call gates (the frame pump and the console's
+  256-op pump). `SettlementPendingPeak` is sampled at every `Submit`, the only moment the count
+  rises. The stress verdict now fails if the peak ever passes 32.
+- **F4, fixed.** `RunLedgerAudit` returns `ETerrainLedgerAudit` (Pass, Fail or Deferred).
+  - The stress verdict requires a clean terrain comparison, the window, and a passing audit.
+  - With persistence, checkpoints or settlement off, the verdict is **PARTIAL** and names what
+    was off.
+  - `Test-TerrainStress.ps1` also requires the audit's own PASS line. It throws on PARTIAL unless
+    `-Measurement` is given.
+- **F5, fixed.** The crash matrix judges every recovery with one `Judge` function:
+  - never below the acknowledged head;
+  - at most one above it, and only when the last append failed (P-003 §2's uncertain record);
+  - exact hashes.
+  - A third fault mode writes the whole record and then reports failure: 9 such appends came back
+    and 18 torn or refused ones did not.
+  - A negative control drops the final acknowledged record, leaving a valid, consistent prefix at
+    OpSeq 8. The old oracle accepted this; `Judge` rejects it.
+- **Mutation-checked:**
+  - M5 (no per-op gate): the service test runs 48 in one pump call against a limit of 32;
+  - M6 (no lower bound): the negative control fails;
+  - M7 (the old ceiling, Head ≤ acknowledged): the matrix fails at mutation 11, mode 2. This
+    confirms Codex's point that the old upper bound was wrong.
+- **Evidence (final source):** both targets build. **43/43 automation**
+  (`Saved/Logs/T1322-Automation-final.log`). Codex's controls:
+  - `-ServerIni 'SettlementModule=None'` is now refused as PARTIAL (before: PASS);
+  - `-ExtraArgs '-TerrainSettleDelay=2' -ServerIni 'bCheckpointCapture=False' -Measurement` gives
+    **unsettled max 32 of 32** (before: 34), with the audit PASS.
+  - Short full-stack stress: PASS.
+  - Stress 5,000 (before the PARTIAL wording change, same gates): PASS, 259 chunks, ledger exact
+    over 7,334 edits, 28 checkpoints, 68.3/s (R-018 unchanged).
+  - Settlement kill test PASS; MP 3 rounds with observer and capture PASS, audits every round.
+- **Not exercised in a real process:** a stress run with settlement on whose audit FAILS. It goes
+  through the same `Audit != Pass` branch as the unit-level logic, but no real run drove it.
+- **Also still open:** the review's reporting notes (percentiles are of per-second maxima; stale
+  capture comments in ARCHITECTURE and settings). F6 stays with R-007.
+
 ### Next safe actions, in order
 
-1. **T-132.2: Codex review F3 to F5.** These are R3 persistence tests and gates, and fall under
-   the standing instruction. See BACKLOG for the scope:
-   - F3: the settlement window checked per mutation; reproduce with
-     `Tools/Test-TerrainStress.ps1 -Edits 100 -LiveSeconds 2 -ExtraArgs '-TerrainSettleDelay=2' -ServerIni 'bCheckpointCapture=False'`,
-     which must report unsettled max ≤ 32;
-   - F4: the stress verdict requires the ledger audit; the negative control is `-ServerIni 'SettlementModule=None'`,
-     which must not print PASS;
-   - F5: the crash matrix's lower bound.
-2. **T-133: journal group commit** (below), then the full default stress run.
-3. **F6** with the first Linux build (R-007).
+1. **T-133: journal group commit** (below). Measure it with several stress runs (the spread is
+   about ±5/s), then run the full default stress run.
+2. **F6** with the first Linux build (R-007).
+3. When Codex is next available: a short re-read of T-132.1 and T-132.2.
 
 **T-133: journal group commit and checkpoint trigger policy** (P-011 §4). Batch every commit in
 one pump call behind a single flush, and broadcast and settle only after that flush. It needs a

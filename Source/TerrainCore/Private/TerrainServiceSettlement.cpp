@@ -259,20 +259,20 @@ void UTerrainService::TickSettlement()
 	}
 }
 
-void UTerrainService::RunLedgerAudit()
+ETerrainLedgerAudit UTerrainService::RunLedgerAudit()
 {
 	check(IsInGameThread());
 	if (!Settlement || !WorldStore)
 	{
 		UE_LOG(LogTerrainCore, Error, TEXT("**** Terrain.LedgerAudit: FAIL no ledger is open ****"));
-		return;
+		return ETerrainLedgerAudit::Fail;
 	}
 	if (Settlement->Pending() != 0)
 	{
 		// Audit a quiet ledger: W must equal H for "every journaled credit is in it" to be checkable.
 		FTimerHandle Retry; TWeakObjectPtr<UTerrainService> Weak(this);
 		GetWorld()->GetTimerManager().SetTimer(Retry, FTimerDelegate::CreateLambda([Weak]() { if (Weak.IsValid()) Weak->RunLedgerAudit(); }), 0.2f, false);
-		return;
+		return ETerrainLedgerAudit::Deferred;
 	}
 
 	// The truth, recomputed from nothing but the journal.
@@ -311,6 +311,7 @@ void UTerrainService::RunLedgerAudit()
 	UE_LOG(LogTerrainCore, Display,
 		TEXT("**** Terrain.LedgerAudit: %s H=%llu W=%llu settlements=%lld paid records=%lld balances=%d total=%.3f L ****"),
 		bMatch ? TEXT("PASS") : TEXT("FAIL"), H, Settlement->GetWatermark(), Settlements, PaidRecords, Actual.Num(), double(Total) / 1.0e6);
+	return bMatch ? ETerrainLedgerAudit::Pass : ETerrainLedgerAudit::Fail;
 }
 
 void UTerrainService::StartDigStress()

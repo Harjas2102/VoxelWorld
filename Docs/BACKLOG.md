@@ -109,14 +109,8 @@ deliberately removing arbitrary terrain manipulation from Pillar 1).
 - **1F** — Stress profile, collision, foliage, nav, streaming → **decide the backend**.
   **Stress profile done at CP-020 (T-132):** correctness PASS, 96/s not yet sustained (R-018).
   Collision, foliage, nav and streaming observations remain.
-  **T-132.2 (next):** Codex review F3 to F5 (`Docs/reviews/2026-09-21-checkpoints-review-codex.md`).
-  - F3: enforce the 32-record settlement window before every mutation, including console pumping
-    and split children, and assert its maximum throughout a slow-worker run.
-  - F4: stress PASS requires a completed, passing ledger audit; an attribution mode reports a
-    partial result.
-  - F5: the crash matrix tracks the acknowledged head as a lower bound, adds a
-    full-record/failed-response case, and a negative control.
-  - Then T-133 (group commit), then a full default stress run.
+  **Next: T-133 (group commit)**, then the full default stress run. Codex review F1 to F5 are done
+  (T-132.1, T-132.2); F6 waits for Linux (R-007).
 
 ### T-006 — Editor fluency *(rescoped at CP-002; not started)*
 
@@ -245,6 +239,12 @@ T-101B sub-step 1D, which requires the multiplayer-capable version instead.
 ---
 
 ## Done
+
+- **T-132.2** *(CP-022)* **Codex review F3 to F5 corrected.** The settlement window is held per
+  operation (`CanExecute`): the slow-settlement peak is 32, where Codex measured 34. Stress PASS
+  requires the ledger audit and the window, and attribution runs say PARTIAL. The crash matrix has
+  an acknowledged-head lower bound, a lost-acknowledgement fault mode and a negative control. All
+  three are mutation-checked; 43/43. **D-049.**
 
 - **T-132.1** *(CP-021)* **Codex review F1 and F2 corrected.** Checkpoint publication waits for the
   settlement watermark at one boundary, including the empty cut. Every capture end is consumed,

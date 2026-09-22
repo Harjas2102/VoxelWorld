@@ -16,6 +16,15 @@ struct FTerrainSourceState
 
 struct FTerrainQueueCallbacks
 {
+	/**
+	 * Asked before EVERY operation Pump executes, including each child of a split transaction.
+	 * False stops the pump there, with the operation still queued.
+	 *
+	 * This is how a bound on committed-but-unfinished work (P-003 §2's 32-record settlement
+	 * window) is held exactly. Checking it once before a pump call is not enough: one call may run
+	 * up to 256 operations, and the window was measured at 34 that way (Codex review F3).
+	 */
+	TFunction<bool()> CanExecute;
 	TFunction<void(uint32, FTerrainSourceState&)> Refresh;
 	TFunction<ETerrainEditRejection(const FTerrainOp&, const FTerrainSourceState&)> Validate;
 	TFunction<bool(const FTerrainOp&, FTerrainEditResult&)> Apply;

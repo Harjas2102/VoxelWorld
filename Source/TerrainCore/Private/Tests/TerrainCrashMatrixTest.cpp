@@ -11,6 +11,7 @@
 #include "MemoryTerrainBackend.h"
 #include "ITerrainDensityField.h"
 #include "TerrainChunk.h"
+#include "TerrainStorage.h"
 #include "TerrainPersistenceFixtures.h"
 
 /**
@@ -32,16 +33,22 @@
  * recovery "works" -- a world that comes back holding a state it was never in is worse than one
  * that refuses to come back at all, because nobody finds out. So the reference run records the
  * exact terrain after **every** committed operation, and after each injected crash the recovered
- * world must equal the reference at **some** operation sequence:
+ * world must equal the reference at an operation sequence inside a window:
  *
- *   - recovery may lose the tail -- a crash before a record was durable means the edit never
- *     happened, which is correct and is what the commit ordering promises;
- *   - recovery may lose nothing -- the crash landed after the last durable write;
- *   - recovery may refuse to open, when the crash destroyed something no protocol can repair,
- *     and that refusal is a valid outcome provided it is a refusal and not a bad open;
- *   - recovery may **not** land between two operations, ahead of the journal, or on terrain
- *     that never existed. That is the failure this test exists to catch, and the assertion is
- *     an exact chunk-hash comparison rather than "it opened".
+ *   - **never below the acknowledged head.** An operation whose record the journal reported
+ *     durable was acknowledged; losing it is losing history a player was told happened. (Codex
+ *     review F5: this bound was missing, so a recovery that returned an earlier, internally
+ *     consistent world would have passed.)
+ *   - **at most one above it,** and only when the session's last append FAILED. P-003 §2 makes a
+ *     complete valid record recovery authority even when the flush response was lost, so that
+ *     one uncertain record may or may not come back. Nothing else may.
+ *   - recovery may refuse to open only while the world does not yet exist;
+ *   - recovery may **not** land between two operations or on terrain that never existed. The
+ *     assertion is an exact chunk-hash comparison rather than "it opened".
+ *
+ * Three fault modes at every write: refused outright, torn to a 64-byte prefix, and written in
+ * full with failure reported -- the last is the lost-acknowledgement case, and the only one in
+ * which the uncertain record can survive.
  */
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FTerrainCrashMatrixTest, "TerrainCore.Persistence.CrashMatrix",
@@ -185,21 +192,29 @@ bool FTerrainCrashMatrixTest::RunTest(const FString& Parameters)
 	TestEqual(TEXT("The reference history has a state per operation"),
 		Reference.Num(), CrashOpCount + 1);
 
+	/** What a session was told: how many commits were acknowledged, and whether one more is in doubt. */
+	struct FSessionOutcome
+	{
+		int32 Acknowledged = 0;
+		bool  bUncertainAppend = false;   // the last RecordCommit failed; its record may be complete
+	};
+
 	/**
 	 * Runs the scripted session against a device, stopping at the first durable failure.
 	 *
 	 * Mirrors the live commit ordering: apply, then record, and **stop** if the record cannot
 	 * be made durable, because the service closes admission there rather than broadcasting an
-	 * edit nobody wrote down. Returns the number of operations that were durably committed.
+	 * edit nobody wrote down.
 	 */
-	auto RunSession = [&](FTerrainFaultDevice& Device, int32* OutCreationWrites = nullptr) -> int32
+	auto RunSession = [&](FTerrainFaultDevice& Device, int32* OutCreationWrites = nullptr) -> FSessionOutcome
 	{
+		FSessionOutcome Outcome;
 		FTerrainWorldStore Store(Device);
 		const bool bCreated = Store.Create(Base, Identity.World, Identity.Epoch, 1789412345678LL).IsOk();
 		if (OutCreationWrites != nullptr) { *OutCreationWrites = Device.MutationCount(); }
 		if (!bCreated)
 		{
-			return 0;
+			return Outcome;
 		}
 
 		FTerrainWorldStoreJournal Journal(Store);
@@ -209,7 +224,6 @@ bool FTerrainCrashMatrixTest::RunTest(const FString& Parameters)
 
 		FTerrainRevisionIndex Revisions;
 		TMap<FTerrainChunkKey, FTerrainOpSeq> Dirty;
-		int32 Committed = 0;
 
 		for (int32 Index = 0; Index < CrashOpCount; ++Index)
 		{
@@ -237,10 +251,13 @@ bool FTerrainCrashMatrixTest::RunTest(const FString& Parameters)
 			CommitIdentity.ChildCount = 1;
 			if (!Journal.RecordCommit(Op, Result, CommitIdentity, Changed))
 			{
-				break;   // not durable: the edit did not happen, and nothing after it does either
+				// Not acknowledged, and nothing after it runs. But "the append failed" is not
+				// "the record is absent": its bytes may all be on disk.
+				Outcome.bUncertainAppend = true;
+				break;
 			}
 			for (const FTerrainChunkKey& Key : Result.AffectedChunks) { Dirty.Add(Key, Op.OpSeq); }
-			++Committed;
+			++Outcome.Acknowledged;
 
 			for (const int32 Cut : CrashCutAfter)
 			{
@@ -255,7 +272,7 @@ bool FTerrainCrashMatrixTest::RunTest(const FString& Parameters)
 				// more to replay. That is the ruling in D-033 and this exercises it.
 			}
 		}
-		return Committed;
+		return Outcome;
 	};
 
 	/** Reopens, restores, replays, and returns the recovered head -- or -1 if it refused. */
@@ -285,6 +302,36 @@ bool FTerrainCrashMatrixTest::RunTest(const FString& Parameters)
 			Store.GetState().Checkpoint.G, ReplayStats.LastOpSeq));
 	};
 
+	/**
+	 * The oracle. Empty when the recovered world is legal for what the session was told; the
+	 * reason otherwise. One function, so the matrix and its negative control judge identically.
+	 */
+	auto Judge = [&](int64 Head, const TMap<FTerrainChunkKey, uint64>& Hashes, const FSessionOutcome& Session) -> FString
+	{
+		if (Head > CrashOpCount)
+		{
+			return FString::Printf(TEXT("recovered at OpSeq %lld, past the end of history"), Head);
+		}
+		if (Head < Session.Acknowledged)
+		{
+			return FString::Printf(TEXT("recovered at OpSeq %lld but %d operations were acknowledged. ")
+				TEXT("Acknowledged history was lost."), Head, Session.Acknowledged);
+		}
+		const int64 Ceiling = Session.Acknowledged + (Session.bUncertainAppend ? 1 : 0);
+		if (Head > Ceiling)
+		{
+			return FString::Printf(TEXT("recovered at OpSeq %lld but only %d were acknowledged and %s. ")
+				TEXT("An edit came back that was never written down."), Head, Session.Acknowledged,
+				Session.bUncertainAppend ? TEXT("one more was in doubt") : TEXT("none was in doubt"));
+		}
+		if (!Hashes.OrderIndependentCompareEqual(Reference[static_cast<int32>(Head)]))
+		{
+			return FString::Printf(TEXT("recovered at OpSeq %lld, but the terrain does not match the ")
+				TEXT("world at OpSeq %lld. Recovery landed on a state that never existed."), Head, Head);
+		}
+		return FString();
+	};
+
 	// --- the clean run, which also counts the writes the matrix will walk --------------------
 	int32 MutationCount = 0;
 	int32 CreationWrites = 0;   // writes consumed before the world exists at all
@@ -292,8 +339,9 @@ bool FTerrainCrashMatrixTest::RunTest(const FString& Parameters)
 		FTerrainMemoryStorageDevice Memory;
 		FTerrainFaultDevice Device(Memory);
 
-		const int32 Committed = RunSession(Device, &CreationWrites);
-		TestEqual(TEXT("With no faults every operation commits"), Committed, CrashOpCount);
+		const FSessionOutcome Clean = RunSession(Device, &CreationWrites);
+		TestEqual(TEXT("With no faults every operation commits"), Clean.Acknowledged, CrashOpCount);
+		TestFalse(TEXT("and none is in doubt"), Clean.bUncertainAppend);
 
 		MutationCount = Device.MutationCount();
 		// Nine edits, two checkpoints, and the world's own creation. The count is small because
@@ -311,25 +359,47 @@ bool FTerrainCrashMatrixTest::RunTest(const FString& Parameters)
 			Hashes.OrderIndependentCompareEqual(Reference[CrashOpCount]));
 	}
 
+	// --- the negative control: the oracle must reject lost acknowledged history ---------------
+	// A complete session whose journal then loses its last byte: the torn-tail rule drops record
+	// 9, leaving a valid, internally consistent world at OpSeq 8. The session was told 9. The old
+	// oracle (no lower bound) accepted exactly this; the new one must not.
+	{
+		FTerrainMemoryStorageDevice Memory;
+		FTerrainFaultDevice Device(Memory);
+		const FSessionOutcome Session = RunSession(Device);
+		const FString Segment = TerrainStoragePaths::JournalSegment(1);
+		const int64 Size = Memory.Size(Segment);
+		TestTrue(TEXT("Negative control: the journal can be shortened"),
+			Size > 1 && Memory.Truncate(Segment, Size - 1) == ETerrainStorageResult::Ok);
+
+		TMap<FTerrainChunkKey, uint64> Hashes;
+		const int64 Head = Recover(Device, Hashes);
+		TestEqual(TEXT("Negative control: recovery drops the damaged last record"), Head, (int64)CrashOpCount - 1);
+		TestTrue(TEXT("and lands on a real, consistent state -- which is why only a lower bound catches it"),
+			Head >= 0 && Hashes.OrderIndependentCompareEqual(Reference[static_cast<int32>(Head)]));
+		TestFalse(TEXT("The oracle rejects losing acknowledged history"), Judge(Head, Hashes, Session).IsEmpty());
+	}
+
 	AddInfo(FString::Printf(
-		TEXT("Crash matrix: %d mutating writes over %d edits and 2 checkpoints, walked twice ")
-		TEXT("(hard failure and torn write). Packs keep the count low: one append per capture ")
-		TEXT("rather than one write per payload, page and descriptor."),
+		TEXT("Crash matrix: %d mutating writes over %d edits and 2 checkpoints, walked three times ")
+		TEXT("(refused, torn, and written in full with failure reported). Packs keep the count low: ")
+		TEXT("one append per capture rather than one write per payload, page and descriptor."),
 		MutationCount, CrashOpCount));
 
 	// --- the matrix -------------------------------------------------------------------------
-	int32 Refusals = 0, Recovered = 0, LostTail = 0;
+	int32 Refusals = 0, Recovered = 0, LostTail = 0, UncertainKept = 0, UncertainDropped = 0;
 	for (int32 Mutation = 0; Mutation < MutationCount; ++Mutation)
 	{
-		for (int32 Mode = 0; Mode < 2; ++Mode)
+		for (int32 Mode = 0; Mode < 3; ++Mode)
 		{
 			FTerrainMemoryStorageDevice Memory;
 			FTerrainFaultDevice Device(Memory);
-			// Mode 0 refuses the write outright; mode 1 writes half of it and then reports
-			// failure, which is the case a "return IoError" fake would never produce.
-			Device.FailAtMutation(Mutation, Mode == 0 ? -1 : 64);
+			// Mode 0 refuses the write outright; mode 1 writes 64 bytes of it and then reports
+			// failure, which a "return IoError" fake would never produce; mode 2 writes ALL of it
+			// and then reports failure -- a lost acknowledgement, P-003 §2's uncertain record.
+			Device.FailAtMutation(Mutation, Mode == 0 ? -1 : (Mode == 1 ? 64 : MAX_int32));
 
-			const int32 Committed = RunSession(Device);
+			const FSessionOutcome Session = RunSession(Device);
 
 			TMap<FTerrainChunkKey, uint64> Hashes;
 			const int64 Head = Recover(Device, Hashes);
@@ -355,49 +425,36 @@ bool FTerrainCrashMatrixTest::RunTest(const FString& Parameters)
 				continue;
 			}
 
-			if (Head > CrashOpCount)
+			const FString Wrong = Judge(Head, Hashes, Session);
+			if (!Wrong.IsEmpty())
 			{
-				AddError(FString::Printf(
-					TEXT("Mutation %d mode %d: recovered at OpSeq %lld, past the end of history."),
-					Mutation, Mode, Head));
-				return false;
-			}
-			if (Head > Committed)
-			{
-				AddError(FString::Printf(
-					TEXT("Mutation %d mode %d: recovered at OpSeq %lld but only %d operations were ")
-					TEXT("durably committed. An edit came back that was never written down."),
-					Mutation, Mode, Head, Committed));
-				return false;
-			}
-
-			if (!Hashes.OrderIndependentCompareEqual(Reference[static_cast<int32>(Head)]))
-			{
-				AddError(FString::Printf(
-					TEXT("Mutation %d mode %d: recovered at OpSeq %lld, but the terrain does not ")
-					TEXT("match the world at OpSeq %lld. Recovery landed on a state that never ")
-					TEXT("existed."),
-					Mutation, Mode, Head, Head));
+				AddError(FString::Printf(TEXT("Mutation %d mode %d: %s"), Mutation, Mode, *Wrong));
 				return false;
 			}
 
 			++Recovered;
 			if (Head < CrashOpCount) { ++LostTail; }
+			if (Session.bUncertainAppend)
+			{
+				++(Head > Session.Acknowledged ? UncertainKept : UncertainDropped);
+			}
 		}
 	}
 
 	AddInfo(FString::Printf(
-		TEXT("Crash matrix: %d of %d injections recovered to an exact point in real history ")
-		TEXT("(%d with a truncated tail); the other %d refused to open, and ALL of those were ")
-		TEXT("crashes during world creation (the first %d writes), when no world existed yet. ")
-		TEXT("No established world was made unopenable by any single crash."),
-		Recovered, Recovered + Refusals, LostTail, Refusals, CreationWrites));
+		TEXT("Crash matrix: %d of %d injections recovered to an exact point in real history, never ")
+		TEXT("below the acknowledged head (%d short of the full session). Of the failed appends, %d ")
+		TEXT("came back complete and %d did not. The other %d refused to open, and ALL of those were ")
+		TEXT("crashes during world creation (the first %d writes), when no world existed yet."),
+		Recovered, Recovered + Refusals, LostTail, UncertainKept, UncertainDropped, Refusals, CreationWrites));
 
 	// The matrix proves nothing if every injection happened to be survivable in the same way.
 	TestTrue(TEXT("Some crashes were recovered from"), Recovered > 0);
-	TestTrue(TEXT("and some cost the tail -- otherwise no write was load-bearing"), LostTail > 0);
+	TestTrue(TEXT("and some cost the unacknowledged tail -- otherwise no write was load-bearing"), LostTail > 0);
+	TestTrue(TEXT("A fully written, failed append DID come back -- the lost-acknowledgement case ran"), UncertainKept > 0);
+	TestTrue(TEXT("and a torn or refused one did not"), UncertainDropped > 0);
 	TestTrue(TEXT("Every refusal happened during world creation, none after it"),
-		Refusals <= CreationWrites * 2);
+		Refusals <= CreationWrites * 3);
 
 	// --- repeat recovery: opening twice must not change the answer (P-003 §8) ----------------
 	{

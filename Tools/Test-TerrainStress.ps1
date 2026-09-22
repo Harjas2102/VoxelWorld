@@ -3,6 +3,7 @@
    then a fresh client joins while editing continues; the joiner's copy of every edited chunk is verified. #>
 [CmdletBinding()]
 param([int]$Edits=5000,[int]$Bots=32,[int]$LiveSeconds=20,[int]$RegionMeters=100,[int]$Port=17787,[string[]]$ServerIni=@(),[string[]]$ExtraArgs=@(),
+      [switch]$Measurement,   # accept PARTIAL: a run with a subsystem switched off is attribution, not correctness
       [string]$Engine='C:\Program Files\Epic Games\UE_5.8')
 $ErrorActionPreference='Stop'
 $root=(Resolve-Path (Join-Path $PSScriptRoot '..')).Path
@@ -19,7 +20,8 @@ try {
     $serverArgs=@('"'+$project+'"','/Game/ThirdPerson/Lvl_ThirdPerson','-server','-nullrhi','-unattended','-nosplash','-nosound',
         '-TerrainStress',"-TerrainStressEdits=$Edits","-TerrainStressBots=$Bots","-TerrainStressLive=$LiveSeconds","-TerrainStressRegion=$RegionMeters",
         "-port=$Port","-seconds=$budget",('-abslog="'+$serverLog+'"'),($ini+"WorldStoreName=$world"))
-    # Variants for attribution, e.g. -ServerIni bPersistEdits=False or bCheckpointCapture=False.
+    # Variants for attribution, e.g. -ServerIni bPersistEdits=False or bCheckpointCapture=False. Any
+    # of those makes the verdict PARTIAL, which fails unless -Measurement says it is expected.
     foreach ($setting in $ServerIni) { $serverArgs+=($ini+$setting) }
     foreach ($arg in $ExtraArgs) { $serverArgs+=$arg }   # e.g. -trace=cpu,frame for Unreal Insights
     $server=Start-Process -FilePath $exe -ArgumentList $serverArgs -WindowStyle Hidden -PassThru; $procs.Add($server)
@@ -36,7 +38,7 @@ try {
     $client=Start-Process -FilePath $exe -ArgumentList $clientArgs -WindowStyle Hidden -PassThru; $procs.Add($client)
     $deadline=(Get-Date).AddSeconds(600)
     do {
-        $result=Select-String -LiteralPath $serverLog -Pattern '\*\*\*\* Stress: (PASS|FAIL)' | Select-Object -Last 1
+        $result=Select-String -LiteralPath $serverLog -Pattern '\*\*\*\* Stress: (PASS|FAIL|PARTIAL)' | Select-Object -Last 1
         if ($result) { break }
         if ($server.HasExited) { throw 'Server exited before a result.' }
         if ((Get-Date) -gt $deadline) { throw 'No stress result in time.' }
@@ -73,7 +75,15 @@ try {
     $size=0; if (Test-Path $dir) { $size=(Get-ChildItem -LiteralPath $dir -Recurse -File | Measure-Object -Property Length -Sum).Sum }
     $head=[regex]::Match((Get-Content -LiteralPath $serverLog -Raw),'Stress.Summary total: ops=(\d+)').Groups[1].Value
     if ($size -and $head) { Write-Output ("World directory {0:N1} MB after {1} commits ({2:N0} bytes/commit, all-in: containers, journal, ledger)" -f ($size/1MB),$head,($size/[double]$head)) }
+    # Codex review F4: the gate is the server's whole verdict, and the ledger audit is checked here
+    # as well, so a verdict line that ever stopped carrying it could not pass silently.
+    if ($result.Line -match 'Stress: PARTIAL') {
+        if (-not $Measurement) { throw "Stress is PARTIAL (a subsystem is off), not a correctness PASS: $($result.Line). Use -Measurement for attribution runs." }
+        Write-Output "MEASUREMENT ONLY, not a correctness result. Evidence: $logs"; return
+    }
     if ($result.Line -notmatch 'Stress: PASS') { throw "Stress FAILED: $($result.Line)" }
+    $audits=@(Select-String -LiteralPath $serverLog -Pattern '\*\*\*\* Terrain.LedgerAudit: (PASS|FAIL)')
+    if ($audits.Count -eq 0 -or @($audits | Where-Object { $_.Line -notmatch 'LedgerAudit: PASS' }).Count -gt 0) { throw 'Stress: the ledger audit is missing or failed.' }
     Write-Output "PASS. Evidence: $logs"
 } finally {
     foreach ($p in $procs) { if (-not $p.HasExited) { Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue }; $p.Dispose() }

@@ -315,9 +315,8 @@ bool UTerrainService::RequestEdit(const FTerrainEditRequest& Request, FTerrainEd
 		const auto Cb = QueueCallbacks();
 		EditQueue.Submit(1,Id,Op,GetWorld()->GetTimeSeconds(),Cb,OutReceipt,
 			GetDefault<UTerrainSettings>()->MaxVoxelsPerOp,Failure);
-		// The P-003 §2 window applies here too: this inline pump used to bypass it (found at T-132).
-		if (!Settlement || Settlement->Pending() < FTerrainSettlementWorker::MaxPending)
-			EditQueue.Pump(GetWorld()->GetTimeSeconds(),Cb,256,1.);
+		// The P-003 §2 window applies here too, per operation, through Cb.CanExecute.
+		EditQueue.Pump(GetWorld()->GetTimeSeconds(),Cb,256,1.);
 		if (LastAdminReceipt.RequestId == Id) OutReceipt=LastAdminReceipt;
 		return OutReceipt.bApplied;
 	}

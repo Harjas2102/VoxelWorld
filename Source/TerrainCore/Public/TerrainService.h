@@ -41,6 +41,9 @@ enum class ETerrainServiceState : uint8
  *
  * Public queries and lifecycle calls are game-thread-only.
  */
+/** What `RunLedgerAudit` concluded. Deferred: the ledger was still settling, and a retry is scheduled. */
+enum class ETerrainLedgerAudit : uint8 { Pass, Fail, Deferred };
+
 UCLASS()
 class TERRAINCORE_API UTerrainService : public UWorldSubsystem
 {
@@ -249,8 +252,12 @@ private:
 public:
 	/** Settled balances, by owner then item: committed database state only (P-003 §2 step 5). */
 	const TMap<uint64, TMap<uint32, int64>>& GetSettledBalances() const { return SettledBalances; }
-	/** Development: recompute every balance from the journal and compare with the ledger. */
-	void RunLedgerAudit();
+	/**
+	 * Development: recompute every balance from the journal and compare with the ledger.
+	 * Returns the verdict, so a harness can gate on it instead of printing it and moving on
+	 * (Codex review F4). A Deferred audit logs its own verdict when its retry runs.
+	 */
+	ETerrainLedgerAudit RunLedgerAudit();
 	/** Development: the kill test's continuous digger. */
 	void StartDigStress();
 private:
@@ -328,6 +335,13 @@ private:
 
 	/** Journal append+flush time per commit, for the stress profile (T-132). */
 	struct FCommitStats { double Max = 0, Sum = 0; int64 Count = 0; } CommitStats;
+
+	/**
+	 * The most records ever unsettled, sampled right after each Submit, the only moment the count
+	 * rises. P-003 §2 bounds it at FTerrainSettlementWorker::MaxPending. A per-tick sample only
+	 * sees the state after the frame's pump, not a console pump's peak (Codex review F3).
+	 */
+	int32 SettlementPendingPeak = 0;
 
 	// ---- T-132 stress harness (development only; inert without -TerrainStress) ----
 	static constexpr uint32 StressBotBase = 100000;

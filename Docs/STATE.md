@@ -5,12 +5,32 @@
 
 ---
 
-**Checkpoint:** CP-021 · **Date:** 2026-09-21
+**Checkpoint:** CP-022 · **Date:** 2026-09-21
 **Phase:** 1 — Terrain Feasibility
 **Expected next agent:** either (D-028)
-**Current task:** T-132.2. Correct the Codex review's findings F3 to F5: the settlement window
-enforced per mutation, a stress verdict that requires a passing ledger audit, and the crash
-matrix's acknowledged-history lower bound. Then T-133, journal group commit (R-018).
+**Current task:** T-133 — journal group commit, plus a checkpoint trigger priced in chunks, so the
+server sustains the 96 edits/s design point (R-018). Gate it on `Tools/Test-TerrainStress.ps1`,
+which now requires the ledger audit and the settlement window.
+
+## What happened at CP-022
+
+**One correction increment, T-132.2 (D-049): the Codex review's F3, F4 and F5 are fixed.** Every
+code finding from the review is now closed except F6, the Linux directory sync (R-007).
+
+| Finding | Fix | Evidence |
+|---|---|---|
+| **F3:** the 32-record settlement window was checked per pump call; measured 34 | The queue asks `CanExecute` before every operation, including split children and the console pump. The peak is sampled at every Submit | `Capture.Service`: 48 queued, one 256-op call runs exactly 32. Codex's slow-settlement run: **unsettled max 32 of 32** |
+| **F4:** stress PASS ignored the ledger audit | The verdict requires terrain, the audit and the window. With persistence, checkpoints or settlement off it says **PARTIAL**. The driver throws on PARTIAL unless `-Measurement` is given, and also requires the audit's PASS line | Codex's settlement-off run is now refused (before: PASS) |
+| **F5:** the crash matrix had no lower bound on acknowledged history | One `Judge`: never below the acknowledged head, and at most one above it when the last append failed. A third fault mode writes a full record and then reports failure. A negative control drops an acknowledged record | 72 injections: 9 fully written, failed appends came back and 18 torn ones did not. The negative control is rejected |
+
+Mutation-checked: removing the per-op gate, the lower bound, or restoring the old ceiling each
+fails a test. The old ceiling was itself wrong, as Codex said. Evidence: 43/43 automation, both
+targets build. Stress 5,000 PASS: 259 chunks, ledger exact over 7,334 edits, 28 checkpoints,
+68.3/s. The settlement kill test passes, and so do 3 MP rounds with the audit every round.
+**Not exercised in a real process:** a stress run whose audit fails while settlement is on.
+
+**Drift checks: NO FLAG MOVED.** No `Build.cs` changed; D-011 and D-025 are unchanged. Nothing is
+player-visible except that, under a slow ledger, digs wait up to one record sooner.
 
 ## What happened at CP-021
 

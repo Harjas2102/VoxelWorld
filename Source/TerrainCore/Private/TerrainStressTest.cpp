@@ -93,7 +93,7 @@ void UTerrainService::TickStressTest(double TickSeconds)
 	Stress.TickMaxMs = FMath::Max(Stress.TickMaxMs, TickMs); Stress.SecondTickMaxMs = FMath::Max(Stress.SecondTickMaxMs, TickMs);
 	Stress.FrameMaxMs = FMath::Max(Stress.FrameMaxMs, FrameMs); Stress.SecondFrameMaxMs = FMath::Max(Stress.SecondFrameMaxMs, FrameMs);
 	const int32 Unsettled = Settlement ? Settlement->Pending() : 0;
-	Stress.PendingMax = FMath::Max(Stress.PendingMax, Unsettled);
+	Stress.PendingMax = FMath::Max(Stress.PendingMax, SettlementPendingPeak);   // sampled at every Submit, not per tick
 	Stress.WindowFullTicks += Unsettled >= FTerrainSettlementWorker::MaxPending;
 	if (Now >= Stress.NextSecond)
 	{
@@ -215,10 +215,31 @@ void UTerrainService::ReceiveStressHashes(UTerrainStreamComponent& Stream, const
 		}
 	}
 	if (--Stress.VerifyOutstanding > 0) return;
-	RunLedgerAudit();
-	UE_LOG(LogTerrainCore, Display, TEXT("**** Stress: %s edited chunks verified=%d mismatches=%d; phase A %llu ops in %.1f s ****"),
-		Stress.VerifyMismatches == 0 && Stress.VerifyChunks > 0 ? TEXT("PASS") : TEXT("FAIL"),
-		Stress.VerifyChunks, Stress.VerifyMismatches, Stress.PhaseAOps, Stress.PhaseASeconds);
+
+	// The verdict is the WHOLE stack's, so every part has to pass (Codex review F4): the terrain
+	// the joiner holds, the ledger against the journal, and the settlement window. A run with any
+	// part of the stack switched off is an attribution measurement, not a correctness result. It
+	// says PARTIAL and names what was off, and it can never read as PASS.
+	const UTerrainSettings* Settings = GetDefault<UTerrainSettings>();
+	FString Off;
+	if (!Settings->bPersistEdits)                  Off += TEXT(" persistence");
+	if (!Settings->bCheckpointCapture)             Off += TEXT(" checkpoints");
+	if (Settings->SettlementModule.IsNone())       Off += TEXT(" settlement");
+	const bool bLedgerExpected = Settings->bPersistEdits && !Settings->SettlementModule.IsNone();
+	const ETerrainLedgerAudit Audit = bLedgerExpected ? RunLedgerAudit() : ETerrainLedgerAudit::Fail;
+	const bool bTerrain = Stress.VerifyMismatches == 0 && Stress.VerifyChunks > 0;
+	const bool bWindow  = SettlementPendingPeak <= FTerrainSettlementWorker::MaxPending;
+	const TCHAR* Verdict = !bTerrain || !bWindow || (bLedgerExpected && Audit != ETerrainLedgerAudit::Pass)
+		? TEXT("FAIL") : (Off.IsEmpty() ? TEXT("PASS") : TEXT("PARTIAL"));
+	const TCHAR* AuditText = !bLedgerExpected ? TEXT("not run")
+		: Audit == ETerrainLedgerAudit::Pass ? TEXT("PASS")
+		: Audit == ETerrainLedgerAudit::Deferred ? TEXT("did not complete") : TEXT("FAIL");
+	UE_LOG(LogTerrainCore, Display,
+		TEXT("**** Stress: %s edited chunks verified=%d mismatches=%d; ledger audit %s; unsettled max %d of %d; ")
+		TEXT("off:%s; phase A %llu ops in %.1f s ****"),
+		Verdict, Stress.VerifyChunks, Stress.VerifyMismatches, AuditText, SettlementPendingPeak,
+		FTerrainSettlementWorker::MaxPending, Off.IsEmpty() ? TEXT(" nothing") : *Off,
+		Stress.PhaseAOps, Stress.PhaseASeconds);
 	Stress.bFinished = true;
 #endif
 }
