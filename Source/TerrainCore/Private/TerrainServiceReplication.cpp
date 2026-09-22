@@ -156,7 +156,9 @@ FTerrainQueueCallbacks UTerrainService::QueueCallbacks()
 	// P-003 §2: at most 32 committed records may await settlement. Asked before every mutation,
 	// so no pump call -- the frame's, the console's 256-op one, a split's children -- can pass it.
 	// Admission still queues within its own bounds; the work simply waits.
-	Cb.CanExecute=[this]() { return !Settlement || Settlement->Pending() < FTerrainSettlementWorker::MaxPending; };
+	// Staged records count too (P-012 §4): each is submitted the moment its flush succeeds, so
+	// counting only the unsettled ones would let one batch overshoot the window by its own size.
+	Cb.CanExecute=[this]() { return !Settlement || Settlement->Pending()+StagedPublishes.Num() < FTerrainSettlementWorker::MaxPending; };
 	Cb.Refresh=[this](uint32 Id,FTerrainSourceState& S)
 	{
 		if (Id==1) return;
@@ -201,6 +203,9 @@ FTerrainQueueCallbacks UTerrainService::QueueCallbacks()
 	};
 	Cb.Commit=[this](const FTerrainOp& Op,const FTerrainEditResult& R,const FTerrainCommitIdentity& Id)
 	{ return CommitOp(Op,R,Id); };
+	// Group commit (P-012): Commit stages; this makes the whole pump call's batch durable with one
+	// flush and only then publishes it. The queue holds the batch's receipts until it returns true.
+	Cb.Flush=[this]() { return FlushCommits(); };
 	Cb.Receipt=[this](uint32 Id,const FTerrainEditReceipt& R)
 	{
 		if (Id==1) LastAdminReceipt=R;
@@ -223,14 +228,14 @@ bool UTerrainService::CommitOp(const FTerrainOp& Op,const FTerrainEditResult& R,
     { UE_LOG(LogTerrainCore,Fatal,TEXT("Prevalidated terrain revision commit failed.")); return false; }
 	for (auto& V:Revisions) V.After=GetRevision(FTerrainChunkKey(V.Key.X,V.Key.Y,V.Key.Z));
 
-	// P-003 §2 step 2, and the ONE ordering this function exists to enforce: the record is
-	// durable before anything is told the edit happened.
+	// P-003 §2 step 2, per batch (P-012): the record is STAGED here, made durable by the one flush
+	// in FlushCommits, and nothing is told the edit happened until that flush has succeeded.
 	//
-	// The revision index advances just above rather than just below, because the record has to
-	// carry the TRUE after-revisions and the index is the only authority for them. That is a
-	// deviation from the literal step order and it is safe for one stated reason: the index is
-	// in-memory, and P-003 §2 discards unbroadcast provisional RAM on a storage fault. What
-	// must not happen -- publishing before the flush -- cannot happen here.
+	// The revision index advances just above, and the dirty set below, at stage time: the record
+	// has to carry the TRUE after-revisions, and later edits in the same batch must see both. That
+	// is safe for one stated reason: both are in-memory, and P-003 §2 discards unbroadcast
+	// provisional RAM on a storage fault. What must not happen -- publishing before the flush --
+	// cannot happen here, because publishing is FlushCommits' job.
 	if (CommitJournal != nullptr)
 	{
 		TArray<FTerrainChunkRevision> Changed;
@@ -238,41 +243,84 @@ bool UTerrainService::CommitOp(const FTerrainOp& Op,const FTerrainEditResult& R,
 		for (const auto& V:Revisions) if (V.After != V.Before) Changed.Add(V);
 
 		// P-010: what this op pays is decided NOW, from its measured result, and written into its
-		// record. Settlement will read exactly this back -- live below, or at boot after a crash.
+		// record. Settlement will read exactly this back -- after the flush, or at boot after a crash.
 		FTerrainCommitIdentity Paid=Identity;
 		if (Settlement) TerrainComputeEconomy(OwnerForSource(Op.SourceId),Op.ToolId,R.Removed,Paid.Economy);
 
-		const double RecordStarted=FPlatformTime::Seconds();
-		const bool bRecorded=CommitJournal->RecordCommit(Op,R,Paid,Changed);
-		const double RecordSeconds=FPlatformTime::Seconds()-RecordStarted;
-		CommitStats.Max=FMath::Max(CommitStats.Max,RecordSeconds); CommitStats.Sum+=RecordSeconds; ++CommitStats.Count;
-		if (!bRecorded)
+		if (!CommitJournal->StageCommit(Op,R,Paid,Changed))
 		{
 			bStorageFaulted = true;
 			UE_LOG(LogTerrainCore,Error,
-				TEXT("Terrain commit could not be made durable at OpSeq %llu. Admission is closed ")
+				TEXT("Terrain commit could not be recorded at OpSeq %llu. Admission is closed ")
 				TEXT("and this world must be restarted from disk; the edit was NOT broadcast."),
 				Op.OpSeq);
 			return false;
 		}
-		// Durable: hand it to the ledger. Step 4 never gates the broadcast below.
-		if (Settlement && WorldJournal)
-		{
-			Settlement->Submit(WorldJournal->TakeLastSettlement());
-			SettlementPendingPeak=FMath::Max(SettlementPendingPeak,Settlement->Pending());
-		}
+
+		// The dirty set is what the next checkpoint will capture. Tracked only when there is
+		// somewhere to capture TO: without a journal there is no checkpoint to owe.
+		for (const auto& K:R.AffectedChunks) DirtyChunks.Add(K, Op.OpSeq);
 	}
 
     NextOpSeq=Op.OpSeq+1;
 
-	// The dirty set is what the next checkpoint will capture. Tracked only when there is
-	// somewhere to capture TO: without a journal there is no checkpoint to owe.
+	FStagedPublish& Staged=StagedPublishes.AddDefaulted_GetRef();
+	Staged.Op=Op; Staged.AffectedChunks=R.AffectedChunks; Staged.Revisions=MoveTemp(Revisions);
+	return true;
+}
+
+bool UTerrainService::FlushCommits()
+{
+	if (StagedPublishes.IsEmpty()) return true;
+	TArray<FStagedPublish> Batch=MoveTemp(StagedPublishes);
+	StagedPublishes.Reset();
+
+	TArray<FTerrainSettlementInput> Settlements;
 	if (CommitJournal != nullptr)
 	{
-		for (const auto& K:R.AffectedChunks) DirtyChunks.Add(K, Op.OpSeq);
+		// A fault earlier in this batch means the world is already going down. Writing the rest
+		// would make durable edits nobody will ever be told about; drop them instead.
+		if (bStorageFaulted)
+		{
+			CommitJournal->DiscardStaged();
+			return false;
+		}
+		const int32 Records=CommitJournal->NumStaged();
+		const double FlushStarted=FPlatformTime::Seconds();
+		const bool bDurable=CommitJournal->FlushStaged();
+		const double FlushSeconds=FPlatformTime::Seconds()-FlushStarted;
+		CommitStats.Max=FMath::Max(CommitStats.Max,FlushSeconds); CommitStats.Sum+=FlushSeconds; ++CommitStats.Count;
+		CommitStats.Records+=Records;
+		if (!bDurable)
+		{
+			bStorageFaulted = true;
+			UE_LOG(LogTerrainCore,Error,
+				TEXT("Terrain commits OpSeq %llu..%llu could not be made durable. Admission is closed and ")
+				TEXT("this world must be restarted from disk; none of them was broadcast."),
+				Batch[0].Op.OpSeq, Batch.Last().Op.OpSeq);
+			return false;
+		}
+		if (WorldJournal) Settlements=WorldJournal->TakeSettlements();
 	}
 
-	TArray<uint8> Bytes; SerializeTerrainOp(Op,Bytes);
+	// Durable, all of it. Only now is anything told, in OpSeq order.
+	for (int32 Index=0; Index<Batch.Num(); ++Index)
+	{
+		const FStagedPublish& Done=Batch[Index];
+		// Step 4, the ledger. It never gates the broadcast below.
+		if (Settlement && Settlements.IsValidIndex(Index))
+		{
+			Settlement->Submit(MoveTemp(Settlements[Index]));
+			SettlementPendingPeak=FMath::Max(SettlementPendingPeak,Settlement->Pending());
+		}
+		PublishCommit(Done);
+	}
+	return true;
+}
+
+void UTerrainService::PublishCommit(const FStagedPublish& Done)
+{
+	TArray<uint8> Bytes; SerializeTerrainOp(Done.Op,Bytes);
 	for (const auto& Entry:Streams)
 	{
 		auto* Stream=Entry.Value.Get(); if (!Stream || !Stream->bReady) continue;
@@ -281,20 +329,19 @@ bool UTerrainService::CommitOp(const FTerrainOp& Op,const FTerrainEditResult& R,
 		const auto Held=[Stream](const FTerrainChunkKey& K)
 		{ return Stream->Subscribed.Contains(K) || Stream->PendingPristine.Contains(K) || Stream->Syncing.Contains(K); };
 		bool Relevant=false;
-		for (const auto& K:R.AffectedChunks) if (Held(K)) { Relevant=true; break; }
+		for (const auto& K:Done.AffectedChunks) if (Held(K)) { Relevant=true; break; }
 		if (Relevant)
 		{
-			Stream->ClientApplyOp(Bytes,Revisions);
+			Stream->ClientApplyOp(Bytes,Done.Revisions);
 			// Only for chunks the client holds in sync. Recording a revision for a chunk it merely
 			// has in the footprint would later let a resubscription skip a snapshot it needs.
-			for (const auto& V:Revisions)
+			for (const auto& V:Done.Revisions)
 			{
 				const FTerrainChunkKey K(V.Key.X,V.Key.Y,V.Key.Z);
 				if (Stream->Subscribed.Contains(K) || Stream->Syncing.Contains(K)) Stream->DeliveredRevisions.Add(K,V.After);
 			}
 		}
 	}
-	return true;
 }
 bool UTerrainService::ApplyReplicatedOp(const TArray<uint8>& Bytes,const TArray<FTerrainChunkRevision>& Revisions,
 	TArray<FIntVector>& OutResync)

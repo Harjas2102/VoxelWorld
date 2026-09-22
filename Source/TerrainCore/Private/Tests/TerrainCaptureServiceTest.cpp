@@ -13,6 +13,7 @@
 #include "MemoryTerrainBackend.h"
 #include "ITerrainDensityField.h"
 #include "TerrainChunk.h"
+#include "TerrainStorage.h"
 #include "UObject/StrongObjectPtr.h"
 #include "Engine/World.h"
 #include "TerrainPersistenceFixtures.h"
@@ -31,6 +32,10 @@
  *       taken out of the dirty set.
  *   F3. The 32-record settlement window was checked once per pump call, so one call running many
  *       operations could pass it (measured at 34).
+ *
+ * And group commit (P-012), which changed the commit path underneath all three: one flush per
+ * pump call, nothing published before it, nothing published at all if it fails, and the window
+ * counting staged records. Plus the chunk-priced checkpoint trigger, which is a pure function.
  *
  * All of them run here through the real service entry points -- `MaybeCaptureCheckpoint`, the
  * queue's callbacks and `Pump`, `CommitOp` -- with a real settlement worker whose watermark only moves when the
@@ -172,7 +177,7 @@ bool FTerrainCaptureServiceTest::RunTest(const FString& Parameters)
 	 * the service is that world's own subsystem. The world never begins play: BeginPlay is what
 	 * creates the configured backend and opens a save on disk, and neither may happen here.
 	 */
-	auto MakeService = [&](FTerrainMemoryStorageDevice& Device, FFaultingReadBackend*& OutBackend,
+	auto MakeService = [&](ITerrainStorageDevice& Device, FFaultingReadBackend*& OutBackend,
 	                       TStrongObjectPtr<UWorld>& OutWorld) -> UTerrainService*
 	{
 		OutWorld.Reset(UWorld::CreateWorld(EWorldType::Game, /*bInformEngineOfWorld=*/false,
@@ -204,14 +209,14 @@ bool FTerrainCaptureServiceTest::RunTest(const FString& Parameters)
 		return Service;
 	};
 
-	/** One edit through the live order: Apply (pins, copy-before-write, backend), then Commit. */
+	/** One edit through the live order: Apply (pins, copy-before-write, backend), Commit (stage), Flush. */
 	auto Edit = [&](UTerrainService& Service, const FTerrainOp& Op) -> bool
 	{
 		const FTerrainQueueCallbacks Callbacks = Service.QueueCallbacks();
 		FTerrainEditResult Result;
 		FTerrainCommitIdentity Commit;
 		Commit.RequestId = uint32(Op.OpSeq);
-		if (!Callbacks.Apply(Op, Result) || !Callbacks.Commit(Op, Result, Commit))
+		if (!Callbacks.Apply(Op, Result) || !Callbacks.Commit(Op, Result, Commit) || !Callbacks.Flush())
 		{
 			AddError(FString::Printf(TEXT("Edit %llu did not commit"), Op.OpSeq));
 			return false;
@@ -353,6 +358,102 @@ bool FTerrainCaptureServiceTest::RunTest(const FString& Parameters)
 
 		Service->DestroyBackend();
 		World->DestroyWorld(/*bInformEngineOfWorld=*/false);
+	}
+
+	// ===== group commit (P-012): one flush per pump call, and nothing told before it =========
+	{
+		AddExpectedError(TEXT("Journal: append of OpSeq 13..18 failed"), EAutomationExpectedErrorFlags::Contains, 1, false);
+		AddExpectedError(TEXT("OpSeq 13..18 could not be recorded"), EAutomationExpectedErrorFlags::Contains, 1, false);
+		AddExpectedError(TEXT("Terrain commits OpSeq 13..18 could not be made durable"), EAutomationExpectedErrorFlags::Contains, 1, false);
+
+		FTerrainMemoryStorageDevice Memory;
+		FTerrainFaultDevice Device(Memory);
+		FFaultingReadBackend* Backend = nullptr;
+		TStrongObjectPtr<UWorld> World;
+		UTerrainService* Service = MakeService(Device, Backend, World);
+		if (!Service) { AddError(TEXT("Service setup failed")); return false; }
+		Service->Settlement = MakeUnique<FTerrainSettlementWorker>();
+		Service->Settlement->Start(MakeUnique<FInstantLedger>(), 0);
+		TGuardValue<bool> NoCapture(Settings->bCheckpointCapture, false);   // appends here are the journal's alone
+
+		struct FSeen { FTerrainEditReceipt Receipt; FTerrainOpSeq DurableHead; int32 Unsettled; };
+		TArray<FSeen> Seen;
+		FTerrainQueueCallbacks Cb = Service->QueueCallbacks();
+		Cb.Receipt = [&Seen, Service](uint32, const FTerrainEditReceipt& R)
+		{
+			Seen.Add({R, Service->WorldStore->GetJournal()->GetHead(), Service->Settlement->Pending()});
+		};
+
+		constexpr int32 Sources = 12;
+		for (int32 S = 0; S < Sources; ++S)
+		{
+			Service->EditQueue.RegisterSource(UTerrainService::StressBotBase + S, FTerrainSourceState());
+		}
+		auto QueueRound = [&](int64 RequestId)
+		{
+			int32 Queued = 0;
+			for (int32 S = 0; S < Sources; ++S)
+			{
+				FTerrainEditReceipt Receipt;
+				const FTerrainOp Op = ServiceDig(ChunkA + FIntVector((S % 4) * 3 - 4, (S / 4) * 3 - 4, -int32(RequestId) * 2), 2, 0);
+				Queued += Service->EditQueue.Submit(UTerrainService::StressBotBase + S, RequestId, Op, 0.0, Cb, Receipt) ? 1 : 0;
+			}
+			return Queued;
+		};
+
+		TestEqual(TEXT("Group commit: 12 edits queued"), QueueRound(1), Sources);
+		const int32 AppendsBefore = Device.OpCount(ETerrainStorageOp::Append);
+		Service->EditQueue.Pump(0.0, Cb, 256, 10.0);
+		TestEqual(TEXT("Group commit: one pump call commits all 12"), Service->WorldStore->GetJournal()->GetHead(), (FTerrainOpSeq)Sources);
+		TestEqual(TEXT("Group commit: with ONE journal append"), Device.OpCount(ETerrainStorageOp::Append) - AppendsBefore, 1);
+		TestEqual(TEXT("Group commit: every job got its receipt"), Seen.Num(), Sources);
+		bool bAllApplied = true, bAllDurableFirst = true;
+		for (const FSeen& Entry : Seen)
+		{
+			bAllApplied &= Entry.Receipt.bApplied;
+			bAllDurableFirst &= Entry.Receipt.OpSeq > 0 && FTerrainOpSeq(Entry.Receipt.OpSeq) <= Entry.DurableHead
+				&& Entry.Unsettled == Sources;   // the whole batch was durable AND handed to settlement
+		}
+		TestTrue(TEXT("Group commit: all applied"), bAllApplied);
+		TestTrue(TEXT("Group commit: and each receipt was sent only after its record was durable and submitted"), bAllDurableFirst);
+		TestEqual(TEXT("Group commit: settlement got the batch after the flush"), Service->Settlement->Pending(), Sources);
+
+		// Now the flush fails. The queue has already applied and staged six edits.
+		Seen.Reset();
+		TestEqual(TEXT("Group commit: 6 more queued"), QueueRound(2) >= 6, true);
+		Device.FailAfter(ETerrainStorageOp::Append, 0);
+		Service->EditQueue.Pump(0.0, Cb, 6, 10.0);
+		TestEqual(TEXT("Failed flush: nothing became durable"), Service->WorldStore->GetJournal()->GetHead(), (FTerrainOpSeq)Sources);
+		TestTrue(TEXT("Failed flush: storage is faulted and admission closed"), Service->bStorageFaulted);
+		TestEqual(TEXT("Failed flush: nothing was submitted for settlement"), Service->Settlement->Pending(), Sources);
+		TestEqual(TEXT("Failed flush: the queue's sequence rolled back to the durable head"),
+			Service->EditQueue.NextSequence(), (FTerrainOpSeq)Sources + 1);
+		bool bAllRefused = Seen.Num() == 6;
+		for (const FSeen& Entry : Seen)
+		{
+			bAllRefused &= !Entry.Receipt.bApplied && Entry.Receipt.Rejection == ETerrainEditRejection::ShuttingDown;
+		}
+		TestTrue(TEXT("Failed flush: all six receipts say not applied, shutting down"), bAllRefused);
+		TestEqual(TEXT("Failed flush: nothing is left staged"), Service->StagedPublishes.Num(), 0);
+
+		Service->DestroyBackend();
+		World->DestroyWorld(/*bInformEngineOfWorld=*/false);
+	}
+
+	// ===== the chunk-priced checkpoint trigger (P-012 §5) ====================================
+	{
+		// Dirty trigger 256, edit trigger 256, 8 edits per dirty chunk, replay cap 4096.
+		const auto Due = [](int32 Dirty, uint64 Ops, int32 PerChunk = 8)
+		{ return TerrainCheckpointDue(Dirty, Ops, 256, 256, PerChunk, 4096); };
+		TestTrue (TEXT("Trigger: the dirty bound always fires"),                    Due(256, 0));
+		TestTrue (TEXT("Trigger: the replay cap always fires"),                     Due(10, 4096));
+		TestTrue (TEXT("Trigger: a quiet world, 256 edits over 32 chunks, as before"), Due(32, 256));
+		TestFalse(TEXT("Trigger: 256 edits over 140 chunks is not worth the re-read"), Due(140, 256));
+		TestFalse(TEXT("Trigger: nor is 1,119"),                                    Due(140, 1119));
+		TestTrue (TEXT("Trigger: 1,120 is (8 per chunk)"),                          Due(140, 1120));
+		TestFalse(TEXT("Trigger: never below the edit minimum"),                    Due(0, 255));
+		TestTrue (TEXT("Trigger: an empty cut at the minimum"),                     Due(0, 256));
+		TestTrue (TEXT("Trigger: pricing off restores the plain edit count"),       Due(140, 256, 0));
 	}
 
 	// ===== F2: a copy-before-write failure is seen, and loses no dirty history ==============

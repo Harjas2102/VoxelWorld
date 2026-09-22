@@ -22,7 +22,7 @@ FTerrainOpSeq FTerrainWorldStoreJournal::GetDurableHead() const
 	return Journal != nullptr ? Journal->GetHead() : 0;
 }
 
-bool FTerrainWorldStoreJournal::RecordCommit(
+bool FTerrainWorldStoreJournal::StageCommit(
 	const FTerrainOp& Op,
 	const FTerrainEditResult& Result,
 	const FTerrainCommitIdentity& Identity,
@@ -108,19 +108,71 @@ bool FTerrainWorldStoreJournal::RecordCommit(
 		return TerrainIndexKeyFromChunk(A.Key) < TerrainIndexKeyFromChunk(B.Key);
 	});
 
-	const FTerrainStoreResult Result2 = Journal->AppendCommit(Record, &LastSettlement.Digest);
-	if (!Result2.IsOk())
+	// Staged, not written. The sequence is checked again, for the whole batch, by the writer.
+	if (Staged.Num() > 0 && Record.Op.OpSeq != Staged.Last().Op.OpSeq + 1)
 	{
-		LastError = Result2;
-		UE_LOG(LogTerrainCore, Error,
-			TEXT("Commit journal: OpSeq %llu could not be recorded (%s). The edit must not be ")
-			TEXT("broadcast, and this world's RAM now holds a change that is not durable."),
-			Op.OpSeq, *Result2.ToString());
+		LastError = FTerrainStoreResult::Bad(ETerrainPersistError::OrderViolation);
 		return false;
 	}
-	LastSettlement.OpSeq                = Op.OpSeq;
-	LastSettlement.EconomyKind          = Record.EconomyKind;
-	LastSettlement.EconomyPolicyVersion = Record.EconomyPolicyVersion;
-	LastSettlement.Deltas               = MoveTemp(Record.EconomyDeltas);
+	Staged.Add(MoveTemp(Record));
 	return true;
+}
+
+bool FTerrainWorldStoreJournal::FlushStaged()
+{
+	Flushed.Reset();
+	if (Staged.Num() == 0)
+	{
+		return true;
+	}
+	TArray<FTerrainJournalCommitRecord> Batch = MoveTemp(Staged);
+	Staged.Reset();
+
+	FTerrainJournalWriter* Journal = Store.GetJournal();
+	if (!Store.IsOpen() || Journal == nullptr)
+	{
+		LastError = FTerrainStoreResult::Io(ETerrainStorageResult::NotFound);
+		return false;
+	}
+
+	TArray<FTerrainDigest> Digests;
+	const FTerrainStoreResult Appended = Journal->AppendCommits(Batch, &Digests);
+	if (!Appended.IsOk())
+	{
+		LastError = Appended;
+		UE_LOG(LogTerrainCore, Error,
+			TEXT("Commit journal: OpSeq %llu..%llu could not be recorded (%s). None of them may be ")
+			TEXT("broadcast, and this world's RAM now holds changes that are not durable."),
+			Batch[0].Op.OpSeq, Batch.Last().Op.OpSeq, *Appended.ToString());
+		return false;
+	}
+
+	Flushed.Reserve(Batch.Num());
+	for (int32 Index = 0; Index < Batch.Num(); ++Index)
+	{
+		FTerrainJournalCommitRecord& Record = Batch[Index];
+		FTerrainSettlementInput& Input = Flushed.AddDefaulted_GetRef();
+		Input.OpSeq                = Record.Op.OpSeq;
+		Input.Digest               = Digests[Index];
+		Input.EconomyKind          = Record.EconomyKind;
+		Input.EconomyPolicyVersion = Record.EconomyPolicyVersion;
+		Input.Deltas               = MoveTemp(Record.EconomyDeltas);
+	}
+	return true;
+}
+
+bool FTerrainWorldStoreJournal::RecordCommit(
+	const FTerrainOp& Op,
+	const FTerrainEditResult& Result,
+	const FTerrainCommitIdentity& Identity,
+	TConstArrayView<FTerrainChunkRevision> ChangedRevisions)
+{
+	// One record, one flush. Anything already staged would be flushed with it, which would make
+	// this call publish records its caller never saw; that is a caller bug, so refuse it.
+	if (Staged.Num() != 0)
+	{
+		LastError = FTerrainStoreResult::Bad(ETerrainPersistError::OrderViolation);
+		return false;
+	}
+	return StageCommit(Op, Result, Identity, ChangedRevisions) && FlushStaged();
 }

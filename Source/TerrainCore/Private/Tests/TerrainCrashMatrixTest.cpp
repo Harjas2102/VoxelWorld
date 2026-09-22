@@ -46,9 +46,14 @@
  *   - recovery may **not** land between two operations or on terrain that never existed. The
  *     assertion is an exact chunk-hash comparison rather than "it opened".
  *
- * Three fault modes at every write: refused outright, torn to a 64-byte prefix, and written in
- * full with failure reported -- the last is the lost-acknowledgement case, and the only one in
- * which the uncertain record can survive.
+ * Four fault modes at every write: refused outright, torn to a 64-byte prefix, torn to 300 bytes,
+ * and written in full with failure reported -- the last is the lost-acknowledgement case, and the
+ * only one in which a whole uncertain append can survive.
+ *
+ * **Two sessions (P-012).** One records each edit with its own append; the other is group commit,
+ * three records per append. In the batched session a failed append puts all three in doubt, and
+ * a tear at 300 bytes lands inside the batch, after its first record: recovery must then keep
+ * that record and drop the rest, which is the torn multi-record append this matrix must cover.
  */
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FTerrainCrashMatrixTest, "TerrainCore.Persistence.CrashMatrix",
@@ -83,9 +88,15 @@ namespace
 		return Op;
 	}
 
-	/** The scripted session: nine edits with a checkpoint after the third and the seventh. */
+	/**
+	 * The scripted session: nine edits, with checkpoints after the third and the seventh. The
+	 * batched session (group commit, P-012) flushes three records per append, and cuts at batch
+	 * boundaries, after the third and the sixth.
+	 */
 	constexpr int32 CrashOpCount = 9;
 	constexpr int32 CrashCutAfter[2] = {3, 7};
+	constexpr int32 CrashCutAfterBatched[2] = {3, 6};
+	constexpr int32 CrashBatch = 3;
 
 	FTerrainOp CrashScript(int32 Index)
 	{
@@ -196,7 +207,7 @@ bool FTerrainCrashMatrixTest::RunTest(const FString& Parameters)
 	struct FSessionOutcome
 	{
 		int32 Acknowledged = 0;
-		bool  bUncertainAppend = false;   // the last RecordCommit failed; its record may be complete
+		int32 InDoubt = 0;   // records in the append that failed: any prefix of them may be on disk
 	};
 
 	/**
@@ -206,7 +217,8 @@ bool FTerrainCrashMatrixTest::RunTest(const FString& Parameters)
 	 * be made durable, because the service closes admission there rather than broadcasting an
 	 * edit nobody wrote down.
 	 */
-	auto RunSession = [&](FTerrainFaultDevice& Device, int32* OutCreationWrites = nullptr) -> FSessionOutcome
+	auto RunSession = [&](FTerrainFaultDevice& Device, int32 BatchSize, TConstArrayView<int32> Cuts,
+	                      int32* OutCreationWrites = nullptr) -> FSessionOutcome
 	{
 		FSessionOutcome Outcome;
 		FTerrainWorldStore Store(Device);
@@ -224,6 +236,8 @@ bool FTerrainCrashMatrixTest::RunTest(const FString& Parameters)
 
 		FTerrainRevisionIndex Revisions;
 		TMap<FTerrainChunkKey, FTerrainOpSeq> Dirty;
+		TArray<TPair<FTerrainChunkKey, FTerrainOpSeq>> StagedDirty;
+		int32 Staged = 0;
 
 		for (int32 Index = 0; Index < CrashOpCount; ++Index)
 		{
@@ -249,22 +263,43 @@ bool FTerrainCrashMatrixTest::RunTest(const FString& Parameters)
 			FTerrainCommitIdentity CommitIdentity;
 			CommitIdentity.RequestId  = uint32(Index + 1);
 			CommitIdentity.ChildCount = 1;
-			if (!Journal.RecordCommit(Op, Result, CommitIdentity, Changed))
+			if (BatchSize <= 1)
 			{
-				// Not acknowledged, and nothing after it runs. But "the append failed" is not
-				// "the record is absent": its bytes may all be on disk.
-				Outcome.bUncertainAppend = true;
-				break;
+				if (!Journal.RecordCommit(Op, Result, CommitIdentity, Changed))
+				{
+					// Not acknowledged, and nothing after it runs. But "the append failed" is not
+					// "the record is absent": its bytes may all be on disk.
+					Outcome.InDoubt = 1;
+					break;
+				}
+				for (const FTerrainChunkKey& Key : Result.AffectedChunks) { Dirty.Add(Key, Op.OpSeq); }
+				++Outcome.Acknowledged;
 			}
-			for (const FTerrainChunkKey& Key : Result.AffectedChunks) { Dirty.Add(Key, Op.OpSeq); }
-			++Outcome.Acknowledged;
-
-			for (const int32 Cut : CrashCutAfter)
+			else
 			{
-				if (Index + 1 != Cut) { continue; }
+				// Group commit: stage, and flush once per batch. Nothing staged is acknowledged
+				// until its batch's flush succeeds.
+				if (!Journal.StageCommit(Op, Result, CommitIdentity, Changed)) { break; }
+				for (const FTerrainChunkKey& Key : Result.AffectedChunks) { StagedDirty.Emplace(Key, Op.OpSeq); }
+				++Staged;
+				if (Staged < BatchSize && Index + 1 < CrashOpCount) { continue; }
+				if (!Journal.FlushStaged())
+				{
+					Outcome.InDoubt = Staged;   // the whole batch: any prefix of it may have landed
+					break;
+				}
+				for (const TPair<FTerrainChunkKey, FTerrainOpSeq>& Entry : StagedDirty) { Dirty.Add(Entry.Key, Entry.Value); }
+				StagedDirty.Reset();
+				Outcome.Acknowledged += Staged;
+				Staged = 0;
+			}
+
+			for (const int32 Cut : Cuts)
+			{
+				if (Outcome.Acknowledged != Cut || Index + 1 != Cut) { continue; }
 				FTerrainCheckpointStats Stats;
 				const FTerrainStoreResult Captured = TerrainCaptureCheckpoint(
-					Store, Backend, Revisions, Dirty, static_cast<FTerrainOpSeq>(Index + 1),
+					Store, Backend, Revisions, Dirty, static_cast<FTerrainOpSeq>(Cut),
 					1789412355555LL, Stats);
 				if (Captured.IsOk()) { Dirty.Reset(); }
 				// A failed capture is survivable and deliberately does NOT stop the session:
@@ -317,12 +352,12 @@ bool FTerrainCrashMatrixTest::RunTest(const FString& Parameters)
 			return FString::Printf(TEXT("recovered at OpSeq %lld but %d operations were acknowledged. ")
 				TEXT("Acknowledged history was lost."), Head, Session.Acknowledged);
 		}
-		const int64 Ceiling = Session.Acknowledged + (Session.bUncertainAppend ? 1 : 0);
+		const int64 Ceiling = Session.Acknowledged + Session.InDoubt;
 		if (Head > Ceiling)
 		{
-			return FString::Printf(TEXT("recovered at OpSeq %lld but only %d were acknowledged and %s. ")
-				TEXT("An edit came back that was never written down."), Head, Session.Acknowledged,
-				Session.bUncertainAppend ? TEXT("one more was in doubt") : TEXT("none was in doubt"));
+			return FString::Printf(TEXT("recovered at OpSeq %lld but only %d were acknowledged and %d more ")
+				TEXT("were in doubt. An edit came back that was never written down."), Head,
+				Session.Acknowledged, Session.InDoubt);
 		}
 		if (!Hashes.OrderIndependentCompareEqual(Reference[static_cast<int32>(Head)]))
 		{
@@ -332,33 +367,6 @@ bool FTerrainCrashMatrixTest::RunTest(const FString& Parameters)
 		return FString();
 	};
 
-	// --- the clean run, which also counts the writes the matrix will walk --------------------
-	int32 MutationCount = 0;
-	int32 CreationWrites = 0;   // writes consumed before the world exists at all
-	{
-		FTerrainMemoryStorageDevice Memory;
-		FTerrainFaultDevice Device(Memory);
-
-		const FSessionOutcome Clean = RunSession(Device, &CreationWrites);
-		TestEqual(TEXT("With no faults every operation commits"), Clean.Acknowledged, CrashOpCount);
-		TestFalse(TEXT("and none is in doubt"), Clean.bUncertainAppend);
-
-		MutationCount = Device.MutationCount();
-		// Nine edits, two checkpoints, and the world's own creation. The count is small because
-		// packs collapse a capture's payloads, index pages and descriptor into ONE write
-		// (P-004 §13) -- before packs this same session would have had well over a hundred
-		// crash points. Fewer points, each carrying far more.
-		TestTrue(TEXT("and the session performed enough writes to be worth walking"),
-			MutationCount >= CrashOpCount + 4);
-
-		TMap<FTerrainChunkKey, uint64> Hashes;
-		const int64 Head = Recover(Device, Hashes);
-		TestEqual(TEXT("A clean session recovers at the last operation"),
-			Head, (int64)CrashOpCount);
-		TestTrue(TEXT("and its terrain is the reference history's last state"),
-			Hashes.OrderIndependentCompareEqual(Reference[CrashOpCount]));
-	}
-
 	// --- the negative control: the oracle must reject lost acknowledged history ---------------
 	// A complete session whose journal then loses its last byte: the torn-tail rule drops record
 	// 9, leaving a valid, internally consistent world at OpSeq 8. The session was told 9. The old
@@ -366,7 +374,7 @@ bool FTerrainCrashMatrixTest::RunTest(const FString& Parameters)
 	{
 		FTerrainMemoryStorageDevice Memory;
 		FTerrainFaultDevice Device(Memory);
-		const FSessionOutcome Session = RunSession(Device);
+		const FSessionOutcome Session = RunSession(Device, 1, CrashCutAfter);
 		const FString Segment = TerrainStoragePaths::JournalSegment(1);
 		const int64 Size = Memory.Size(Segment);
 		TestTrue(TEXT("Negative control: the journal can be shortened"),
@@ -380,88 +388,129 @@ bool FTerrainCrashMatrixTest::RunTest(const FString& Parameters)
 		TestFalse(TEXT("The oracle rejects losing acknowledged history"), Judge(Head, Hashes, Session).IsEmpty());
 	}
 
-	AddInfo(FString::Printf(
-		TEXT("Crash matrix: %d mutating writes over %d edits and 2 checkpoints, walked three times ")
-		TEXT("(refused, torn, and written in full with failure reported). Packs keep the count low: ")
-		TEXT("one append per capture rather than one write per payload, page and descriptor."),
-		MutationCount, CrashOpCount));
-
-	// --- the matrix -------------------------------------------------------------------------
-	int32 Refusals = 0, Recovered = 0, LostTail = 0, UncertainKept = 0, UncertainDropped = 0;
-	for (int32 Mutation = 0; Mutation < MutationCount; ++Mutation)
+	int32 MutationCount = 0;    // of the unbatched session, for the repeat-recovery check below
+	for (const int32 BatchSize : {1, CrashBatch})
 	{
-		for (int32 Mode = 0; Mode < 3; ++Mode)
+		const TConstArrayView<int32> Cuts = BatchSize == 1
+			? TConstArrayView<int32>(CrashCutAfter) : TConstArrayView<int32>(CrashCutAfterBatched);
+		const TCHAR* Label = BatchSize == 1 ? TEXT("one record per append") : TEXT("group commit, 3 per append");
+
+		// --- the clean run, which also counts the writes the matrix will walk ----------------
+		int32 Mutations = 0;
+		int32 CreationWrites = 0;   // writes consumed before the world exists at all
 		{
 			FTerrainMemoryStorageDevice Memory;
 			FTerrainFaultDevice Device(Memory);
-			// Mode 0 refuses the write outright; mode 1 writes 64 bytes of it and then reports
-			// failure, which a "return IoError" fake would never produce; mode 2 writes ALL of it
-			// and then reports failure -- a lost acknowledgement, P-003 §2's uncertain record.
-			Device.FailAtMutation(Mutation, Mode == 0 ? -1 : (Mode == 1 ? 64 : MAX_int32));
 
-			const FSessionOutcome Session = RunSession(Device);
+			const FSessionOutcome Clean = RunSession(Device, BatchSize, Cuts, &CreationWrites);
+			TestEqual(FString::Printf(TEXT("%s: with no faults every operation commits"), Label), Clean.Acknowledged, CrashOpCount);
+			TestEqual(FString::Printf(TEXT("%s: and none is in doubt"), Label), Clean.InDoubt, 0);
+
+			Mutations = Device.MutationCount();
+			// Nine edits, two checkpoints, and the world's own creation. The count is small because
+			// packs collapse a capture's payloads, index pages and descriptor into ONE write
+			// (P-004 §13), and group commit collapses a batch's records into one append.
+			TestTrue(FString::Printf(TEXT("%s: the session performed enough writes to be worth walking"), Label),
+				Mutations >= CrashOpCount / BatchSize + 4);
 
 			TMap<FTerrainChunkKey, uint64> Hashes;
 			const int64 Head = Recover(Device, Hashes);
+			TestEqual(FString::Printf(TEXT("%s: a clean session recovers at the last operation"), Label),
+				Head, (int64)CrashOpCount);
+			TestTrue(FString::Printf(TEXT("%s: and its terrain is the reference history's last state"), Label),
+				Hashes.OrderIndependentCompareEqual(Reference[CrashOpCount]));
+		}
+		if (BatchSize == 1) { MutationCount = Mutations; }
 
-			if (Head < 0)
+		// --- the matrix ---------------------------------------------------------------------
+		constexpr int32 Modes = 4;
+		int32 Refusals = 0, Recovered = 0, LostTail = 0, UncertainKept = 0, UncertainDropped = 0, PartialBatch = 0;
+		for (int32 Mutation = 0; Mutation < Mutations; ++Mutation)
+		{
+			for (int32 Mode = 0; Mode < Modes; ++Mode)
 			{
-				// A refusal is valid only while the world does not yet exist. Crashing partway
-				// through creation leaves no world to open, which costs nothing because there
-				// was nothing there. **Once creation has completed, no single crash may make
-				// the world unopenable** -- that is the whole promise of the two-slot root, the
-				// torn-tail rule and unreferenced-garbage containment, and if it fails here the
-				// protocol is wrong rather than the test.
-				if (Mutation >= CreationWrites)
+				FTerrainMemoryStorageDevice Memory;
+				FTerrainFaultDevice Device(Memory);
+				// Mode 0 refuses the write outright; modes 1 and 2 write 64 or 300 bytes of it and
+				// then report failure, which a "return IoError" fake would never produce (300 lands
+				// inside a batch, after its first record); mode 3 writes ALL of it and then reports
+				// failure -- a lost acknowledgement, P-003 §2's uncertain record.
+				static constexpr int32 Tear[Modes] = {-1, 64, 300, MAX_int32};
+				Device.FailAtMutation(Mutation, Tear[Mode]);
+
+				const FSessionOutcome Session = RunSession(Device, BatchSize, Cuts);
+
+				TMap<FTerrainChunkKey, uint64> Hashes;
+				const int64 Head = Recover(Device, Hashes);
+
+				if (Head < 0)
 				{
-					AddError(FString::Printf(
-						TEXT("Mutation %d mode %d: the world refused to open after a crash at ")
-						TEXT("write %d, which is past creation (%d writes). An established world ")
-						TEXT("must survive any single crash."),
-						Mutation, Mode, Mutation, CreationWrites));
+					// A refusal is valid only while the world does not yet exist. Crashing partway
+					// through creation leaves no world to open, which costs nothing because there
+					// was nothing there. **Once creation has completed, no single crash may make
+					// the world unopenable** -- that is the whole promise of the two-slot root, the
+					// torn-tail rule and unreferenced-garbage containment, and if it fails here the
+					// protocol is wrong rather than the test.
+					if (Mutation >= CreationWrites)
+					{
+						AddError(FString::Printf(
+							TEXT("%s, mutation %d mode %d: the world refused to open after a crash at ")
+							TEXT("write %d, which is past creation (%d writes). An established world ")
+							TEXT("must survive any single crash."),
+							Label, Mutation, Mode, Mutation, CreationWrites));
+						return false;
+					}
+					++Refusals;
+					continue;
+				}
+
+				const FString Wrong = Judge(Head, Hashes, Session);
+				if (!Wrong.IsEmpty())
+				{
+					AddError(FString::Printf(TEXT("%s, mutation %d mode %d: %s"), Label, Mutation, Mode, *Wrong));
 					return false;
 				}
-				++Refusals;
-				continue;
-			}
 
-			const FString Wrong = Judge(Head, Hashes, Session);
-			if (!Wrong.IsEmpty())
-			{
-				AddError(FString::Printf(TEXT("Mutation %d mode %d: %s"), Mutation, Mode, *Wrong));
-				return false;
-			}
-
-			++Recovered;
-			if (Head < CrashOpCount) { ++LostTail; }
-			if (Session.bUncertainAppend)
-			{
-				++(Head > Session.Acknowledged ? UncertainKept : UncertainDropped);
+				++Recovered;
+				if (Head < CrashOpCount) { ++LostTail; }
+				if (Session.InDoubt > 0)
+				{
+					++(Head > Session.Acknowledged ? UncertainKept : UncertainDropped);
+					if (Head > Session.Acknowledged && Head < Session.Acknowledged + Session.InDoubt) { ++PartialBatch; }
+				}
 			}
 		}
+
+		AddInfo(FString::Printf(
+			TEXT("Crash matrix, %s: %d mutating writes over %d edits and 2 checkpoints, 4 fault modes. ")
+			TEXT("%d of %d injections recovered to an exact point in real history, never below the ")
+			TEXT("acknowledged head (%d short of the full session). Of the failed appends, %d came back ")
+			TEXT("wholly or partly (%d as a strict prefix of their batch) and %d did not. The other %d ")
+			TEXT("refused to open, and ALL of those were crashes during world creation (the first %d ")
+			TEXT("writes), when no world existed yet."),
+			Label, Mutations, CrashOpCount, Recovered, Recovered + Refusals, LostTail, UncertainKept,
+			PartialBatch, UncertainDropped, Refusals, CreationWrites));
+
+		// The matrix proves nothing if every injection happened to be survivable in the same way.
+		TestTrue(FString::Printf(TEXT("%s: some crashes were recovered from"), Label), Recovered > 0);
+		TestTrue(FString::Printf(TEXT("%s: and some cost the unacknowledged tail -- otherwise no write was load-bearing"), Label), LostTail > 0);
+		TestTrue(FString::Printf(TEXT("%s: a fully written, failed append DID come back -- the lost-acknowledgement case ran"), Label), UncertainKept > 0);
+		TestTrue(FString::Printf(TEXT("%s: and a torn or refused one did not"), Label), UncertainDropped > 0);
+		if (BatchSize > 1)
+		{
+			TestTrue(TEXT("Group commit: a torn batch recovered as a strict prefix of itself -- the torn multi-record case ran"),
+				PartialBatch > 0);
+		}
+		TestTrue(FString::Printf(TEXT("%s: every refusal happened during world creation, none after it"), Label),
+			Refusals <= CreationWrites * Modes);
 	}
-
-	AddInfo(FString::Printf(
-		TEXT("Crash matrix: %d of %d injections recovered to an exact point in real history, never ")
-		TEXT("below the acknowledged head (%d short of the full session). Of the failed appends, %d ")
-		TEXT("came back complete and %d did not. The other %d refused to open, and ALL of those were ")
-		TEXT("crashes during world creation (the first %d writes), when no world existed yet."),
-		Recovered, Recovered + Refusals, LostTail, UncertainKept, UncertainDropped, Refusals, CreationWrites));
-
-	// The matrix proves nothing if every injection happened to be survivable in the same way.
-	TestTrue(TEXT("Some crashes were recovered from"), Recovered > 0);
-	TestTrue(TEXT("and some cost the unacknowledged tail -- otherwise no write was load-bearing"), LostTail > 0);
-	TestTrue(TEXT("A fully written, failed append DID come back -- the lost-acknowledgement case ran"), UncertainKept > 0);
-	TestTrue(TEXT("and a torn or refused one did not"), UncertainDropped > 0);
-	TestTrue(TEXT("Every refusal happened during world creation, none after it"),
-		Refusals <= CreationWrites * 3);
 
 	// --- repeat recovery: opening twice must not change the answer (P-003 §8) ----------------
 	{
 		FTerrainMemoryStorageDevice Memory;
 		FTerrainFaultDevice Device(Memory);
 		Device.FailAtMutation(MutationCount / 2);
-		RunSession(Device);
+		RunSession(Device, 1, CrashCutAfter);
 
 		TMap<FTerrainChunkKey, uint64> First, Second;
 		const int64 HeadA = Recover(Device, First);

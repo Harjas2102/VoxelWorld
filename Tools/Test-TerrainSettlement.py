@@ -39,7 +39,8 @@ def main():
     def command(world, log, seconds, extra=()):
         return [str(exe), str(project / 'VoxelWorld.uproject'), '/Game/ThirdPerson/Lvl_ThirdPerson',
                 '-game', '-nullrhi', '-unattended', '-nosplash', '-nosound', f'-seconds={seconds}',
-                f'-abslog={log}', ini + f'WorldStoreName={world}', ini + 'CheckpointOpTrigger=48', *extra]
+                f'-abslog={log}', ini + f'WorldStoreName={world}', ini + 'CheckpointOpTrigger=48',
+                ini + 'CheckpointOpsPerDirtyChunk=0', *extra]   # cuts every 48 edits, as the refusal cases expect (P-012)
 
     def read(log):
         return log.read_text(encoding='utf-8', errors='replace') if log.exists() else ''

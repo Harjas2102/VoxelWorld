@@ -355,6 +355,27 @@ FTerrainStoreResult FTerrainJournalWriter::Open()
 
 FTerrainStoreResult FTerrainJournalWriter::AppendCommit(const FTerrainJournalCommitRecord& Record, FTerrainDigest* OutDigest)
 {
+	// One record is a batch of one: a single code path, so the two cannot drift apart.
+	TArray<FTerrainDigest> Digests;
+	const FTerrainStoreResult Result = AppendCommits(MakeArrayView(&Record, 1), OutDigest ? &Digests : nullptr);
+	if (Result.IsOk() && OutDigest != nullptr)
+	{
+		*OutDigest = Digests[0];
+	}
+	return Result;
+}
+
+FTerrainStoreResult FTerrainJournalWriter::AppendCommits(
+	TConstArrayView<FTerrainJournalCommitRecord> Records, TArray<FTerrainDigest>* OutDigests)
+{
+	if (OutDigests != nullptr)
+	{
+		OutDigests->Reset();
+	}
+	if (Records.Num() == 0)
+	{
+		return FTerrainStoreResult::Ok();
+	}
 	if (!bOpen)
 	{
 		return FTerrainStoreResult::Io(ETerrainStorageResult::NotFound);
@@ -369,45 +390,65 @@ FTerrainStoreResult FTerrainJournalWriter::AppendCommit(const FTerrainJournalCom
 	{
 		return FTerrainStoreResult::Bad(ETerrainPersistError::OrderViolation);
 	}
-	if (Record.WorldTag != WorldTag)
+	// Validate and encode EVERYTHING before writing anything: a bad record refuses the batch
+	// with the journal untouched, instead of leaving a good prefix and a blocked writer.
+	TArray<uint8> Batch;
+	TArray<TPair<int32, int32>> Frames;   // offset and length of each record in Batch
+	Frames.Reserve(Records.Num());
+	FTerrainOpSeq Expected = GetNextOpSeq();
+	for (const FTerrainJournalCommitRecord& Record : Records)
 	{
-		return FTerrainStoreResult::Bad(ETerrainPersistError::WorldMismatch);
-	}
-	if (Record.Op.OpSeq != GetNextOpSeq())
-	{
-		// Checked here rather than trusted from above: a journal whose sequence can skip is a
-		// journal whose replay can silently omit an edit.
-		return FTerrainStoreResult::Bad(ETerrainPersistError::OrderViolation);
+		if (Record.WorldTag != WorldTag)
+		{
+			return FTerrainStoreResult::Bad(ETerrainPersistError::WorldMismatch);
+		}
+		if (Record.Op.OpSeq != Expected)
+		{
+			// Checked here rather than trusted from above: a journal whose sequence can skip is a
+			// journal whose replay can silently omit an edit.
+			return FTerrainStoreResult::Bad(ETerrainPersistError::OrderViolation);
+		}
+		++Expected;
+
+		TArray<uint8> Frame;
+		const ETerrainPersistError EncodeError = TerrainPersistEncodeCommitRecord(Record, Frame);
+		if (EncodeError != ETerrainPersistError::None)
+		{
+			return FTerrainStoreResult::Bad(EncodeError);
+		}
+		Frames.Emplace(Batch.Num(), Frame.Num());
+		Batch.Append(Frame);
 	}
 
-	TArray<uint8> Frame;
-	const ETerrainPersistError EncodeError = TerrainPersistEncodeCommitRecord(Record, Frame);
-	if (EncodeError != ETerrainPersistError::None)
-	{
-		return FTerrainStoreResult::Bad(EncodeError);
-	}
-
-	const ETerrainStorageResult Result = Device.Append(ActiveSegmentPath, Frame);
+	// ONE append, ONE flush, for the whole batch (P-012 §2).
+	const ETerrainStorageResult Result = Device.Append(ActiveSegmentPath, Batch);
 	if (Result != ETerrainStorageResult::Ok)
 	{
-		// After the mutation was attempted, the journal's physical state is unknown: the write
-		// may have landed whole, partly, or not at all. P-003 §2 calls that an uncertain
-		// storage fault and requires closing admission rather than carrying on.
+		// After the mutation was attempted, the journal's physical state is unknown: any prefix
+		// of the batch may have landed. P-003 §2 calls that an uncertain storage fault and
+		// requires closing admission rather than carrying on.
 		State.bBlocked = true;
+		const FString Span = Records.Num() == 1
+			? FString::Printf(TEXT("%llu"), Records[0].Op.OpSeq)
+			: FString::Printf(TEXT("%llu..%llu"), Records[0].Op.OpSeq, Records.Last().Op.OpSeq);
 		UE_LOG(LogTerrainCore, Error,
-			TEXT("Journal: append of OpSeq %llu failed (%s). The segment's tail is now uncertain ")
+			TEXT("Journal: append of OpSeq %s failed (%s). The segment's tail is now uncertain ")
 			TEXT("and this writer is closed until the world is reopened."),
-			Record.Op.OpSeq, TerrainStorageResultName(Result));
+			*Span, TerrainStorageResultName(Result));
 		return FTerrainStoreResult::Io(Result);
 	}
 
-	RecordsHash.Update(Frame.GetData(), static_cast<uint64>(Frame.Num()));
-	if (OutDigest != nullptr)
+	for (const TPair<int32, int32>& Frame : Frames)
 	{
-		TerrainPersistComputeRecordDigest(Frame, *OutDigest);
+		const TArrayView<const uint8> Bytes(Batch.GetData() + Frame.Key, Frame.Value);
+		RecordsHash.Update(Bytes.GetData(), static_cast<uint64>(Bytes.Num()));
+		if (OutDigests != nullptr)
+		{
+			TerrainPersistComputeRecordDigest(Bytes, OutDigests->AddDefaulted_GetRef());
+		}
 	}
-	State.LastOpSeq = Record.Op.OpSeq;
-	++State.CommitRecordCount;
+	State.LastOpSeq = Records.Last().Op.OpSeq;
+	State.CommitRecordCount += Records.Num();
 	return FTerrainStoreResult::Ok();
 }
 

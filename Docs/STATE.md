@@ -5,12 +5,51 @@
 
 ---
 
-**Checkpoint:** CP-022 · **Date:** 2026-09-21
+**Checkpoint:** CP-023 · **Date:** 2026-09-22
 **Phase:** 1 — Terrain Feasibility
 **Expected next agent:** either (D-028)
-**Current task:** T-133 — journal group commit, plus a checkpoint trigger priced in chunks, so the
-server sustains the 96 edits/s design point (R-018). Gate it on `Tools/Test-TerrainStress.ps1`,
-which now requires the ledger audit and the settlement window.
+**Current task:** T-134 — the 1F Gate-Observe pass: collision edge cases, foliage and PCG over
+removed terrain, nav dirtying, undermined terrain, and streaming of modified chunks. These are
+documented, not solved, and lead to the backend decision (BACKLOG Phase 1 exit).
+
+## What happened at CP-023
+
+**One increment, T-133 (D-050, P-012): the server now sustains the design load.** Gate 8's
+performance half **passes on this machine**, and correctness is unchanged.
+
+| Three full stress runs | Before (CP-022) | After |
+|---|---|---|
+| Sustained edits/s (median) | 67–78 | **99, 99, 99** (design point 96) |
+| Refused as queue-full | 1,600–2,700 per run | **0** |
+| Longest queue wait | 7–10 s | **0.27 s** |
+| Server frame (p95 of per-second maxima) | 72–97 ms | **34–38 ms** |
+| Checkpoints per run | 28–31 | 4–5 |
+| Correctness | PASS | PASS: 262 chunks identical on the joiner; ledger exact over 8,053–8,184 edits |
+
+**What changed:**
+- **Journal group commit.** A pump call's edits are staged, written with one append and one flush,
+  and only then broadcast, settled and receipted. A failed flush publishes nothing and closes
+  admission. The save format is unchanged.
+- **A checkpoint trigger priced in chunks.** One chunk re-read costs about 8 edits of boot replay
+  (measured 2.8 ms against 0.34 ms). A cut now waits until the replay it saves is worth it, with a
+  hard cap of 4,096 edits of replay.
+- **Attribution:** group commit alone reached 99/s, with frames still at p95 70–84 ms. The trigger
+  brought frames down. Both are needed.
+
+**Evidence:**
+- 43/43 automation.
+- The crash matrix covers a batched session and a tear inside a batch, which recovers as a strict
+  prefix.
+- Mutations M8 to M11 each fail a test.
+- The settlement kill test, checkpoint, lease and retention harnesses pass, as do MP (3 rounds, and
+  `-DropOp`). Both targets build.
+
+**Still open:** a worst frame of 88–96 ms a few times per run, at checkpoint or retention moments.
+Restoring 265 chunks at boot took 2.4 s, uninvestigated. All figures are from this machine only;
+Linux is unbuilt (R-007).
+
+**Drift checks: NO FLAG MOVED.** No `Build.cs` changed; D-011 and D-025 are unchanged.
+**Player-facing:** 32 players digging flat out no longer see refused digs or multi-second lag.
 
 ## What happened at CP-022
 

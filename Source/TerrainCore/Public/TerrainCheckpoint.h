@@ -78,6 +78,23 @@ private:
  */
 inline constexpr int32 TerrainCheckpointDirtyHardBound = 4096;
 
+/**
+ * Whether a checkpoint is due (P-012 §5). Any of three reasons:
+ *   - the dirty set has reached `DirtyTrigger`, which bounds the capture's own size;
+ *   - the replay tail has reached `MaxReplayOps`, which bounds boot time;
+ *   - at least `OpTrigger` edits AND at least `OpsPerDirtyChunk` edits per dirty chunk have landed
+ *     since the last cut: the replay it saves is worth the chunks it must re-read.
+ * Pure, so it can be tested without a world.
+ */
+inline bool TerrainCheckpointDue(int32 DirtyChunks, uint64 OpsSinceCut, int32 DirtyTrigger,
+	int32 OpTrigger, int32 OpsPerDirtyChunk, int32 MaxReplayOps)
+{
+	if (DirtyChunks >= FMath::Max(1, DirtyTrigger)) return true;
+	if (OpsSinceCut >= uint64(FMath::Max(1, MaxReplayOps))) return true;
+	return OpsSinceCut >= uint64(FMath::Max(1, OpTrigger))
+		&& OpsSinceCut >= uint64(FMath::Max(0, OpsPerDirtyChunk)) * uint64(FMath::Max(0, DirtyChunks));
+}
+
 struct FTerrainCheckpointStats
 {
 	FTerrainOpSeq G = 0;

@@ -1,7 +1,7 @@
 # HANDOFF
 
-**Checkpoint:** CP-022 · **Date:** 2026-09-21 · **Branch:** `main`
-**Agents:** Claude (Opus 5) wrote T-128 to T-132.2. Codex independently reviewed CP-016 to CP-020
+**Checkpoint:** CP-023 · **Date:** 2026-09-22 · **Branch:** `main`
+**Agents:** Claude (Opus 5) wrote T-128 to T-133. Codex independently reviewed CP-016 to CP-020
 (`Docs/reviews/2026-09-21-checkpoints-review-codex.md`). Claude corrected F1 to F5 (T-132.1 D-048,
 T-132.2 D-049) and self-reviewed the fixes; the fixes themselves have not had a cross-vendor read.
 **Expected next agent:** either (D-028).
@@ -10,8 +10,9 @@ T-132.2 D-049) and self-reviewed the fixes; the fixes themselves have not had a 
 
 ## Where the project is
 
-**Phase 1's gate items 1B through 1E are done (E-6 measured at CP-020). 1F's stress profile is
-done; throughput at the design point (R-018, T-133) and 1F's observations remain.** Since CP-018:
+**Phase 1's gate items 1B through 1E are done. Gate 8 passes on this machine since CP-023 (T-133:
+99 edits/s, frames p95 34–38 ms). What remains of 1F is the Gate-Observe pass (T-134), and then
+the backend decision.** Since CP-018:
 - **T-128, P-007:** one writer per world, enforced by an OS lock.
 - **T-129, P-008:** players who join or rejoin see the saved, edited world; DEF-3 resolved.
 - **T-130, P-009:** the ground knows its material exactly, and each edit measures what it moved.
@@ -55,8 +56,9 @@ report, rulings and self-review are in `Docs/proposals/P-011-stress-profile.md`,
 
 ## What is NOT done, stated plainly
 
-- **Throughput at the design point (T-133, next):** 96 edits/s is not sustained on this machine
-  (71–78/s). The fix is journal group commit plus a checkpoint trigger priced in chunks (P-011 §4).
+- **Worst frames** of 88–96 ms still occur a few times per stress run, at checkpoint or retention
+  moments. Boot restore of 265 chunks took 2.4 s, uninvestigated. All gate-8 numbers are from this
+  machine.
 - **Player identity** (R-017): owners come from the Null online subsystem, which is per machine at
   best. A real login is a Director decision in Phase 4.
 - **No inventory UI, no spending or crafting.** Placement is free and places Fill.
@@ -170,15 +172,41 @@ report, rulings and self-review are in `Docs/proposals/P-011-stress-profile.md`,
 - **Also still open:** the review's reporting notes (percentiles are of per-second maxima; stale
   capture comments in ARCHITECTURE and settings). F6 stays with R-007.
 
+### T-133: group commit and the chunk-priced trigger (Claude, recorded at CP-023, D-050)
+
+- **Spec:** `Docs/proposals/P-012-group-commit.md`. R3, under the standing instruction; writer and
+  self-reviewer are the same agent. Base `cd1e462`.
+- **Built:**
+  - `FTerrainJournalWriter::AppendCommits`: one device append for a batch.
+  - `ITerrainCommitJournal::StageCommit`, `FlushStaged` and `DiscardStaged`; `RecordCommit` is
+    now stage one, then flush.
+  - `FTerrainQueueCallbacks::Flush`: the queue holds receipts until the one flush, refuses them
+    and rolls its sequence back if the flush fails.
+  - Service: `CommitOp` stages; `FlushCommits` and `PublishCommit` do the settlement submits and
+    broadcasts after the flush; the window counts staged records.
+  - `TerrainCheckpointDue`, with the new settings `CheckpointOpsPerDirtyChunk` (8) and
+    `CheckpointMaxReplayOps` (4096).
+  - The checkpoint, MP and settlement harnesses pin `CheckpointOpsPerDirtyChunk=0`, so they keep
+    their frequent cuts.
+- **Tests:**
+  - Crash matrix: an unbatched and a batched session (three records per append), four fault
+    modes each; 3 torn batches recovered as a strict prefix.
+  - `Capture.Service`: one append per pump, receipts only after durable and submitted, a failed
+    flush publishes nothing, the trigger cases.
+  - Mutations M8 to M11 (per-edit flush, early receipts, window without staged records, publish
+    on failure) each fail a test.
+- **Result, P-012 §8:** three full stress runs PASS at **99 edits/s median, 0 refusals**, frames
+  p95 34–38 ms (before: 67–78/s, 1,600–2,700 refusals, 72–97 ms). Attribution: group commit
+  bought the throughput and the trigger bought the frame time.
+- **Regression:** 43/43; settlement, checkpoint, lease, retention and MP (3 rounds, and `-DropOp`)
+  all PASS; both targets build.
+- **Still open:** worst frames of 88–96 ms a few times per run, at checkpoint or retention moments.
+  Restoring 265 chunks at boot took 2.4 s, which was not investigated.
+
 ### Next safe actions, in order
 
-1. **T-133: journal group commit** (below). Measure it with several stress runs (the spread is
-   about ±5/s), then run the full default stress run.
+1. **T-134: the Gate-Observe pass** (BACKLOG 1F). It is mostly measurement and documentation.
+   Anything that needs eyes in the editor goes to the Director as a short, exact check. Then the
+   backend decision.
 2. **F6** with the first Linux build (R-007).
-3. When Codex is next available: a short re-read of T-132.1 and T-132.2.
-
-**T-133: journal group commit and checkpoint trigger policy** (P-011 §4). Batch every commit in
-one pump call behind a single flush, and broadcast and settle only after that flush. It needs a
-short spec, and the crash matrix must cover a torn multi-record append. Gate it on
-`Tools\Test-TerrainStress.ps1`: 96 edits/s sustained with server frames near 33 ms. After that,
-1F's observations and the backend decision.
+3. When Codex is next available: a short re-read of T-132.1, T-132.2 and T-133 (P-012).

@@ -100,6 +100,15 @@ void FTerrainEditQueue::Pump(double Now, const FTerrainQueueCallbacks& Cb, int32
 	if (bPumping) return;
 	TGuardValue<bool> Guard(bPumping,true);
 	const double Start = FPlatformTime::Seconds();
+
+	// Group commit (P-012): with a Flush callback, Commit only stages, and nothing a client can
+	// see -- a receipt -- leaves this function before the one flush below has succeeded.
+	const bool bGroup = static_cast<bool>(Cb.Flush);
+	struct FHeld { uint32 Id; FTerrainEditReceipt Receipt; bool bStaged; };
+	TArray<FHeld> Held;
+	const FTerrainOpSeq FirstStaged = NextOpSeq;
+	int32 StagedCount = 0;
+
 	for (int32 Done = 0; Done < MaxOps && PendingCount > 0; ++Done)
 	{
 		if (Done && FPlatformTime::Seconds()-Start >= BudgetSeconds) break;
@@ -149,6 +158,7 @@ void FTerrainEditQueue::Pump(double Now, const FTerrainQueueCallbacks& Cb, int32
 		if (Valid)
 		{
 			++NextOpSeq;
+			if (bGroup) { ++StagedCount; ++Job.StagedThisPump; }
 			Job.Receipt.bApplied = true; Job.Receipt.OpSeq = int64(Op.OpSeq);
 			Job.Receipt.VoxelsTouched += Result.VoxelsTouched; Job.Receipt.ChunksAffected += Result.AffectedChunks.Num();
 			for (const FTerrainMaterialVolume& Volume : Result.Removed)
@@ -169,10 +179,39 @@ void FTerrainEditQueue::Pump(double Now, const FTerrainQueueCallbacks& Cb, int32
 			S.ReservedCharge -= Uncommitted*Job.ChargePerPart;
 			if (!Job.Receipt.bApplied) S.Tokens = FMath::Min(Burst,S.Tokens+1.);
 			FTerrainEditReceipt R = Job.Receipt; R.Rejection = Rejection;
+			const bool bStaged = Job.StagedThisPump > 0;
 			S.Jobs.RemoveAt(0,1,EAllowShrinking::No); ActiveSource=0;
-			Resolve(Id,S,R,Cb);
+			if (bGroup) Held.Add({Id, R, bStaged});
+			else Resolve(Id,S,R,Cb);
 		}
 		else ActiveSource = Id;
+	}
+
+	if (bGroup)
+	{
+		// ONE flush for everything this call staged, and only then may anything be told.
+		const bool bDurable = StagedCount == 0 || Cb.Flush();
+		if (!bDurable)
+		{
+			// None of it is durable, so none of it happened as far as anyone outside is concerned.
+			// The world is faulted by the caller and will be recovered from disk.
+			NextOpSeq = FirstStaged;
+			if (ActiveSource != 0)
+			{
+				FTransaction& Pinned = Sources[ActiveSource]->Jobs[0];
+				if (Pinned.StagedThisPump > 0) { Pinned.Receipt.bApplied = false; Pinned.Receipt.OpSeq = 0; }
+			}
+		}
+		if (ActiveSource != 0) Sources[ActiveSource]->Jobs[0].StagedThisPump = 0;
+		for (FHeld& H : Held)
+		{
+			if (!bDurable && H.bStaged)
+			{
+				H.Receipt.bApplied = false; H.Receipt.OpSeq = 0;
+				H.Receipt.Rejection = ETerrainEditRejection::ShuttingDown;
+			}
+			if (TUniquePtr<FSource>* Source = Sources.Find(H.Id)) Resolve(H.Id,**Source,H.Receipt,Cb);
+		}
 	}
 	// Retain a disconnected source only until its queued requests resolve as rejected.
 	for (int32 N=RoundRobin.Num()-1; N>=0; --N)

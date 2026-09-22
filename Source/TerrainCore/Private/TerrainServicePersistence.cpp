@@ -346,6 +346,7 @@ void UTerrainService::CloseWorldStore()
 	WorldStore.Reset();
 	StorageDevice.Reset();
 	DirtyChunks.Reset();
+	StagedPublishes.Reset();
 	LivePersistencePins.Reset();
 	bCheckpointDisabled = false;
 }
@@ -510,10 +511,12 @@ void UTerrainService::MaybeCaptureCheckpoint()
 		return;
 	}
 
-	const int32 Trigger = FMath::Clamp(Settings->CheckpointDirtyChunkTrigger, 1, TerrainCheckpointDirtyHardBound);
-	if (DirtyChunks.Num() < Trigger
-		&& WorldStore->GetJournal()->GetHead() - WorldStore->GetState().Checkpoint.G
-			< static_cast<uint64>(FMath::Max(1, Settings->CheckpointOpTrigger)))
+	// Priced in chunks (P-012 §5): a cut re-reads every dirty chunk, so it waits until the replay
+	// it saves is worth that, within hard bounds on the capture's size and on boot's replay.
+	if (!TerrainCheckpointDue(DirtyChunks.Num(),
+			WorldStore->GetJournal()->GetHead() - WorldStore->GetState().Checkpoint.G,
+			FMath::Clamp(Settings->CheckpointDirtyChunkTrigger, 1, TerrainCheckpointDirtyHardBound),
+			Settings->CheckpointOpTrigger, Settings->CheckpointOpsPerDirtyChunk, Settings->CheckpointMaxReplayOps))
 	{
 		return;
 	}

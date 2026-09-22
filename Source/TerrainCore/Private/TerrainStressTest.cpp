@@ -42,11 +42,12 @@ void UTerrainService::LogStressSummary(const TCHAR* Label)
 	FString Reject;
 	for (const auto& R : Stress.Rejections) Reject += FString::Printf(TEXT(" %d:%d"), R.Key, R.Value);
 	UE_LOG(LogTerrainCore, Display,
-		TEXT("Stress.Summary %s: ops=%llu in %.1f s (%.1f ops/s); commit(journal) max %.2f ms avg %.3f ms; apply max %.2f ms; ")
+		TEXT("Stress.Summary %s: ops=%llu in %.1f s (%.1f ops/s); journal flush max %.2f ms avg %.3f ms, %.2f records/flush; apply max %.2f ms; ")
 		TEXT("queue age max %.1f ms; service tick max %.1f ms; frame max %.1f ms; settle latency max %.1f ms avg %.1f ms; ")
 		TEXT("unsettled max %d, window-full ticks %d; memory %.0f MB; rejections[%s ]"),
 		Label, Committed, Elapsed, Elapsed > 0 ? Committed / Elapsed : 0.0,
 		CommitStats.Max * 1000.0, CommitStats.Count ? CommitStats.Sum / CommitStats.Count * 1000.0 : 0.0,
+		CommitStats.Count ? double(CommitStats.Records) / CommitStats.Count : 0.0,
 		EditQueue.MaxApplySeconds() * 1000.0, EditQueue.MaxQueueAgeSeconds() * 1000.0,
 		Stress.TickMaxMs, Stress.FrameMaxMs,
 		Settlement ? Settlement->MaxLatencySeconds * 1000.0 : 0.0,

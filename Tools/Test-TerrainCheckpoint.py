@@ -29,7 +29,8 @@ def main():
         if capture:
             command += [ini + 'bCheckpointCapture=True',
                         ini + f'CheckpointDirtyChunkTrigger={1 if index == 3 else 4096}',
-                        ini + 'CheckpointOpTrigger=2']
+                        ini + 'CheckpointOpTrigger=2',
+                        ini + 'CheckpointOpsPerDirtyChunk=0']   # the plain edit count, as this test was written for (P-012)
         result = subprocess.run(command, stdout=subprocess.DEVNULL, stderr=subprocess.STDOUT,
                                 timeout=180, creationflags=subprocess.CREATE_NO_WINDOW)
         text = log.read_text(encoding='utf-8', errors='replace')

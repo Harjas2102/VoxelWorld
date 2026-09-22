@@ -20,6 +20,7 @@ try {
     if ($CheckpointCapture) {
         $serverArgs+='-ini:Engine:[/Script/TerrainCore.TerrainSettings]:bCheckpointCapture=True'
         $serverArgs+='-ini:Engine:[/Script/TerrainCore.TerrainSettings]:CheckpointOpTrigger=16'
+        $serverArgs+='-ini:Engine:[/Script/TerrainCore.TerrainSettings]:CheckpointOpsPerDirtyChunk=0'   # frequent cuts on purpose (P-012)
     }
     if ($IncludeObserver) { $serverArgs+='-TerrainMPExpectObserver' }
     $server=Start-Process -FilePath $taskExe -ArgumentList $serverArgs -WindowStyle Hidden -PassThru

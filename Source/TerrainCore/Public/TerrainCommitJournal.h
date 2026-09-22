@@ -52,6 +52,29 @@ public:
 	                          const FTerrainCommitIdentity& Identity,
 	                          TConstArrayView<FTerrainChunkRevision> ChangedRevisions) = 0;
 
+	/**
+	 * Group commit (P-012): builds this operation's record in memory, with NO I/O. It becomes
+	 * durable only at the next FlushStaged, and must not be published before then. False means the
+	 * record could not be built; nothing was staged.
+	 */
+	virtual bool StageCommit(const FTerrainOp& Op,
+	                         const FTerrainEditResult& Result,
+	                         const FTerrainCommitIdentity& Identity,
+	                         TConstArrayView<FTerrainChunkRevision> ChangedRevisions) = 0;
+
+	/**
+	 * Writes every staged record with one append and one flush. True: all of them are durable.
+	 * False: none may be published; the journal's tail is uncertain (P-003 §2). Either way the
+	 * staged list is empty afterwards. Nothing staged is trivially true.
+	 */
+	virtual bool FlushStaged() = 0;
+
+	/** Records staged and not yet flushed. */
+	virtual int32 NumStaged() const = 0;
+
+	/** Drops every staged record unwritten: the world is faulted and they will never be published. */
+	virtual void DiscardStaged() = 0;
+
 	/** The highest sequence this journal has durably recorded. */
 	virtual FTerrainOpSeq GetDurableHead() const = 0;
 };
@@ -68,10 +91,19 @@ class TERRAINCORE_API FTerrainWorldStoreJournal final : public ITerrainCommitJou
 public:
 	explicit FTerrainWorldStoreJournal(FTerrainWorldStore& InStore);
 
+	/** StageCommit then FlushStaged: one record, one flush. The single-edit form, used by tools and tests. */
 	virtual bool RecordCommit(const FTerrainOp& Op,
 	                          const FTerrainEditResult& Result,
 	                          const FTerrainCommitIdentity& Identity,
 	                          TConstArrayView<FTerrainChunkRevision> ChangedRevisions) override;
+
+	virtual bool StageCommit(const FTerrainOp& Op,
+	                         const FTerrainEditResult& Result,
+	                         const FTerrainCommitIdentity& Identity,
+	                         TConstArrayView<FTerrainChunkRevision> ChangedRevisions) override;
+	virtual bool FlushStaged() override;
+	virtual int32 NumStaged() const override { return Staged.Num(); }
+	virtual void DiscardStaged() override { Staged.Reset(); }
 
 	virtual FTerrainOpSeq GetDurableHead() const override;
 
@@ -92,7 +124,16 @@ public:
 	 * The settlement input of the record the last successful RecordCommit wrote: its OpSeq, the
 	 * digest of the bytes actually appended, and the economy as recorded (P-010).
 	 */
-	FTerrainSettlementInput TakeLastSettlement() { return MoveTemp(LastSettlement); }
+	FTerrainSettlementInput TakeLastSettlement()
+	{
+		FTerrainSettlementInput Last;
+		if (Flushed.Num() > 0) { Last = MoveTemp(Flushed.Last()); }
+		Flushed.Reset();
+		return Last;
+	}
+
+	/** The settlement inputs of every record the last successful FlushStaged wrote, in OpSeq order. */
+	TArray<FTerrainSettlementInput> TakeSettlements() { return MoveTemp(Flushed); }
 
 	/** The reason the last RecordCommit failed, for a caller that wants to log it. */
 	const FTerrainStoreResult& GetLastError() const { return LastError; }
@@ -100,5 +141,6 @@ public:
 private:
 	FTerrainWorldStore& Store;
 	FTerrainStoreResult LastError;
-	FTerrainSettlementInput LastSettlement;
+	TArray<FTerrainJournalCommitRecord> Staged;
+	TArray<FTerrainSettlementInput> Flushed;
 };

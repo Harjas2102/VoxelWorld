@@ -160,15 +160,33 @@ private:
 	const FTerrainWorldStore* GetWorldStore() const { return WorldStore.Get(); }
 	ETerrainEditRejection QuantiseRequest(const FTerrainEditRequest& Request, FTerrainOp& Op) const;
 	/**
-	 * P-003 §2 steps 2 and 3: durably record the operation, THEN advance and broadcast.
+	 * P-003 §2 step 2, per batch (P-012): STAGES the operation's record and advances the
+	 * revision index and dirty set. Nothing is published here; FlushCommits does that after the
+	 * batch's one flush.
 	 *
-	 * Returns false when the record could not be made durable. The backend has already
-	 * mutated at that point, so the world holds a change that is neither durable nor
-	 * published; the service marks itself storage-faulted and stops admitting work, and
-	 * recovery is a restart from disk.
+	 * Returns false when the record could not be built. The backend has already mutated at that
+	 * point, so the service marks itself storage-faulted and stops admitting work, and recovery
+	 * is a restart from disk.
 	 */
 	bool CommitOp(const FTerrainOp& Op, const FTerrainEditResult& Result,
 	              const FTerrainCommitIdentity& Identity);
+
+	/** An operation staged by CommitOp, waiting for its batch's flush before it may be told to anyone. */
+	struct FStagedPublish
+	{
+		FTerrainOp Op;
+		TArray<FTerrainChunkKey> AffectedChunks;
+		TArray<FTerrainChunkRevision> Revisions;
+	};
+	TArray<FStagedPublish> StagedPublishes;
+
+	/**
+	 * The queue's Flush (P-012 §2): one append and one flush for every staged record, then, in
+	 * OpSeq order, settlement submits and broadcasts. False: nothing was published and storage is
+	 * faulted.
+	 */
+	bool FlushCommits();
+	void PublishCommit(const FStagedPublish& Done);
 	FTerrainEditQueue EditQueue;
 	TMap<uint32,TWeakObjectPtr<UTerrainStreamComponent>> Streams;
 	uint32 NextSourceId = 2;
@@ -334,7 +352,8 @@ private:
 	TUniquePtr<FTerrainSettlementWorker>      Settlement;
 
 	/** Journal append+flush time per commit, for the stress profile (T-132). */
-	struct FCommitStats { double Max = 0, Sum = 0; int64 Count = 0; } CommitStats;
+	/** Journal flush time per batch, and records per batch, for the stress profile (T-132, P-012). */
+	struct FCommitStats { double Max = 0, Sum = 0; int64 Count = 0, Records = 0; } CommitStats;
 
 	/**
 	 * The most records ever unsettled, sampled right after each Submit, the only moment the count

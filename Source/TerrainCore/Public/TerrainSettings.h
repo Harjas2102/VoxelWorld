@@ -159,9 +159,32 @@ public:
 	UPROPERTY(config, EditAnywhere, Category = "Terrain|Persistence", meta = (ClampMin = "1"))
 	int32 CheckpointDirtyChunkTrigger = 256;
 
-	/** Also capture after this many commits, so repeated edits to a few chunks trigger a cut. */
+	/**
+	 * The fewest commits since the last cut before the edit-count trigger may fire, so repeated
+	 * edits to a few chunks still get a cut. It fires only when CheckpointOpsPerDirtyChunk agrees.
+	 */
 	UPROPERTY(config, EditAnywhere, Category = "Terrain|Persistence", meta = (ClampMin = "1"))
 	int32 CheckpointOpTrigger = 256;
+
+	/**
+	 * The edit-count trigger's price, in edits per dirty chunk (P-012 §5): a capture re-reads
+	 * every dirty chunk, and is worth taking only once the replay it saves costs as much.
+	 *
+	 * Measured on the development machine: a chunk read costs about 2.8 ms and replaying one edit
+	 * at boot about 0.35 ms, so one chunk is worth about 8 edits. With 140 dirty chunks the cut
+	 * waits for 1,120 edits instead of 256, and a quiet world editing 32 chunks behaves as before.
+	 * 0 disables the pricing and restores the plain edit count.
+	 */
+	UPROPERTY(config, EditAnywhere, Category = "Terrain|Persistence", meta = (ClampMin = "0"))
+	int32 CheckpointOpsPerDirtyChunk = 8;
+
+	/**
+	 * Always capture once the replay tail reaches this many edits, whatever the pricing says:
+	 * it bounds boot time (about 1.6 s of replay at the measured cost), so a wrong price can
+	 * never make startup unbounded.
+	 */
+	UPROPERTY(config, EditAnywhere, Category = "Terrain|Persistence", meta = (ClampMin = "1"))
+	int32 CheckpointMaxReplayOps = 4096;
 
 	/**
 	 * Reclaim superseded checkpoint data in the background after each checkpoint (DEF-9).

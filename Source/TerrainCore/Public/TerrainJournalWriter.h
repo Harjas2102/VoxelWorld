@@ -124,6 +124,20 @@ public:
 	/** OutDigest, when given, receives the P-004 §9.3 record digest of exactly the bytes appended. */
 	FTerrainStoreResult AppendCommit(const FTerrainJournalCommitRecord& Record, FTerrainDigest* OutDigest = nullptr);
 
+	/**
+	 * Appends several commit records with ONE device append, so one flush covers them all
+	 * (group commit, P-012). The records must carry consecutive sequences starting at the next one.
+	 *
+	 * Every record is validated and encoded before anything is written, so a bad record refuses
+	 * the whole batch with the journal untouched. After the write is attempted, a failure blocks
+	 * the writer exactly as a single failed append does: the tail may hold any prefix of the
+	 * batch, and the torn-tail rule sorts that out at the next open.
+	 *
+	 * OutDigests, when given, receives one P-004 §9.3 record digest per record, in order.
+	 */
+	FTerrainStoreResult AppendCommits(TConstArrayView<FTerrainJournalCommitRecord> Records,
+	                                  TArray<FTerrainDigest>* OutDigests = nullptr);
+
 	/** Appends the seal record. The segment accepts nothing afterwards. */
 	FTerrainStoreResult Seal(int64 SealedUtcMillis);
 

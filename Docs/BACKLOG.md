@@ -107,10 +107,13 @@ deliberately removing arbitrary terrain manipulation from Pillar 1).
   except E-6 (CP-019, T-129)**. Ordered snapshots, nearest first, with backpressure and resync;
   DEF-3 resolved. *Not done:* E-6, a heavy region with a joiner arriving mid-edit.
 - **1F** — Stress profile, collision, foliage, nav, streaming → **decide the backend**.
-  **Stress profile done at CP-020 (T-132):** correctness PASS, 96/s not yet sustained (R-018).
-  Collision, foliage, nav and streaming observations remain.
-  **Next: T-133 (group commit)**, then the full default stress run. Codex review F1 to F5 are done
-  (T-132.1, T-132.2); F6 waits for Linux (R-007).
+  **Gate 8 PASS on this machine at CP-023 (T-133):** 99 edits/s sustained, 0 refusals, frames
+  p95 34–38 ms, correctness exact. Codex review F1 to F5 are done; F6 waits for Linux (R-007).
+  **Next: T-134, the Gate-Observe pass.** For each of collision edge cases, foliage and PCG over
+  removed terrain, nav dirtying, undermined or floating terrain, and streaming of modified chunks,
+  document what the plugin does, with evidence, and what our wrapper would have to own. Items
+  that need eyes in the editor become short Director checks. Then the backend decision:
+  PASS, CONDITIONAL or FAIL (Phase 1 exit).
 
 ### T-006 — Editor fluency *(rescoped at CP-002; not started)*
 
@@ -239,6 +242,11 @@ T-101B sub-step 1D, which requires the multiplayer-capable version instead.
 ---
 
 ## Done
+
+- **T-133** *(CP-023)* **Journal group commit and a chunk-priced checkpoint trigger; gate 8's
+  performance half passes on this machine.** 99 edits/s sustained (was 67–78), 0 refusals (was
+  1,600–2,700), frames p95 34–38 ms (was 72–97), correctness exact. The crash matrix covers torn
+  multi-record appends. **D-050**, spec **P-012**.
 
 - **T-132.2** *(CP-022)* **Codex review F3 to F5 corrected.** The settlement window is held per
   operation (`CanExecute`): the slow-settlement peak is 32, where Codex measured 34. Stress PASS

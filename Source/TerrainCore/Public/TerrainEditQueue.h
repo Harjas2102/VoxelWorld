@@ -37,6 +37,18 @@ struct FTerrainQueueCallbacks
 	 * callback that could not refuse would make that ordering unenforceable.
 	 */
 	TFunction<bool(const FTerrainOp&, const FTerrainEditResult&, const FTerrainCommitIdentity&)> Commit;
+
+	/**
+	 * Group commit (P-012). When set, `Commit` only STAGES an operation, and the queue calls this
+	 * exactly once before `Pump` returns, if anything was staged. It makes every staged operation
+	 * durable with one flush and then publishes them, and returns true; or it returns false, and
+	 * none of them may be published.
+	 *
+	 * The queue holds every receipt of a job that staged in this call until Flush has succeeded.
+	 * On failure it refuses those receipts with `ShuttingDown` and rolls its sequence back to the
+	 * first staged OpSeq. When unset, `Commit` is durable on its own, as before.
+	 */
+	TFunction<bool()> Flush;
 	TFunction<void(uint32, const FTerrainEditReceipt&)> Receipt;
 };
 
@@ -82,7 +94,7 @@ public:
 	int32 GlobalLimit = 256, SourceLimit = 16;
 	double RatePerSecond = 3, Burst = 3;
 private:
-	struct FTransaction { double EnqueuedAt = 0; int64 RequestId; TArray<FTerrainOp> Parts; int32 Next = 0, ChargePerPart = 0; FTerrainEditReceipt Receipt; };
+	struct FTransaction { double EnqueuedAt = 0; int64 RequestId; TArray<FTerrainOp> Parts; int32 Next = 0, ChargePerPart = 0, StagedThisPump = 0; FTerrainEditReceipt Receipt; };
 	struct FSource
 	{
 		FTerrainSourceState State;

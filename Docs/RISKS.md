@@ -660,7 +660,12 @@ D-028 was written for. Keep writing the breadcrumb *before* the risky half, not 
   `Tools/Test-TerrainStress.ps1`. Target: 96/s sustained with frames near 33 ms.
 - **CP-021/CP-022 re-runs:** 76.7/s and 68.3/s, with correctness unchanged. Run-to-run spread on
   this machine is about ±5/s, so T-133's result needs several runs, not one.
-- **Owner / task:** T-133
-- **Result:** *open*
-- **Decision:** D-047 (technical)
+- **CP-023 — mitigated on this machine (T-133, D-050, P-012).** Group commit plus a chunk-priced
+  checkpoint trigger: **99 edits/s sustained over three runs, 0 refusals, frames p95 34–38 ms**,
+  correctness exact. Residual: a worst frame of 88–96 ms a few times per run at checkpoint or
+  retention moments. The Linux server's fsync and replay costs are unmeasured (R-007), and so is
+  the trigger's price there.
+- **Owner / task:** T-133 (done); re-measure at the first Linux build
+- **Result:** *closed on the development machine; open for the Linux server*
+- **Decision:** D-047, D-050 (technical)
 

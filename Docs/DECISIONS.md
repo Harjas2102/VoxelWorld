@@ -1801,3 +1801,25 @@ not asked** · **Scope:** T-132.2, Codex review F3/F4/F5 · **Status:** ACCEPTED
   proves the oracle rejects lost acknowledged history.
 - F6 (Linux parent-directory sync) stays with R-007 for the first Linux build.
 
+## D-050 — Journal group commit, and a checkpoint trigger priced in chunks (2026-09-22)
+
+**Recorded:** CP-023 · **Class:** technical (per **D-023**) · **Architect ruling, logged
+not asked** · **Scope:** T-133, gate 8, R-018 · **Status:** ACCEPTED · **Spec:** P-012
+
+- **P-003 §2's order holds per batch.** Each pump call's commits are staged in memory, written with
+  **one** append and **one** flush, and only then are they broadcast, submitted for settlement and
+  receipted, in OpSeq order.
+  - The queue holds a batch's receipts until its flush succeeds (`FTerrainQueueCallbacks::Flush`).
+  - A failed flush publishes nothing, refuses the batch's jobs with `ShuttingDown`, rolls the
+    queue's sequence back and faults storage.
+  - Any prefix of a failed batch is a legal recovery, because none of it was acknowledged.
+- **The save format is unchanged.** The records are identical; only how many share an append
+  changes.
+- **The settlement window counts unsettled plus staged records.**
+- **The checkpoint trigger:** capture when the dirty set reaches 256, **or** the replay tail
+  reaches `CheckpointMaxReplayOps` (4,096), **or** at least `CheckpointOpTrigger` (256) edits
+  **and** `CheckpointOpsPerDirtyChunk` (8) edits per dirty chunk have landed. The price 8 is the
+  measured ratio of capture read cost per chunk to replay cost per edit on this machine.
+- **Result:** 99 edits/s sustained with no refusals and frames p95 34–38 ms, over three runs. R-018
+  is closed on this machine and stays open for Linux.
+
