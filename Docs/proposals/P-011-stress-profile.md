@@ -110,6 +110,8 @@ After the fixes: TerrainCore automation **42/42**; `MP.Convergence` passes 3 rou
   a dug region, the capture batch, or the ledger WAL.
 - **The client inbox adds up to one frame of latency to every edit** a client sees. That is not
   measured as felt; 30 Hz server updates dominate it anyway.
+- **Correction, CP-021 (D-048):** as first built, this guard was not wired. The service never
+  supplied W, and an empty cut skipped the guard (Codex review F1). It holds now.
 - **A checkpoint's publication can now wait on settlement.** The wait was not observed as
   significant (60 ms average latency), but a stalled ledger would now stall publication, not the
   cut. That is safe (the journal still covers it), just slower.

@@ -53,6 +53,7 @@ FTerrainStoreResult FTerrainCapturePump::Begin(
 	const FTerrainRevisionIndex& InRevisions,
 	TMap<FTerrainChunkKey, FTerrainOpSeq>&& DirtyKeys,
 	FTerrainOpSeq InG,
+	FTerrainOpSeq SettledThrough,
 	int64 InUtcMillis)
 {
 	checkf(!bActive, TEXT("A capture is already in progress on this pump."));
@@ -62,11 +63,24 @@ FTerrainStoreResult FTerrainCapturePump::Begin(
 	CaptureStats.DirtyKeys = DirtyKeys.Num();
 	FinalResult = FTerrainStoreResult::Ok();
 	bFinished = false;
+	bCompletionPending = false;
 	Updates.Reset();
+
+	// Owned from here on, whatever happens next: a refusal below still has to hand these back,
+	// because the caller has already cleared its own dirty set.
+	CutKeys = MoveTemp(DirtyKeys);
+
+	const auto Refuse = [this](const FTerrainStoreResult& Why)
+	{
+		FinalResult = Why;
+		bFinished = true;
+		bCompletionPending = true;
+		return Why;
+	};
 
 	if (!InStore.IsOpen())
 	{
-		return FTerrainStoreResult::Io(ETerrainStorageResult::NotFound);
+		return Refuse(FTerrainStoreResult::Io(ETerrainStorageResult::NotFound));
 	}
 
 	// A cut may repeat when nothing changed, but it may never go backwards -- a checkpoint
@@ -75,11 +89,11 @@ FTerrainStoreResult FTerrainCapturePump::Begin(
 		|| !InStore.GetJournal()
 		|| InG != InStore.GetJournal()->GetHead())
 	{
-		return FTerrainStoreResult::Bad(ETerrainPersistError::OrderViolation);
+		return Refuse(FTerrainStoreResult::Bad(ETerrainPersistError::OrderViolation));
 	}
-	if (DirtyKeys.Num() > TerrainCheckpointDirtyHardBound)
+	if (CutKeys.Num() > TerrainCheckpointDirtyHardBound)
 	{
-		return FTerrainStoreResult::Bad(ETerrainPersistError::FieldOutOfRange);
+		return Refuse(FTerrainStoreResult::Bad(ETerrainPersistError::FieldOutOfRange));
 	}
 
 	Store     = &InStore;
@@ -88,7 +102,7 @@ FTerrainStoreResult FTerrainCapturePump::Begin(
 	G         = InG;
 	PrevG     = InStore.GetState().Checkpoint.G;
 	UtcMillis = InUtcMillis;
-	Pending   = MoveTemp(DirtyKeys);
+	Pending   = CutKeys;
 
 	StartedAt = FPlatformTime::Seconds();
 
@@ -101,12 +115,24 @@ FTerrainStoreResult FTerrainCapturePump::Begin(
 
 	// An empty dirty set is a legitimate capture: it republishes the same logical checkpoint
 	// at a newer G, which is what lets a quiet world stop replaying the tail it has already
-	// checkpointed.
+	// checkpointed. It still publishes a root, so it still waits for W: committed no-change
+	// edits make an empty cut ahead of settlement an ordinary case, not a corner.
 	if (Pending.Num() == 0)
 	{
-		Finish();
+		TryPublish(SettledThrough);
 	}
 	return FinalResult;
+}
+
+bool FTerrainCapturePump::TryPublish(FTerrainOpSeq SettledThrough)
+{
+	check(bActive && Pending.Num() == 0);
+	if (SettledThrough < G)
+	{
+		return false;
+	}
+	Finish();
+	return true;
 }
 
 void FTerrainCapturePump::NoticeWrite(TConstArrayView<FTerrainChunkKey> Keys)
@@ -133,7 +159,7 @@ void FTerrainCapturePump::NoticeWrite(TConstArrayView<FTerrainChunkKey> Keys)
 	}
 }
 
-bool FTerrainCapturePump::Advance(double BudgetSeconds)
+bool FTerrainCapturePump::Advance(double BudgetSeconds, FTerrainOpSeq SettledThrough)
 {
 	if (!bActive)
 	{
@@ -164,14 +190,9 @@ bool FTerrainCapturePump::Advance(double BudgetSeconds)
 		}
 	}
 
-	// Every chunk is encoded. Publication waits, if it must, for settlement to reach the cut --
-	// copy-before-write keeps protecting the cut meanwhile, so waiting costs nothing but time.
-	if (SettledThrough < G)
-	{
-		return false;
-	}
-	Finish();
-	return true;
+	// Every chunk is encoded. Publication waits, if it must, for settlement to reach the cut.
+	// Finish can still fail, and that is an end too: either way the capture is over.
+	return TryPublish(SettledThrough);
 }
 
 bool FTerrainCapturePump::CaptureOne(const FTerrainChunkKey& Key, FTerrainOpSeq LastOpSeq)
@@ -362,7 +383,9 @@ void FTerrainCapturePump::Finish()
 
 	bActive = false;
 	bFinished = true;
+	bCompletionPending = true;
 	FinalResult = FTerrainStoreResult::Ok();
+	CutKeys.Reset();   // published: the cut's history is durable in the new root
 }
 
 void FTerrainCapturePump::Fail(const FTerrainStoreResult& Why)
@@ -371,6 +394,9 @@ void FTerrainCapturePump::Fail(const FTerrainStoreResult& Why)
 	CaptureStats.Seconds = FPlatformTime::Seconds() - StartedAt;
 	bActive = false;
 	bFinished = true;
+	bCompletionPending = true;
+	// CutKeys is deliberately kept: nothing of this cut was published, and the owner must take
+	// it back (TakeCut) or those chunks would be dirty nowhere.
 	Pending.Reset();
 	Updates.Reset();
 	if (Store != nullptr)
@@ -387,6 +413,8 @@ void FTerrainCapturePump::Abandon()
 	}
 	bActive = false;
 	bFinished = false;
+	bCompletionPending = false;
+	CutKeys.Reset();   // only at teardown: the world is closing, and the journal holds it all
 	Pending.Reset();
 	Updates.Reset();
 	if (Store != nullptr)
@@ -411,15 +439,16 @@ FTerrainStoreResult TerrainCaptureCheckpoint(
 	FTerrainCapturePump Pump;
 	TMap<FTerrainChunkKey, FTerrainOpSeq> Keys = DirtyKeys;
 
+	// No ledger, so nothing to wait for (see the header).
 	const FTerrainStoreResult Started =
-		Pump.Begin(Store, Backend, Revisions, MoveTemp(Keys), G, UtcMillis);
+		Pump.Begin(Store, Backend, Revisions, MoveTemp(Keys), G, MAX_uint64, UtcMillis);
 	if (!Started.IsOk())
 	{
 		OutStats = Pump.Stats();
 		return Started;
 	}
 
-	while (!Pump.Advance(TNumericLimits<double>::Max()))
+	while (!Pump.Advance(TNumericLimits<double>::Max(), MAX_uint64))
 	{
 	}
 

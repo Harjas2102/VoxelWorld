@@ -1756,3 +1756,24 @@ E-6: a joiner caught up in 6.1 s mid-edit (243 snapshots, 1.6 MB).
 exists. All commits in one pump call are appended, one flush covers them, and only then are they
 broadcast or settled. A checkpoint trigger priced in chunks comes with it. It gets a short spec,
 and the crash matrix must cover a torn multi-record append.
+
+## D-048 — Checkpoint publication is gated on W at one boundary, and every capture end is consumed (2026-09-21)
+
+**Recorded:** CP-021 · **Class:** technical (per **D-023**) · **Architect ruling, logged
+not asked** · **Scope:** T-132.1, Codex review F1/F2 · **Status:** ACCEPTED ·
+**Review:** `Docs/reviews/2026-09-21-checkpoints-review-codex.md`
+
+- **The settlement watermark is a required argument** to `FTerrainCapturePump::Begin` and
+  `Advance`. The setter and its "everything settled" default are removed, because a setter nobody
+  called is how D-047's G ≤ W guard came to be dead in normal play.
+- **`TryPublish` is the only route to publication**, and the empty cut uses it too.
+  `TerrainCaptureCheckpoint` (synchronous) waives W and is for ledger-less worlds and tests only.
+- **Every capture end is reported once** through `ConsumeCompletion()`: a refusal, an immediate
+  publication, a copy-before-write failure or an `Advance` failure. The service consumes it after
+  `NoticeWrite`, `Begin` and `Advance`, and again at the top of `MaybeCaptureCheckpoint`.
+- **A cut that did not publish returns all its keys** (`TakeCut`), and the service merges them
+  back into the dirty set, where the newer OpSeq wins. The per-session latch after a failed
+  checkpoint (unchanged) still applies. The merge makes the dirty set correct without relying
+  on the latch.
+- Remaining review findings F3 to F5 are T-132.2, before T-133. F6 is attached to R-007.
+

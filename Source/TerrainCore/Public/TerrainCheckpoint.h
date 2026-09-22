@@ -184,20 +184,21 @@ public:
 	FTerrainOpSeq GetCut() const { return G; }
 
 	/**
-	 * P-003 §3: a published root must never be ahead of the settlement watermark (G <= W), or a
-	 * crash right after publication would boot into W < G, which refuses. The owner reports W each
-	 * frame; the capture does all its chunk work regardless and only the PUBLICATION waits until
-	 * W reaches the cut. Defaults to "everything settled" for a world with no ledger.
-	 */
-	void SetSettledThrough(FTerrainOpSeq W) { SettledThrough = W; }
-
-	/**
 	 * Takes the cut and begins a capture over exactly these keys.
 	 *
 	 * `InG` must be the committed journal head at this moment, for the same reason it always
 	 * had to be: a cut claiming to include operations the journal has not recorded would make
 	 * replay start after edits nobody wrote down. The caller hands over the dirty set and must
 	 * clear its own, so that edits from here on accumulate for the NEXT checkpoint.
+	 *
+	 * `SettledThrough` is the durable settlement watermark W right now (`MAX_uint64` for a world
+	 * with no ledger). It is a required argument, here and in Advance, not a setter: a setter the
+	 * owner forgot to call is how T-132 shipped. Its default meant "everything settled", normal
+	 * play never supplied W, and a crash after publication booted into W < G and refused (Codex
+	 * review F1). See TryPublish.
+	 *
+	 * **Every way a capture ends is reported once through ConsumeCompletion**, including a
+	 * refusal here, which leaves the pump inactive. A refused cut's keys are kept for TakeCut.
 	 */
 	FTerrainStoreResult Begin(
 		FTerrainWorldStore& InStore,
@@ -205,6 +206,7 @@ public:
 		const FTerrainRevisionIndex& InRevisions,
 		TMap<FTerrainChunkKey, FTerrainOpSeq>&& DirtyKeys,
 		FTerrainOpSeq InG,
+		FTerrainOpSeq SettledThrough,
 		int64 InUtcMillis);
 
 	/**
@@ -213,6 +215,10 @@ public:
 	 * Any of those chunks the capture still owes are encoded here and now, from their pre-edit
 	 * state. Cheap and usually nothing: a chunk is captured at most once per checkpoint, and
 	 * most edits touch chunks the capture has already taken or never owed.
+	 *
+	 * **This can end the capture.** A chunk that cannot be read or stored fails it here, inside
+	 * an edit, and the owner must still find out: ConsumeCompletion reports it exactly like a
+	 * failure in Advance (Codex review F2).
 	 */
 	void NoticeWrite(TConstArrayView<FTerrainChunkKey> Keys);
 
@@ -227,11 +233,43 @@ public:
 	 * zero progress is a pump that can never finish, and a budget smaller than one chunk would
 	 * starve the capture forever.
 	 */
-	bool Advance(double BudgetSeconds);
+	bool Advance(double BudgetSeconds, FTerrainOpSeq SettledThrough);
 
-	/** Valid once Advance has returned true. */
+	/** Valid once the capture has ended (ConsumeCompletion has returned true). */
 	const FTerrainStoreResult&     Result() const { return FinalResult; }
 	const FTerrainCheckpointStats& Stats()  const { return CaptureStats; }
+
+	/**
+	 * True exactly once for each capture that has ended, successfully or not, whichever entry
+	 * point ended it: Begin (a refusal, or an empty cut published at once), NoticeWrite or Advance.
+	 *
+	 * The owner polls this instead of trusting return values, because the three entry points are
+	 * called from different places and one of them -- NoticeWrite, inside an edit -- has no return
+	 * value at all. A failure there used to leave the pump inactive with nobody told. The session
+	 * kept capturing, and the next checkpoint published past history the failed cut had taken
+	 * with it (Codex review F2).
+	 */
+	bool ConsumeCompletion()
+	{
+		const bool bWas = bCompletionPending;
+		bCompletionPending = false;
+		return bWas;
+	}
+
+	/**
+	 * After a capture that did NOT publish: every key of its cut, with the OpSeq it was handed.
+	 *
+	 * The owner cleared its own dirty set when the cut was taken, so without this the chunks the
+	 * capture never published would be dirty nowhere. A later checkpoint would then move G past
+	 * their edits without recording them, and a restart would restore those chunks from the older
+	 * checkpoint and skip the journal records that changed them. The owner merges these back.
+	 */
+	TMap<FTerrainChunkKey, FTerrainOpSeq> TakeCut()
+	{
+		TMap<FTerrainChunkKey, FTerrainOpSeq> Out = MoveTemp(CutKeys);
+		CutKeys.Reset();
+		return Out;
+	}
 
 	/**
 	 * Drops the capture and everything it had buffered.
@@ -244,6 +282,15 @@ public:
 
 private:
 	bool CaptureOne(const FTerrainChunkKey& Key, FTerrainOpSeq LastOpSeq);
+
+	/**
+	 * THE publication boundary, and the only caller of Finish. P-003 §3: a published root must
+	 * never be ahead of the durable settlement watermark (G <= W), or a crash right after
+	 * publication boots into W < G, which refuses. So publication waits until W reaches the cut.
+	 * Copy-before-write keeps protecting the cut meanwhile, so waiting costs only time. An empty
+	 * cut comes through here as well: it publishes a newer G just the same.
+	 */
+	bool TryPublish(FTerrainOpSeq SettledThrough);
 	void Finish();
 	void Fail(const FTerrainStoreResult& Why);
 
@@ -253,12 +300,14 @@ private:
 
 	bool bActive = false;
 	bool bFinished = false;
+	bool bCompletionPending = false;
 
 	FTerrainOpSeq G = 0;
 	FTerrainOpSeq PrevG = 0;
-	FTerrainOpSeq SettledThrough = MAX_uint64;
 	int64         UtcMillis = 0;
 
+	/** The whole cut as it was handed over. Pending is the part of it still owed. */
+	TMap<FTerrainChunkKey, FTerrainOpSeq> CutKeys;
 	TMap<FTerrainChunkKey, FTerrainOpSeq> Pending;
 	TArray<FTerrainIndexUpdate>           Updates;
 
@@ -286,6 +335,10 @@ private:
  * Publication order is the store's: payload objects, then index pages, then the descriptor,
  * then the root slot (P-004 §12). A crash anywhere before the root leaves unreferenced
  * objects -- garbage, not a broken world.
+ *
+ * **Only for a world with no settlement ledger.** It gives the pump W = MAX_uint64, which waives
+ * G <= W. Tests and tools use it. The service never does: it drives the pump itself and supplies
+ * the real watermark.
  */
 TERRAINCORE_API FTerrainStoreResult TerrainCaptureCheckpoint(
 	FTerrainWorldStore& Store,

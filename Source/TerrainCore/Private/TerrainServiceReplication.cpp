@@ -190,6 +190,10 @@ FTerrainQueueCallbacks UTerrainService::QueueCallbacks()
 			// change it. Without this the capture would later read a chunk that had moved past
 			// its own cut, and the checkpoint would record a world that never existed at G.
 			CapturePump.NoticeWrite(Keys);
+
+			// That can end the capture, and must not end it silently (Codex review F2): a failed
+			// cut disables checkpoints for the session and hands its dirty chunks back.
+			ConsumeCaptureCompletion();
 		}
 		return Backend->ApplyOp(Op,R);
 	};

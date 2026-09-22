@@ -107,8 +107,16 @@ deliberately removing arbitrary terrain manipulation from Pillar 1).
   except E-6 (CP-019, T-129)**. Ordered snapshots, nearest first, with backpressure and resync;
   DEF-3 resolved. *Not done:* E-6, a heavy region with a joiner arriving mid-edit.
 - **1F** — Stress profile, collision, foliage, nav, streaming → **decide the backend**.
-  **Stress profile done at CP-020 (T-132):** correctness PASS, 96/s not yet sustained (R-018, T-133
-  next). Collision, foliage, nav and streaming observations remain.
+  **Stress profile done at CP-020 (T-132):** correctness PASS, 96/s not yet sustained (R-018).
+  Collision, foliage, nav and streaming observations remain.
+  **T-132.2 (next):** Codex review F3 to F5 (`Docs/reviews/2026-09-21-checkpoints-review-codex.md`).
+  - F3: enforce the 32-record settlement window before every mutation, including console pumping
+    and split children, and assert its maximum throughout a slow-worker run.
+  - F4: stress PASS requires a completed, passing ledger audit; an attribution mode reports a
+    partial result.
+  - F5: the crash matrix tracks the acknowledged head as a lower bound, adds a
+    full-record/failed-response case, and a negative control.
+  - Then T-133 (group commit), then a full default stress run.
 
 ### T-006 — Editor fluency *(rescoped at CP-002; not started)*
 
@@ -237,6 +245,12 @@ T-101B sub-step 1D, which requires the multiplayer-capable version instead.
 ---
 
 ## Done
+
+- **T-132.1** *(CP-021)* **Codex review F1 and F2 corrected.** Checkpoint publication waits for the
+  settlement watermark at one boundary, including the empty cut. Every capture end is consumed,
+  and a failed cut returns its dirty keys. A third same-class defect was fixed: a refused `Begin`
+  was read as success. New test `Capture.Service`, mutation-checked; 43/43; Codex's reproduction
+  and the 5,000-edit stress run pass. **D-048.**
 
 - **T-132** *(CP-020)* **The edit stress profile and E-6.** `Tools/Test-TerrainStress.ps1` runs 32
   sources at 96/s through the real pipeline, with a client joining mid-edit.

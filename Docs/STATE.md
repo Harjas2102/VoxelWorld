@@ -5,11 +5,42 @@
 
 ---
 
-**Checkpoint:** CP-020 · **Date:** 2026-09-21
+**Checkpoint:** CP-021 · **Date:** 2026-09-21
 **Phase:** 1 — Terrain Feasibility
 **Expected next agent:** either (D-028)
-**Current task:** T-133 — journal group commit, plus a checkpoint trigger priced in chunks, so the
-server sustains the 96 edits/s design point (R-018). Gate it on `Tools/Test-TerrainStress.ps1`.
+**Current task:** T-132.2. Correct the Codex review's findings F3 to F5: the settlement window
+enforced per mutation, a stress verdict that requires a passing ledger audit, and the crash
+matrix's acknowledged-history lower bound. Then T-133, journal group commit (R-018).
+
+## What happened at CP-021
+
+**One correction increment, T-132.1 (D-048).** Codex independently reviewed CP-016 to CP-020
+(`Docs/reviews/2026-09-21-checkpoints-review-codex.md`). It found two P1 and four P2 defects.
+Both P1s are fixed:
+- **F1:** a crash just after an autosave could lock the world. The autosave could publish ahead of
+  the settlement watermark (G > W), because normal play never gave the pump W. Codex reproduced
+  it: the restart refused at G=3, W=0.
+- **F2:** a failed autosave could lose digging. When copy-before-write failed inside an edit, the
+  service was never told. A later checkpoint could then publish past chunks the failed cut had
+  taken out of the dirty set.
+- **A third defect of the same kind, found in self-review:** a refused `Begin` looked like a success
+  to the service, and it dropped the cut's dirty set.
+
+| Evidence (final source) | |
+|---|---|
+| Automation | **43/43**, including the new `Capture.Service`, which runs the real service in a game world. Its four mutations each fail it |
+| Codex's reproduction | the cut waited 20.02 s for W and published at G=1; the kill, restart and ledger audit PASS |
+| Stress, 5,000 edits | PASS: 254 chunks verified, ledger exact over 7,722 edits, 31 checkpoints (29 before). The W wait costs at most 132 ms per publication. Throughput unchanged at 76.7/s |
+| Other | Settlement kill test, checkpoint, lease and MP (2 rounds, observer, `-DropOp`) all PASS; both targets build |
+
+**Still open from the review:** F3, the window checked once per pump call, so unsettled reached
+34 > 32; F4, stress PASS does not require the ledger audit; F5, the crash matrix has no lower
+bound on acknowledged history; F6, Linux bootstrap does not sync the world directory's parent
+(R-007).
+
+**Drift checks: NO FLAG MOVED.** Server authority, D-011 and D-025 are unchanged, and no `Build.cs`
+changed. Nothing is player-visible except that a crash right after an autosave no longer locks
+the world.
 
 ## What happened at CP-020
 

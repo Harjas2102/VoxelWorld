@@ -188,7 +188,7 @@ bool FTerrainCapturePumpTest::RunTest(const FString& Parameters)
 	// ===== the capture starts, and the world keeps moving ==================================
 	FTerrainCapturePump Pump;
 	const FTerrainStoreResult Started = Pump.Begin(
-		Store, Backend, Revisions, CopyTemp(Dirty), /*G=*/8, 1789412355555LL);
+		Store, Backend, Revisions, CopyTemp(Dirty), /*G=*/8, /*W=*/MAX_uint64, 1789412355555LL);
 	if (!Started.IsOk())
 	{
 		AddError(FString::Printf(TEXT("Pump refused to start: %s"), *Started.ToString()));
@@ -198,7 +198,7 @@ bool FTerrainCapturePumpTest::RunTest(const FString& Parameters)
 	TestEqual(TEXT("and owes every dirty chunk"), Pump.Remaining(), Dirty.Num());
 
 	// A deliberately tiny budget, so only part of the cut is taken before the edits land.
-	Pump.Advance(0.0);
+	Pump.Advance(0.0, MAX_uint64);
 	const int32 AfterFirstSlice = Pump.Remaining();
 	TestTrue(TEXT("A zero budget still makes progress rather than spinning"),
 		AfterFirstSlice < Dirty.Num());
@@ -232,7 +232,7 @@ bool FTerrainCapturePumpTest::RunTest(const FString& Parameters)
 	TestTrue(TEXT("and the pump recorded them as copy-before-write"),
 		Pump.Stats().CopiedBeforeWrite > 0);
 
-	while (!Pump.Advance(0.0005))
+	while (!Pump.Advance(0.0005, MAX_uint64))
 	{
 	}
 	if (!Pump.Result().IsOk())
@@ -305,6 +305,24 @@ bool FTerrainCapturePumpTest::RunTest(const FString& Parameters)
 			MovedOn > 0);
 	}
 
+	TestTrue(TEXT("A publication is reported to the owner once"), Pump.ConsumeCompletion());
+	TestFalse(TEXT("and only once"), Pump.ConsumeCompletion());
+
+	// ===== a refused cut is an end too, and hands its keys back =============================
+	{
+		FTerrainCapturePump Refused;
+		TMap<FTerrainChunkKey, FTerrainOpSeq> Keys;
+		Keys.Add(CutChunks.Array()[0], 11);
+		// G=12 is not the journal head (11), so Begin refuses.
+		const FTerrainStoreResult Begun = Refused.Begin(
+			Store, Backend, Revisions, MoveTemp(Keys), /*G=*/12, /*W=*/MAX_uint64, 1789412366666LL);
+		TestFalse(TEXT("A cut ahead of the journal head is refused"), Begun.IsOk());
+		TestFalse(TEXT("leaving the pump inactive"), Refused.IsActive());
+		TestTrue(TEXT("and the refusal is reported like any other end"), Refused.ConsumeCompletion());
+		TestFalse(TEXT("with its result"), Refused.Result().IsOk());
+		TestEqual(TEXT("and the cut's keys handed back, not dropped"), Refused.TakeCut().Num(), 1);
+	}
+
 	// ===== an abandoned capture leaves nothing behind =======================================
 	{
 		FTerrainCapturePump Abandoned;
@@ -312,7 +330,7 @@ bool FTerrainCapturePumpTest::RunTest(const FString& Parameters)
 		Later.Add(CutChunks.Array()[0], 11);
 
 		const FTerrainStoreResult Begun = Abandoned.Begin(
-			Store, Backend, Revisions, MoveTemp(Later), /*G=*/11, 1789412366666LL);
+			Store, Backend, Revisions, MoveTemp(Later), /*G=*/11, /*W=*/MAX_uint64, 1789412366666LL);
 		TestTrue(TEXT("A second capture starts"), Begun.IsOk());
 
 		const uint64 GenerationBefore = Store.GetState().Root.Generation;

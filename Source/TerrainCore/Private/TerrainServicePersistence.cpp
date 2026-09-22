@@ -359,7 +359,6 @@ void UTerrainService::ReclaimStore()
 		UE_LOG(LogTerrainCore, Warning, TEXT("Terrain.Reclaim: this world has no open store."));
 		return;
 	}
-	CapturePump.SetSettledThrough(Settlement ? Settlement->GetWatermark() : MAX_uint64);
 	if (CapturePump.IsActive())
 	{
 		// Retention would refuse anyway; saying so here is clearer than reporting its error.
@@ -459,6 +458,18 @@ void UTerrainService::MaybeCaptureCheckpoint()
 
 	const UTerrainSettings* Settings = GetDefault<UTerrainSettings>();
 
+	// --- 0. a capture that ended somewhere else is handled before anything else -------------
+	//
+	// Copy-before-write can fail a capture from inside an edit (Codex review F2). Apply consumes
+	// that at once; this is the backstop, so that no path can reach a new cut below while an
+	// ended one has not been handled -- that was how a failed cut's history was published past.
+	ConsumeCaptureCompletion();
+
+	// P-003 §3's settlement invariant, G <= W at every durable root. The pump enforces it at its
+	// one publication boundary, and it is handed W on every call because it cannot find it out:
+	// T-132's setter was never called in normal play, so the guard was dead (Codex review F1).
+	const FTerrainOpSeq SettledThrough = CaptureSettledThrough();
+
 	// --- 1. a capture already in flight gets its slice of this frame ------------------------
 	//
 	// This runs BEFORE the start gate and regardless of the queue, because the whole point of
@@ -468,10 +479,8 @@ void UTerrainService::MaybeCaptureCheckpoint()
 	{
 		const double BudgetSeconds =
 			FMath::Clamp(Settings->CheckpointPumpMillisPerFrame, 0.05, 50.0) / 1000.0;
-		if (CapturePump.Advance(BudgetSeconds))
-		{
-			FinishCapture();
-		}
+		CapturePump.Advance(BudgetSeconds, SettledThrough);
+		ConsumeCaptureCompletion();
 		return;
 	}
 
@@ -483,9 +492,9 @@ void UTerrainService::MaybeCaptureCheckpoint()
 	{
 		return;
 	}
-	// P-003 §3's settlement invariant (G <= W at every durable root) is enforced at PUBLICATION,
-	// in the pump, not here: under sustained load some records are always unsettled, and gating the
-	// START on "none unsettled" starved checkpoints completely (T-132: 0 in 7,871 edits).
+	// G <= W is enforced at PUBLICATION, in the pump, not here: under sustained load some records
+	// are always unsettled, and gating the START on "none unsettled" starved checkpoints
+	// completely (T-132: 0 in 7,871 edits).
 	//
 	// And the cut needs no transaction half-executed -- not an empty queue. Waiting jobs commit at
 	// later sequences; under sustained load the queue is never empty, which was the other half of
@@ -519,13 +528,24 @@ void UTerrainService::MaybeCaptureCheckpoint()
 	TMap<FTerrainChunkKey, FTerrainOpSeq> Cut = MoveTemp(DirtyChunks);
 	DirtyChunks.Reset();
 
-	const FTerrainStoreResult Started = CapturePump.Begin(
-		*WorldStore, *Backend, *RevisionIndex, MoveTemp(Cut), G,
+	CapturePump.Begin(
+		*WorldStore, *Backend, *RevisionIndex, MoveTemp(Cut), G, SettledThrough,
 		FDateTime::UtcNow().ToUnixTimestamp() * 1000);
 
-	if (!Started.IsOk() || !CapturePump.IsActive())
+	// It may have refused to start, or published an empty cut at once. Either is an end.
+	ConsumeCaptureCompletion();
+}
+
+FTerrainOpSeq UTerrainService::CaptureSettledThrough() const
+{
+	// No ledger (SettlementModule=None, or a world with no journal): nothing to be ahead of.
+	return Settlement ? Settlement->GetWatermark() : MAX_uint64;
+}
+
+void UTerrainService::ConsumeCaptureCompletion()
+{
+	if (CapturePump.ConsumeCompletion())
 	{
-		// Either it refused to start, or the dirty set was empty and it published immediately.
 		FinishCapture();
 	}
 }
@@ -537,6 +557,16 @@ void UTerrainService::FinishCapture()
 		// A new root supersedes the older retained one: what only that one named is now garbage.
 		bRetentionOwed = true;
 		return;
+	}
+
+	// Nothing of the cut was published, and our dirty set was cleared when it was taken. Put it
+	// back, so every chunk changed since the published root is dirty SOMEWHERE. A chunk edited
+	// since the cut is already here at a newer OpSeq, which wins. Checkpoints stop below anyway;
+	// this keeps the dirty set honest regardless, so no later policy can publish past it.
+	for (const TPair<FTerrainChunkKey, FTerrainOpSeq>& Owed : CapturePump.TakeCut())
+	{
+		FTerrainOpSeq& Seq = DirtyChunks.FindOrAdd(Owed.Key, Owed.Value);
+		Seq = FMath::Max(Seq, Owed.Value);
 	}
 
 	// Deliberately NOT a storage fault. The previous root slot is untouched -- publication

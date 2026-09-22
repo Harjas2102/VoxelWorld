@@ -170,6 +170,10 @@ Severity / probability scale: **High · Medium · Low**.
     refused plain WAL on Windows, and the ledger now requires EXCLUSIVE + WAL + FULL and reads
     each back. Whether Linux behaves identically is unverified.
   - The first Linux build must run `WriterLease`, `Settlement.*` and `Storage.PlatformDevice`.
+- **CP-021 — a known Linux durability gap (Codex review F6, source analysis).** Bootstrap syncs
+  the new world directory and its subdirectories, but never the parent `Saved/Worlds`. On Linux,
+  the world directory's own name is therefore not proved durable, so P-005 §6's "window closed"
+  overstates the Unix case. It must be fixed and covered before any Linux claim.
 - **Owner / task:** T-101B (architecture check) → Phase 4 (build proof)
 - **Result:** *open, and broadened at CP-015 by a confirmed instance.*
 - **Decision:** *open*
@@ -608,6 +612,17 @@ D-028 was written for. Keep writing the breadcrumb *before* the risky half, not 
     and the boot settlement pass.
   - None of P-005 to P-010 has had a cross-vendor read. That is the cheapest remaining way to
     find what one author reads past.
+- **CP-021 — the cross-vendor read happened, and it found what the self-reviews missed.**
+  Codex reviewed CP-016 to CP-020 and found **two P1 and four P2 defects**. All six were in
+  integration and failure paths that the author's isolated tests had passed.
+  - The P1s: the G ≤ W guard was never wired in normal play, and a copy-before-write failure was
+    never seen by the service.
+  - The stress gate accepted a failed ledger audit.
+  - F1 and F2 are fixed (D-048). The fix's own self-review found a third defect of the same
+    kind.
+  - **The lesson for this project:** "the component test passes" has repeatedly not meant "the
+    owner uses the component correctly". Service-level tests with mutations are now the standard
+    for persistence fixes (`Capture.Service`).
 
 ## R-017 — Player identity is not yet durable
 

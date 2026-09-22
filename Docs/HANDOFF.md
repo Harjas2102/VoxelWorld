@@ -1,9 +1,9 @@
 # HANDOFF
 
-**Checkpoint:** CP-020 · **Date:** 2026-09-21 · **Branch:** `main`
-**Agents:** Claude (Opus 5) wrote and self-reviewed T-128 to T-132 under the Director's standing
-instruction. Writer and reviewer were the same agent, which is weaker evidence than a
-cross-vendor review (R-016).
+**Checkpoint:** CP-021 · **Date:** 2026-09-21 · **Branch:** `main`
+**Agents:** Claude (Opus 5) wrote T-128 to T-132.1. Codex independently reviewed CP-016 to CP-020
+(`Docs/reviews/2026-09-21-checkpoints-review-codex.md`). Claude corrected F1 and F2 (T-132.1,
+D-048) and self-reviewed the fix.
 **Expected next agent:** either (D-028).
 
 ---
@@ -24,7 +24,7 @@ The specs carry the evidence tables and self-reviews; STATE's CP-019 section is 
 
 ```powershell
 & 'C:\Program Files\Epic Games\UE_5.8\Engine\Build\BatchFiles\Build.bat' VoxelWorldEditor Win64 Development '-Project=C:\Dev\VoxelWorld\VoxelWorld.uproject' -WaitMutex
-& 'C:\Program Files\Epic Games\UE_5.8\Engine\Binaries\Win64\UnrealEditor-Cmd.exe' 'C:\Dev\VoxelWorld\VoxelWorld.uproject' '-ExecCmds=Automation RunTests TerrainCore; Quit' -unattended -nopause -nosplash -nullrhi -log   # 42/42
+& 'C:\Program Files\Epic Games\UE_5.8\Engine\Binaries\Win64\UnrealEditor-Cmd.exe' 'C:\Dev\VoxelWorld\VoxelWorld.uproject' '-ExecCmds=Automation RunTests TerrainCore; Quit' -unattended -nopause -nosplash -nullrhi -log   # 43/43
 python Tools\Test-TerrainSettlement.py            # hard kills + journal audit + two refusals
 .\Tools\Test-TerrainMultiplayer.ps1 -Rounds 3 -IncludeObserver -CheckpointCapture   # joins, materials, ledger audit per round
 .\Tools\Test-TerrainMultiplayer.ps1 -Rounds 2 -DurationSeconds 30 -CheckpointCapture -DropOp 20
@@ -54,7 +54,7 @@ report, rulings and self-review are in `Docs/proposals/P-011-stress-profile.md`,
 
 ## What is NOT done, stated plainly
 
-- **Throughput at the design point (T-133, next):** 96 edits/s is not sustained on this machine
+- **Throughput at the design point (T-133, after T-132.2):** 96 edits/s is not sustained on this machine
   (71–78/s). The fix is journal group commit plus a checkpoint trigger priced in chunks (P-011 §4).
 - **Player identity** (R-017): owners come from the Null online subsystem, which is per machine at
   best. A real login is a Director decision in Phase 4.
@@ -67,9 +67,77 @@ report, rulings and self-review are in `Docs/proposals/P-011-stress-profile.md`,
 - **Journal trimming, retention pins and backups** are not built.
 - **Resync has no rate limit** (P-008 §7).
 - **K9's SingleIndex switch** is deferred, because it changes how terrain looks.
-- **Cross-agent review of P-005 to P-010** is worth doing when Codex is next available.
+- **Codex review F3 to F6 are open** (T-132.2 next; F6 with Linux). The specs P-005 to P-010 themselves
+  have still not had a cross-vendor design read; CP-021's review covered the code of CP-016 to CP-020.
 
 ## Next safe action
+
+### Independent review completed (Codex, 2026-09-21)
+
+- Director requested review of all Claude changes recorded in the September 21 checkpoints.
+- Role: independent reviewer; R3 review, no implementation or decision changes authorized by this request.
+- Base: `6a10a84` on clean, synchronized `main` before this note. Scope: CP-016 through CP-020, including the September 20 implementation commits recorded by CP-016 (`555261c^..6a10a84`).
+- Report: `Docs/reviews/2026-09-21-checkpoints-review-codex.md`. Verdict: changes requested, two P1 and four P2 findings. P1: normal checkpoint publication lacks the settlement watermark (reproduced restart refusal at G=3/W=0); copy-before-write capture failure can discard dirty history without disabling later captures (source-traced).
+- P2: settlement window exceeded 32 (reproduced 34); stress gate accepts failed ledger audit (reproduced); crash matrix lacks an acknowledged-history lower bound; Linux bootstrap omits parent-directory durability for the world root (last two source-traced).
+- Verification: both Win64 build targets succeeded (up to date), TerrainCore 42/42 passed, checkpoint/restart and writer-lease harnesses passed, and two-round observer/drop-op multiplayer passed with ledger audits. Exact commands, evidence paths, qualifications and unrerun tests are in the report.
+- No production code, tests, configuration, assets or checkpoint documents changed. Only this handoff and the review report are tracked changes; diagnostics are under ignored `Saved/`. No checkpoint, commit, or push requested or performed.
+- Next safe action: Director selects the correction scope. Reviewer recommends resolving F1/F2 and their regression coverage before T-133, then F3-F5 and the full stress gate; F6 needs Linux durability correction/validation. The previously planned T-133 work remains below for context and is not started.
+
+### F1 and F2 corrected (Claude, recorded at CP-021 as T-132.1, D-048)
+
+- **Task:** correct the review's two P1 findings before T-133. R3 (persistence). The Director
+  ruled the correction scope by forwarding the review. Writer and self-reviewer were the same
+  agent (Claude); Codex's review is the independent half. Base `6a10a84`. Codex's report and
+  handoff note above are preserved unchanged.
+- **F1, fixed.** The pump takes the watermark W as a required argument to `Begin` and `Advance`.
+  The setter and its "everything settled" default are gone. Publication has one boundary,
+  `FTerrainCapturePump::TryPublish`, which the empty cut also goes through. The service supplies
+  `Settlement->GetWatermark()` on every call (`MAX_uint64` with no ledger). The synchronous
+  `TerrainCaptureCheckpoint` passes MAX and is documented as for ledger-less worlds only. It is
+  used by tests only.
+- **F2, fixed.** Every capture end (a `Begin` refusal, an immediate empty publish, `NoticeWrite`
+  or `Advance`) sets a completion flag that `ConsumeCompletion()` reports exactly once. The service
+  consumes it right after `NoticeWrite` in Apply, after `Begin` and `Advance`, and as a backstop at
+  the top of `MaybeCaptureCheckpoint`. A failed or refused cut hands back all its keys
+  (`TakeCut`), and `FinishCapture` merges them into `DirtyChunks`, where the newer OpSeq wins. That
+  is in addition to the existing session latch, so the dirty set is honest even without the latch.
+- **Found in self-review, same class as F2:** a `Begin` refusal returned its error without storing
+  it in `Result()`. `FinishCapture` therefore read it as success and dropped the cut's dirty set.
+  The fix above covers it, and the pump test asserts it.
+- **New test** `TerrainCore.Persistence.Capture.Service`: a real `UTerrainService` inside an
+  initialised game `UWorld` that never begins play, so `CommitOp` really runs. It uses a live
+  settlement worker whose W only moves when the test polls it, and a backend that can fail reads
+  on demand. It covers F1's non-empty and empty cuts, and F2 per Codex's trace (B restored from
+  the checkpoint and hash-compared). **Mutation-checked:** removing the W wiring, bypassing
+  `TryPublish` on the empty cut, removing both completion consumers, or removing the merge each
+  fails it. Removing only the backstop consumer passes, as designed, because Apply already
+  consumes. The pump test gained completion-once and refusal-returns-keys checks.
+- **Evidence (final source):** both Win64 targets build. **43/43 TerrainCore automation**
+  (`Saved/Logs/F1F2-Automation.log`). Codex's `python Saved/CodexReview-Cut.py`: the first cut
+  waited 20.02 s for W, then published at G=1; the kill and restart booted, settled 34 records and
+  **the ledger audit PASSED** (`Saved/Logs/CodexReview-Cut-5b91273b14`; before the fix: G=3, W=0,
+  refused). Settlement kill test, checkpoint and lease harnesses PASS. MP 2 rounds with observer,
+  capture and `-DropOp 5` PASS, with both ledger audits. **Stress 5,000:** PASS, 254 chunks
+  verified, ledger audit exact over 7,722 edits, 31 checkpoints (T-132 had 29), unsettled max 6,
+  settle latency max 132 ms. That is the most the W wait adds to a publication. Throughput
+  unchanged at 76.7/s (R-018) (`Saved/Logs/StressTest-4b41bdc47a51`).
+- **Not done:** F3 to F6. P-011's claim that G <= W is enforced at publication is now true, but
+  P-011, ARCHITECTURE and STATE are not yet annotated. That is checkpoint text.
+- **Recorded at CP-021** with the review report. STATE, D-048, BACKLOG, RISKS (R-016, R-007) and
+  P-011's correction note are updated.
+
+### Next safe actions, in order
+
+1. **T-132.2: Codex review F3 to F5.** These are R3 persistence tests and gates, and fall under
+   the standing instruction. See BACKLOG for the scope:
+   - F3: the settlement window checked per mutation; reproduce with
+     `Tools/Test-TerrainStress.ps1 -Edits 100 -LiveSeconds 2 -ExtraArgs '-TerrainSettleDelay=2' -ServerIni 'bCheckpointCapture=False'`,
+     which must report unsettled max ≤ 32;
+   - F4: the stress verdict requires the ledger audit; the negative control is `-ServerIni 'SettlementModule=None'`,
+     which must not print PASS;
+   - F5: the crash matrix's lower bound.
+2. **T-133: journal group commit** (below), then the full default stress run.
+3. **F6** with the first Linux build (R-007).
 
 **T-133: journal group commit and checkpoint trigger policy** (P-011 §4). Batch every commit in
 one pump call behind a single flush, and broadcast and settle only after that flush. It needs a

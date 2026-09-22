@@ -271,6 +271,12 @@ private:
 	/** Handles a capture that has just ended, successfully or not. */
 	void FinishCapture();
 
+	/** Calls FinishCapture if the pump reports an end not yet handled, from whichever entry point. */
+	void ConsumeCaptureCompletion();
+
+	/** The durable settlement watermark W the pump must not publish past; MAX_uint64 with no ledger. */
+	FTerrainOpSeq CaptureSettledThrough() const;
+
 	/**
 	 * Advances the background retention collector by one step, or starts a cycle when one is owed
 	 * and no capture is running (DEF-9). Game thread, from TickService.
@@ -368,6 +374,7 @@ private:
 	friend class FTerrainRevisionMonotonicTest;
 	friend class FTerrainServiceLifecycleTest;
 	friend class FTerrainCheckpointTest;
+	friend class FTerrainCaptureServiceTest;
 	friend class FTerrainReplayValidationTest;
 	friend class FTerrainCommitJournalTest;
 #endif
